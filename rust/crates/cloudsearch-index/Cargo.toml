@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 cloudsearch-common = { path = "../cloudsearch-common" }
+cloudsearch-storage = { path = "../cloudsearch-storage" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
