@@ -79,6 +79,26 @@ pub struct IndexDocument {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexDocumentRequest {
+    pub id: String,
+    pub source: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexDocumentResponse {
+    pub id: String,
+    pub result: &'static str,
+    pub sequence_number: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetDocumentResponse {
+    pub id: String,
+    pub found: bool,
+    pub source: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
     pub status: &'static str,
 }
