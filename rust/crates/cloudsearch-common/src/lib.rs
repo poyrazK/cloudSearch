@@ -14,6 +14,10 @@ pub enum CloudSearchError {
     IndexNotFound(String),
     #[error("invalid index name '{0}'")]
     InvalidIndexName(String),
+    #[error("invalid WAL record: {0}")]
+    InvalidWalRecord(String),
+    #[error("WAL checksum mismatch")]
+    WalChecksumMismatch,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
@@ -66,6 +70,12 @@ impl IndexMetadata {
 pub struct CreateIndexRequest {
     #[serde(default)]
     pub settings: IndexSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexDocument {
+    pub id: String,
+    pub source: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
