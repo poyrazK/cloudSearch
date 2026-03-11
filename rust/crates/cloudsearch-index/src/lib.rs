@@ -121,6 +121,10 @@ impl IndexHandle {
         &self.documents
     }
 
+    pub fn get_document(&self, document_id: &str) -> Option<&IndexDocument> {
+        self.documents.get(document_id)
+    }
+
     pub async fn index_document(&mut self, document: IndexDocument) -> Result<u64> {
         let sequence_number = self.last_sequence_number + 1;
         self.wal
@@ -264,5 +268,38 @@ mod tests {
         assert_eq!(recovered.documents().len(), 1);
         assert!(recovered.documents().contains_key("doc-2"));
         assert!(!recovered.documents().contains_key("doc-1"));
+    }
+
+    #[tokio::test]
+    async fn gets_document_by_id_after_reopen() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-42".to_string(),
+                source: serde_json::json!({"message": "persist me"}),
+            })
+            .await
+            .expect("index doc");
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+        let document = reopened.get_document("doc-42").expect("document exists");
+
+        assert_eq!(document.id, "doc-42");
+        assert_eq!(document.source["message"], "persist me");
+        assert!(reopened.get_document("missing").is_none());
     }
 }
