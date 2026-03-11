@@ -1,5 +1,8 @@
-use cloudsearch_common::{CloudSearchError, CreateIndexRequest, IndexMetadata, Result};
-use std::path::{Path, PathBuf};
+use cloudsearch_common::{
+    CloudSearchError, CreateIndexRequest, IndexDocument, IndexMetadata, Result,
+};
+use cloudsearch_storage::{WalManager, WalRecord};
+use std::{collections::BTreeMap, path::{Path, PathBuf}};
 use tokio::fs;
 
 #[derive(Debug, Clone)]
@@ -55,6 +58,35 @@ impl IndexCatalog {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    pub async fn open_index(&self, name: &str) -> Result<IndexHandle> {
+        let metadata = self.get_index(name).await?;
+        let wal = WalManager::open(self.index_dir(name).join("wal")).await?;
+        let entries = wal.replay().await?;
+
+        let mut documents = BTreeMap::new();
+        let mut last_sequence_number = 0;
+
+        for entry in entries {
+            last_sequence_number = entry.sequence_number;
+            match entry.record {
+                WalRecord::IndexDocument { document } => {
+                    documents.insert(document.id.clone(), document);
+                }
+                WalRecord::DeleteDocument { document_id } => {
+                    documents.remove(&document_id);
+                }
+                WalRecord::MappingUpdate { .. } => {}
+            }
+        }
+
+        Ok(IndexHandle {
+            metadata,
+            wal,
+            documents,
+            last_sequence_number,
+        })
+    }
+
     pub fn root_dir(&self) -> &Path {
         &self.root_dir
     }
@@ -69,6 +101,54 @@ impl IndexCatalog {
 
     fn metadata_path(&self, name: &str) -> PathBuf {
         self.index_dir(name).join("metadata.json")
+    }
+}
+
+#[derive(Debug)]
+pub struct IndexHandle {
+    metadata: IndexMetadata,
+    wal: WalManager,
+    documents: BTreeMap<String, IndexDocument>,
+    last_sequence_number: u64,
+}
+
+impl IndexHandle {
+    pub fn metadata(&self) -> &IndexMetadata {
+        &self.metadata
+    }
+
+    pub fn documents(&self) -> &BTreeMap<String, IndexDocument> {
+        &self.documents
+    }
+
+    pub async fn index_document(&mut self, document: IndexDocument) -> Result<u64> {
+        let sequence_number = self.last_sequence_number + 1;
+        self.wal
+            .append(
+                sequence_number,
+                WalRecord::IndexDocument {
+                    document: document.clone(),
+                },
+            )
+            .await?;
+        self.documents.insert(document.id.clone(), document);
+        self.last_sequence_number = sequence_number;
+        Ok(sequence_number)
+    }
+
+    pub async fn delete_document(&mut self, document_id: &str) -> Result<u64> {
+        let sequence_number = self.last_sequence_number + 1;
+        self.wal
+            .append(
+                sequence_number,
+                WalRecord::DeleteDocument {
+                    document_id: document_id.to_string(),
+                },
+            )
+            .await?;
+        self.documents.remove(document_id);
+        self.last_sequence_number = sequence_number;
+        Ok(sequence_number)
     }
 }
 
@@ -144,5 +224,45 @@ mod tests {
             .expect_err("duplicate should fail");
 
         assert!(matches!(error, CloudSearchError::IndexAlreadyExists(_)));
+    }
+
+    #[tokio::test]
+    async fn replays_documents_from_wal() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "hello"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"message": "world"}),
+            })
+            .await
+            .expect("index doc");
+        handle.delete_document("doc-1").await.expect("delete doc");
+
+        let recovered = catalog.open_index("logs").await.expect("recover index");
+
+        assert_eq!(recovered.documents().len(), 1);
+        assert!(recovered.documents().contains_key("doc-2"));
+        assert!(!recovered.documents().contains_key("doc-1"));
     }
 }

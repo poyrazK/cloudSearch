@@ -1,11 +1,12 @@
 [package]
-name = "cloudsearch-index"
-version = "0.1.0"
-edition = "2024"
+name = "cloudsearch-storage"
+edition.workspace = true
+version.workspace = true
 
 [dependencies]
+chrono.workspace = true
 cloudsearch-common = { path = "../cloudsearch-common" }
-cloudsearch-storage = { path = "../cloudsearch-storage" }
+crc32c.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

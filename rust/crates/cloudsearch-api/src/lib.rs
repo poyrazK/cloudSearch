@@ -63,7 +63,10 @@ impl IntoResponse for ApiError {
             CloudSearchError::IndexAlreadyExists(_) => StatusCode::CONFLICT,
             CloudSearchError::IndexNotFound(_) => StatusCode::NOT_FOUND,
             CloudSearchError::InvalidIndexName(_) => StatusCode::BAD_REQUEST,
-            CloudSearchError::Io(_) | CloudSearchError::Serde(_) => {
+            CloudSearchError::InvalidWalRecord(_)
+            | CloudSearchError::WalChecksumMismatch
+            | CloudSearchError::Io(_)
+            | CloudSearchError::Serde(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
