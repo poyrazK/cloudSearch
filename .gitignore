@@ -1,1 +1,10 @@
 opencode.json
+
+# Rust build output
+rust/target/
+
+# Local runtime data
+data/
+
+# macOS
+.DS_Store
