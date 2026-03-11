@@ -1,0 +1,17 @@
+[package]
+name = "cloudsearch-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum.workspace = true
+cloudsearch-common = { path = "../cloudsearch-common" }
+cloudsearch-index = { path = "../cloudsearch-index" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tower.workspace = true
+tempfile.workspace = true
