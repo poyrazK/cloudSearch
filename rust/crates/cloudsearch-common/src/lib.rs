@@ -98,6 +98,48 @@ pub struct GetDocumentResponse {
     pub source: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SearchRequest {
+    pub query: Option<SearchQuery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchQuery {
+    MatchAll,
+    Term(TermQuery),
+    Bool(BoolQuery),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TermQuery {
+    pub field: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BoolQuery {
+    #[serde(default)]
+    pub filter: Vec<SearchQuery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchResponse {
+    pub hits: HitsMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HitsMetadata {
+    pub total: usize,
+    pub hits: Vec<SearchHit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchHit {
+    pub id: String,
+    pub source: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
     pub status: &'static str,

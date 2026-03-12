@@ -7,7 +7,7 @@ use axum::{
 };
 use cloudsearch_common::{
     CloudSearchError, CreateIndexRequest, ErrorResponse, GetDocumentResponse, HealthResponse,
-    IndexDocument, IndexDocumentRequest, IndexDocumentResponse,
+    IndexDocument, IndexDocumentRequest, IndexDocumentResponse, SearchRequest,
 };
 use cloudsearch_index::IndexCatalog;
 use std::sync::Arc;
@@ -29,6 +29,7 @@ pub fn router(catalog: Arc<IndexCatalog>) -> Router {
         .route("/{index}", put(create_index).get(get_index))
         .route("/{index}/_doc", put(index_document))
         .route("/{index}/_doc/{id}", get(get_document))
+        .route("/{index}/_search", put(search_index).post(search_index))
         .with_state(ApiState::new(catalog))
 }
 
@@ -95,6 +96,15 @@ async fn get_document(
     ))
 }
 
+async fn search_index(
+    State(state): State<ApiState>,
+    Path(index): Path<String>,
+    Json(request): Json<SearchRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let handle = state.catalog.open_index(&index).await?;
+    Ok((StatusCode::OK, Json(handle.search(&request))))
+}
+
 #[derive(Debug)]
 struct ApiError(CloudSearchError);
 
@@ -126,7 +136,10 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
-    use cloudsearch_common::{CreateIndexRequest, IndexDocumentRequest, IndexSettings};
+    use cloudsearch_common::{
+        BoolQuery, CreateIndexRequest, IndexDocumentRequest, IndexSettings, SearchQuery,
+        SearchRequest, TermQuery,
+    };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -259,5 +272,122 @@ mod tests {
 
         assert!(body_text.contains("doc-1"));
         assert!(body_text.contains("hello from api"));
+    }
+
+    #[tokio::test]
+    async fn searches_documents_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        for request in [
+            IndexDocumentRequest {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "billing", "level": "info"}),
+            },
+            IndexDocumentRequest {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"service": "search", "level": "info"}),
+            },
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/logs/_doc")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize index request"),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("index response");
+
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        let term_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest {
+                            query: Some(SearchQuery::Term(TermQuery {
+                                field: "service".to_string(),
+                                value: serde_json::json!("billing"),
+                            })),
+                        })
+                        .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        assert_eq!(term_response.status(), StatusCode::OK);
+        let term_body = term_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let term_text = String::from_utf8(term_body.to_vec()).expect("utf8");
+        assert!(term_text.contains("\"total\":1"));
+        assert!(term_text.contains("doc-1"));
+
+        let bool_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest {
+                            query: Some(SearchQuery::Bool(BoolQuery {
+                                filter: vec![SearchQuery::Term(TermQuery {
+                                    field: "level".to_string(),
+                                    value: serde_json::json!("info"),
+                                })],
+                            })),
+                        })
+                        .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        assert_eq!(bool_response.status(), StatusCode::OK);
+        let bool_body = bool_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let bool_text = String::from_utf8(bool_body.to_vec()).expect("utf8");
+        assert!(bool_text.contains("\"total\":2"));
     }
 }

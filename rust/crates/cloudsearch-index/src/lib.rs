@@ -1,5 +1,6 @@
 use cloudsearch_common::{
-    CloudSearchError, CreateIndexRequest, IndexDocument, IndexMetadata, Result,
+    CloudSearchError, CreateIndexRequest, HitsMetadata, IndexDocument, IndexMetadata, Result,
+    SearchHit, SearchQuery, SearchRequest, SearchResponse,
 };
 use cloudsearch_storage::{WalManager, WalRecord};
 use std::{collections::BTreeMap, path::{Path, PathBuf}};
@@ -125,6 +126,26 @@ impl IndexHandle {
         self.documents.get(document_id)
     }
 
+    pub fn search(&self, request: &SearchRequest) -> SearchResponse {
+        let query = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll);
+        let hits = self
+            .documents
+            .values()
+            .filter(|document| matches_query(document, query))
+            .map(|document| SearchHit {
+                id: document.id.clone(),
+                source: document.source.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        SearchResponse {
+            hits: HitsMetadata {
+                total: hits.len(),
+                hits,
+            },
+        }
+    }
+
     pub async fn index_document(&mut self, document: IndexDocument) -> Result<u64> {
         let sequence_number = self.last_sequence_number + 1;
         self.wal
@@ -156,6 +177,20 @@ impl IndexHandle {
     }
 }
 
+fn matches_query(document: &IndexDocument, query: &SearchQuery) -> bool {
+    match query {
+        SearchQuery::MatchAll => true,
+        SearchQuery::Term(term) => document
+            .source
+            .get(&term.field)
+            .is_some_and(|value| value == &term.value),
+        SearchQuery::Bool(bool_query) => bool_query
+            .filter
+            .iter()
+            .all(|filter_query| matches_query(document, filter_query)),
+    }
+}
+
 fn validate_index_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 255
@@ -173,7 +208,10 @@ fn validate_index_name(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cloudsearch_common::{CreateIndexRequest, IndexSettings, MappingMode};
+    use cloudsearch_common::{
+        BoolQuery, CreateIndexRequest, IndexSettings, MappingMode, SearchQuery, SearchRequest,
+        TermQuery,
+    };
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -301,5 +339,62 @@ mod tests {
         assert_eq!(document.id, "doc-42");
         assert_eq!(document.source["message"], "persist me");
         assert!(reopened.get_document("missing").is_none());
+    }
+
+    #[tokio::test]
+    async fn searches_match_all_and_term_queries_after_reopen() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "billing", "level": "info"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"service": "search", "level": "info"}),
+            })
+            .await
+            .expect("index doc");
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+
+        let match_all = reopened.search(&SearchRequest::default());
+        assert_eq!(match_all.hits.total, 2);
+
+        let term = reopened.search(&SearchRequest {
+            query: Some(SearchQuery::Term(TermQuery {
+                field: "service".to_string(),
+                value: serde_json::json!("billing"),
+            })),
+        });
+        assert_eq!(term.hits.total, 1);
+        assert_eq!(term.hits.hits[0].id, "doc-1");
+
+        let filtered = reopened.search(&SearchRequest {
+            query: Some(SearchQuery::Bool(BoolQuery {
+                filter: vec![SearchQuery::Term(TermQuery {
+                    field: "level".to_string(),
+                    value: serde_json::json!("info"),
+                })],
+            })),
+        });
+        assert_eq!(filtered.hits.total, 2);
     }
 }
