@@ -111,10 +111,10 @@ fn stop_node(child: &mut Child) {
 
 async fn wait_for_health(client: &Client, base_url: &str) {
     for _ in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/_health")).send().await {
-            if response.status().is_success() {
-                return;
-            }
+        if let Ok(response) = client.get(format!("{base_url}/_health")).send().await
+            && response.status().is_success()
+        {
+            return;
         }
 
         sleep(Duration::from_millis(100)).await;
