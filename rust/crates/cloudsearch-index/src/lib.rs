@@ -397,4 +397,314 @@ mod tests {
         });
         assert_eq!(filtered.hits.total, 2);
     }
+
+    #[tokio::test]
+    async fn latest_document_version_wins_after_reopen() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "first"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "second"}),
+            })
+            .await
+            .expect("overwrite doc");
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+        let document = reopened.get_document("doc-1").expect("document exists");
+
+        assert_eq!(document.source["message"], "second");
+    }
+
+    #[tokio::test]
+    async fn search_handles_empty_indexes_missing_fields_and_multiple_filters() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let empty = catalog.open_index("logs").await.expect("open empty index");
+        assert_eq!(empty.search(&SearchRequest::default()).hits.total, 0);
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "billing", "level": "info", "active": true}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"service": "billing", "level": "error", "active": false}),
+            })
+            .await
+            .expect("index doc");
+        handle.delete_document("doc-2").await.expect("delete doc");
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+
+        let missing_field = reopened.search(&SearchRequest {
+            query: Some(SearchQuery::Term(TermQuery {
+                field: "missing".to_string(),
+                value: serde_json::json!("nope"),
+            })),
+        });
+        assert_eq!(missing_field.hits.total, 0);
+
+        let multiple_filters = reopened.search(&SearchRequest {
+            query: Some(SearchQuery::Bool(BoolQuery {
+                filter: vec![
+                    SearchQuery::Term(TermQuery {
+                        field: "service".to_string(),
+                        value: serde_json::json!("billing"),
+                    }),
+                    SearchQuery::Term(TermQuery {
+                        field: "active".to_string(),
+                        value: serde_json::json!(true),
+                    }),
+                ],
+            })),
+        });
+        assert_eq!(multiple_filters.hits.total, 1);
+        assert_eq!(multiple_filters.hits.hits[0].id, "doc-1");
+    }
+
+    #[tokio::test]
+    async fn repeated_reopen_preserves_overwrite_and_delete_sequence() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut first = catalog.open_index("logs").await.expect("open index");
+        first
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "first"}),
+            })
+            .await
+            .expect("index doc");
+
+        let mut second = catalog.open_index("logs").await.expect("reopen index");
+        second
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "second"}),
+            })
+            .await
+            .expect("overwrite doc");
+        second.delete_document("doc-1").await.expect("delete doc");
+        second
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"message": "survivor"}),
+            })
+            .await
+            .expect("index doc");
+
+        let third = catalog.open_index("logs").await.expect("reopen index");
+        assert!(third.get_document("doc-1").is_none());
+        assert_eq!(third.search(&SearchRequest::default()).hits.total, 1);
+        assert_eq!(third.get_document("doc-2").unwrap().source["message"], "survivor");
+    }
+
+    #[tokio::test]
+    async fn deleting_missing_document_is_safe_across_reopen() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        let sequence = handle
+            .delete_document("missing-doc")
+            .await
+            .expect("delete missing doc");
+        assert_eq!(sequence, 1);
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+        assert_eq!(reopened.search(&SearchRequest::default()).hits.total, 0);
+        assert!(reopened.get_document("missing-doc").is_none());
+    }
+
+    #[tokio::test]
+    async fn boolean_and_numeric_term_queries_match_exact_values() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"active": true, "latency": 42}),
+            })
+            .await
+            .expect("index doc");
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+
+        let bool_query = reopened.search(&SearchRequest {
+            query: Some(SearchQuery::Term(TermQuery {
+                field: "active".to_string(),
+                value: serde_json::json!(true),
+            })),
+        });
+        assert_eq!(bool_query.hits.total, 1);
+
+        let numeric_query = reopened.search(&SearchRequest {
+            query: Some(SearchQuery::Term(TermQuery {
+                field: "latency".to_string(),
+                value: serde_json::json!(42),
+            })),
+        });
+        assert_eq!(numeric_query.hits.total, 1);
+
+        let wrong_type = reopened.search(&SearchRequest {
+            query: Some(SearchQuery::Term(TermQuery {
+                field: "latency".to_string(),
+                value: serde_json::json!("42"),
+            })),
+        });
+        assert_eq!(wrong_type.hits.total, 0);
+    }
+
+    #[tokio::test]
+    async fn deleted_documents_do_not_appear_in_match_all_after_reopen() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "remove me"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"message": "keep me"}),
+            })
+            .await
+            .expect("index doc");
+        handle.delete_document("doc-1").await.expect("delete doc");
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+        let all = reopened.search(&SearchRequest::default());
+
+        assert_eq!(all.hits.total, 1);
+        assert_eq!(all.hits.hits[0].id, "doc-2");
+    }
+
+    #[tokio::test]
+    async fn bool_filter_with_no_clauses_matches_all_documents() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "a"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"message": "b"}),
+            })
+            .await
+            .expect("index doc");
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+        let result = reopened.search(&SearchRequest {
+            query: Some(SearchQuery::Bool(BoolQuery { filter: vec![] })),
+        });
+
+        assert_eq!(result.hits.total, 2);
+    }
 }
