@@ -8,3 +8,9 @@ axum.workspace = true
 cloudsearch-api = { path = "../cloudsearch-api" }
 cloudsearch-index = { path = "../cloudsearch-index" }
 tokio.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
