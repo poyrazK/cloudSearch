@@ -14,9 +14,16 @@ const DEFAULT_GENERATION: u64 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WalRecord {
-    IndexDocument { document: IndexDocument },
-    DeleteDocument { document_id: String },
-    MappingUpdate { mapping_version: u64, reason: String },
+    IndexDocument {
+        document: IndexDocument,
+    },
+    DeleteDocument {
+        document_id: String,
+    },
+    MappingUpdate {
+        mapping_version: u64,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,10 +155,9 @@ impl WalManager {
 
     async fn current_generation(&self) -> Result<u64> {
         let content = fs::read_to_string(self.current_path()).await?;
-        content
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| CloudSearchError::InvalidWalRecord("invalid CURRENT generation".to_string()))
+        content.trim().parse::<u64>().map_err(|_| {
+            CloudSearchError::InvalidWalRecord("invalid CURRENT generation".to_string())
+        })
     }
 
     fn current_path(&self) -> PathBuf {
@@ -275,7 +281,10 @@ mod tests {
         bytes[payload_offset] ^= 0x01;
         fs::write(log_path, bytes).await.expect("rewrite wal");
 
-        let error = manager.replay().await.expect_err("checksum mismatch should fail");
+        let error = manager
+            .replay()
+            .await
+            .expect_err("checksum mismatch should fail");
         assert!(matches!(error, CloudSearchError::WalChecksumMismatch));
     }
 
@@ -311,7 +320,10 @@ mod tests {
             .await
             .expect("rewrite current");
 
-        let error = manager.replay().await.expect_err("invalid current should fail");
+        let error = manager
+            .replay()
+            .await
+            .expect_err("invalid current should fail");
         assert!(matches!(error, CloudSearchError::InvalidWalRecord(_)));
     }
 
@@ -338,7 +350,10 @@ mod tests {
         bytes[1] = 99;
         fs::write(log_path, bytes).await.expect("rewrite wal");
 
-        let error = manager.replay().await.expect_err("unknown record type should fail");
+        let error = manager
+            .replay()
+            .await
+            .expect_err("unknown record type should fail");
         assert!(matches!(error, CloudSearchError::InvalidWalRecord(_)));
     }
 

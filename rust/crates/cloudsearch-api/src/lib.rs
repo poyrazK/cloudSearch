@@ -123,12 +123,16 @@ impl IntoResponse for ApiError {
             CloudSearchError::InvalidWalRecord(_)
             | CloudSearchError::WalChecksumMismatch
             | CloudSearchError::Io(_)
-            | CloudSearchError::Serde(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            | CloudSearchError::Serde(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
-        (status, Json(ErrorResponse { error: self.0.to_string() })).into_response()
+        (
+            status,
+            Json(ErrorResponse {
+                error: self.0.to_string(),
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -187,7 +191,12 @@ mod tests {
         );
 
         let get_response = app
-            .oneshot(Request::builder().uri("/logs").body(Body::empty()).expect("request"))
+            .oneshot(
+                Request::builder()
+                    .uri("/logs")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
             .await
             .expect("get response");
 
@@ -565,12 +574,15 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(&body).expect("deserialize search response");
 
-        assert_eq!(value, serde_json::json!({
-            "hits": {
-                "total": 0,
-                "hits": []
-            }
-        }));
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "hits": {
+                    "total": 0,
+                    "hits": []
+                }
+            })
+        );
     }
 
     #[tokio::test]
@@ -697,7 +709,10 @@ mod tests {
             .to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
 
-        assert_eq!(value, serde_json::json!({"error": "index 'document 'missing'' not found"}));
+        assert_eq!(
+            value,
+            serde_json::json!({"error": "index 'document 'missing'' not found"})
+        );
     }
 
     #[tokio::test]

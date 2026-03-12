@@ -26,6 +26,7 @@ Initial documentation:
 - `docs/index-lifecycle.md` - index state machine, write visibility, recovery, and deletion behavior
 - `docs/wal-format.md` - write-ahead log records, checkpoints, replay, and durability rules
 - `docs/query-ast.md` - internal Rust query model, normalization, and execution contracts
+- `docs/ci.md` - CI workflow, required checks, and GitHub CLI commands for watching runs
 - `docs/roadmap.md` - phased delivery plan from single-node engine to SaaS-ready platform
 
 Working principles:

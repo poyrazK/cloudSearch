@@ -3,7 +3,10 @@ use cloudsearch_common::{
     SearchHit, SearchQuery, SearchRequest, SearchResponse,
 };
 use cloudsearch_storage::{WalManager, WalRecord};
-use std::{collections::BTreeMap, path::{Path, PathBuf}};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 use tokio::fs;
 
 #[derive(Debug, Clone)]
@@ -236,7 +239,10 @@ mod tests {
         let loaded = catalog.get_index("logs_v1").await.expect("load index");
 
         assert_eq!(loaded.name, metadata.name);
-        assert_eq!(loaded.settings.primary_time_field.as_deref(), Some("@timestamp"));
+        assert_eq!(
+            loaded.settings.primary_time_field.as_deref(),
+            Some("@timestamp")
+        );
     }
 
     #[tokio::test]
@@ -545,7 +551,10 @@ mod tests {
         let third = catalog.open_index("logs").await.expect("reopen index");
         assert!(third.get_document("doc-1").is_none());
         assert_eq!(third.search(&SearchRequest::default()).hits.total, 1);
-        assert_eq!(third.get_document("doc-2").unwrap().source["message"], "survivor");
+        assert_eq!(
+            third.get_document("doc-2").unwrap().source["message"],
+            "survivor"
+        );
     }
 
     #[tokio::test]

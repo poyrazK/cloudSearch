@@ -24,17 +24,12 @@ pub enum CloudSearchError {
     Serde(#[from] serde_json::Error),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MappingMode {
     Strict,
+    #[default]
     ControlledDynamic,
-}
-
-impl Default for MappingMode {
-    fn default() -> Self {
-        Self::ControlledDynamic
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
