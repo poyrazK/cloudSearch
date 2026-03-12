@@ -250,4 +250,174 @@ mod tests {
         let entries = manager.replay().await.expect("replay");
         assert_eq!(entries.len(), 1);
     }
+
+    #[tokio::test]
+    async fn fails_on_checksum_mismatch() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "hello"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        let log_path = manager.wal_dir().join("000001.log");
+        let mut bytes = fs::read(&log_path).await.expect("read wal");
+        let payload_offset = HEADER_LEN;
+        bytes[payload_offset] ^= 0x01;
+        fs::write(log_path, bytes).await.expect("rewrite wal");
+
+        let error = manager.replay().await.expect_err("checksum mismatch should fail");
+        assert!(matches!(error, CloudSearchError::WalChecksumMismatch));
+    }
+
+    #[tokio::test]
+    async fn next_sequence_number_advances_with_replayed_entries() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        assert_eq!(manager.next_sequence_number().await.expect("next seq"), 1);
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "hello"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        assert_eq!(manager.next_sequence_number().await.expect("next seq"), 2);
+    }
+
+    #[tokio::test]
+    async fn fails_when_current_generation_file_is_invalid() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        fs::write(manager.wal_dir().join("CURRENT"), "not-a-number\n")
+            .await
+            .expect("rewrite current");
+
+        let error = manager.replay().await.expect_err("invalid current should fail");
+        assert!(matches!(error, CloudSearchError::InvalidWalRecord(_)));
+    }
+
+    #[tokio::test]
+    async fn fails_on_unknown_record_type() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "hello"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        let log_path = manager.wal_dir().join("000001.log");
+        let mut bytes = fs::read(&log_path).await.expect("read wal");
+        bytes[1] = 99;
+        fs::write(log_path, bytes).await.expect("rewrite wal");
+
+        let error = manager.replay().await.expect_err("unknown record type should fail");
+        assert!(matches!(error, CloudSearchError::InvalidWalRecord(_)));
+    }
+
+    #[tokio::test]
+    async fn mapping_update_records_replay_successfully() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::MappingUpdate {
+                    mapping_version: 2,
+                    reason: "dynamic_inference".to_string(),
+                },
+            )
+            .await
+            .expect("append mapping update");
+
+        let entries = manager.replay().await.expect("replay");
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            &entries[0].record,
+            WalRecord::MappingUpdate {
+                mapping_version: 2,
+                reason,
+            } if reason == "dynamic_inference"
+        ));
+    }
+
+    #[tokio::test]
+    async fn replay_stops_at_partial_second_record_and_keeps_first() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "hello"}),
+                    },
+                },
+            )
+            .await
+            .expect("append first doc");
+
+        let payload = serde_json::to_vec(&WalRecord::IndexDocument {
+            document: IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"message": "world"}),
+            },
+        })
+        .expect("serialize payload");
+        let checksum = crc32c::crc32c(&payload);
+
+        let mut header = Vec::with_capacity(HEADER_LEN);
+        header.push(WAL_VERSION);
+        header.push(1);
+        header.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        header.extend_from_slice(&2u64.to_le_bytes());
+        header.extend_from_slice(&Utc::now().timestamp_millis().to_le_bytes());
+        header.extend_from_slice(&checksum.to_le_bytes());
+
+        let log_path = manager.wal_dir().join("000001.log");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(log_path)
+            .await
+            .expect("open log");
+        file.write_all(&header).await.expect("write partial header");
+        file.write_all(&payload[..payload.len() / 2])
+            .await
+            .expect("write partial payload");
+        file.flush().await.expect("flush");
+
+        let entries = manager.replay().await.expect("replay");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].sequence_number, 1);
+    }
 }
