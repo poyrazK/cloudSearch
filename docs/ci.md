@@ -24,13 +24,23 @@ It runs on:
 
 ## Checks
 
-The current CI pipeline runs these commands from `rust/`:
+The current CI pipeline is split into separate jobs:
+
+- `fmt`
+- `clippy`
+- `unit-tests`
+- `integration-tests`
+- `coverage`
+
+Commands run from `rust/`:
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace --all-targets`
+- `cargo test -p cloudsearch-api -p cloudsearch-common -p cloudsearch-index -p cloudsearch-storage`
+- `cargo test -p cloudsearch-node --test node_restart`
+- `cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info`
 
-This means formatting issues, clippy warnings, and failing tests all block the PR.
+This means formatting issues, clippy warnings, failing tests, and coverage generation failures all block the PR.
 
 ## Why This Is Strict By Default
 
@@ -50,7 +60,9 @@ Run these locally before pushing:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+cargo test -p cloudsearch-api -p cloudsearch-common -p cloudsearch-index -p cloudsearch-storage
+cargo test -p cloudsearch-node --test node_restart
+cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
 ```
 
 If needed, auto-format locally with:
@@ -97,11 +109,21 @@ For every change:
 
 The assistant must never merge a PR automatically.
 
+## Coverage
+
+Coverage is generated with `cargo llvm-cov` and uploaded as a workflow artifact.
+
+Current policy:
+
+- coverage runs on every PR to `main`
+- coverage is reported, but not yet enforced with a hard percentage threshold
+- the artifact can be downloaded from the GitHub Actions run for deeper inspection
+
 ## Future CI Improvements
 
 Good next steps after the current pipeline is stable:
 
-- add coverage reporting with `cargo llvm-cov`
-- upload test or coverage artifacts
-- split heavier integration tests from lighter unit tests if runtime grows
+- add `cargo audit` as a separate security job
+- publish coverage summaries directly in PR comments or step summaries
+- split heavier integration suites further if runtime grows
 - add release workflows for tagged builds later
