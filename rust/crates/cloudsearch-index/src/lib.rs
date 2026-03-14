@@ -1,6 +1,7 @@
+use chrono::{DateTime, Utc};
 use cloudsearch_common::{
-    CloudSearchError, CreateIndexRequest, HitsMetadata, IndexDocument, IndexMetadata, Result,
-    SearchHit, SearchQuery, SearchRequest, SearchResponse,
+    CloudSearchError, CreateIndexRequest, HitsMetadata, IndexDocument, IndexMetadata, RangeQuery,
+    Result, SearchHit, SearchQuery, SearchRequest, SearchResponse,
 };
 use cloudsearch_storage::{WalManager, WalRecord};
 use std::{
@@ -67,17 +68,18 @@ impl IndexCatalog {
         let wal = WalManager::open(self.index_dir(name).join("wal")).await?;
         let entries = wal.replay().await?;
 
-        let mut documents = BTreeMap::new();
+        let mut searchable_documents = BTreeMap::new();
         let mut last_sequence_number = 0;
 
         for entry in entries {
             last_sequence_number = entry.sequence_number;
+
             match entry.record {
                 WalRecord::IndexDocument { document } => {
-                    documents.insert(document.id.clone(), document);
+                    searchable_documents.insert(document.id.clone(), document);
                 }
                 WalRecord::DeleteDocument { document_id } => {
-                    documents.remove(&document_id);
+                    searchable_documents.remove(&document_id);
                 }
                 WalRecord::MappingUpdate { .. } => {}
             }
@@ -86,7 +88,8 @@ impl IndexCatalog {
         Ok(IndexHandle {
             metadata,
             wal,
-            documents,
+            searchable_documents,
+            pending_operations: BTreeMap::new(),
             last_sequence_number,
         })
     }
@@ -112,8 +115,15 @@ impl IndexCatalog {
 pub struct IndexHandle {
     metadata: IndexMetadata,
     wal: WalManager,
-    documents: BTreeMap<String, IndexDocument>,
+    searchable_documents: BTreeMap<String, IndexDocument>,
+    pending_operations: BTreeMap<String, PendingOperation>,
     last_sequence_number: u64,
+}
+
+#[derive(Debug, Clone)]
+enum PendingOperation {
+    Upsert(IndexDocument),
+    Delete,
 }
 
 impl IndexHandle {
@@ -122,17 +132,21 @@ impl IndexHandle {
     }
 
     pub fn documents(&self) -> &BTreeMap<String, IndexDocument> {
-        &self.documents
+        &self.searchable_documents
     }
 
     pub fn get_document(&self, document_id: &str) -> Option<&IndexDocument> {
-        self.documents.get(document_id)
+        match self.pending_operations.get(document_id) {
+            Some(PendingOperation::Upsert(document)) => Some(document),
+            Some(PendingOperation::Delete) => None,
+            None => self.searchable_documents.get(document_id),
+        }
     }
 
     pub fn search(&self, request: &SearchRequest) -> SearchResponse {
         let query = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll);
         let hits = self
-            .documents
+            .searchable_documents
             .values()
             .filter(|document| matches_query(document, query))
             .map(|document| SearchHit {
@@ -159,7 +173,8 @@ impl IndexHandle {
                 },
             )
             .await?;
-        self.documents.insert(document.id.clone(), document);
+        self.pending_operations
+            .insert(document.id.clone(), PendingOperation::Upsert(document));
         self.last_sequence_number = sequence_number;
         Ok(sequence_number)
     }
@@ -174,9 +189,29 @@ impl IndexHandle {
                 },
             )
             .await?;
-        self.documents.remove(document_id);
+        self.pending_operations
+            .insert(document_id.to_string(), PendingOperation::Delete);
         self.last_sequence_number = sequence_number;
         Ok(sequence_number)
+    }
+
+    pub async fn refresh(&mut self) -> Result<usize> {
+        let refreshed_documents = self.pending_operations.len();
+
+        for (document_id, operation) in std::mem::take(&mut self.pending_operations) {
+            match operation {
+                PendingOperation::Upsert(document) => {
+                    self.searchable_documents.insert(document_id, document);
+                }
+                PendingOperation::Delete => {
+                    self.searchable_documents.remove(&document_id);
+                }
+            }
+        }
+
+        self.metadata.updated_at = Utc::now();
+
+        Ok(refreshed_documents)
     }
 }
 
@@ -187,10 +222,79 @@ fn matches_query(document: &IndexDocument, query: &SearchQuery) -> bool {
             .source
             .get(&term.field)
             .is_some_and(|value| value == &term.value),
+        SearchQuery::Range(range) => matches_range_query(document, range),
         SearchQuery::Bool(bool_query) => bool_query
             .filter
             .iter()
             .all(|filter_query| matches_query(document, filter_query)),
+    }
+}
+
+fn matches_range_query(document: &IndexDocument, range: &RangeQuery) -> bool {
+    let Some(value) = document.source.get(&range.field) else {
+        return false;
+    };
+
+    match comparable_value(value) {
+        Some(ComparableValue::Number(number)) => matches_numeric_range(number, range),
+        Some(ComparableValue::Timestamp(timestamp)) => matches_timestamp_range(timestamp, range),
+        None => false,
+    }
+}
+
+enum ComparableValue {
+    Number(f64),
+    Timestamp(DateTime<Utc>),
+}
+
+fn comparable_value(value: &serde_json::Value) -> Option<ComparableValue> {
+    if let Some(number) = value.as_f64() {
+        return Some(ComparableValue::Number(number));
+    }
+
+    value
+        .as_str()
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|timestamp| ComparableValue::Timestamp(timestamp.with_timezone(&Utc)))
+}
+
+fn matches_numeric_range(number: f64, range: &RangeQuery) -> bool {
+    compare_numeric_bound(number, range.gte.as_ref(), |lhs, rhs| lhs >= rhs)
+        && compare_numeric_bound(number, range.gt.as_ref(), |lhs, rhs| lhs > rhs)
+        && compare_numeric_bound(number, range.lte.as_ref(), |lhs, rhs| lhs <= rhs)
+        && compare_numeric_bound(number, range.lt.as_ref(), |lhs, rhs| lhs < rhs)
+}
+
+fn compare_numeric_bound(
+    number: f64,
+    bound: Option<&serde_json::Value>,
+    predicate: impl Fn(f64, f64) -> bool,
+) -> bool {
+    match bound {
+        Some(value) => value.as_f64().is_some_and(|bound| predicate(number, bound)),
+        None => true,
+    }
+}
+
+fn matches_timestamp_range(timestamp: DateTime<Utc>, range: &RangeQuery) -> bool {
+    compare_timestamp_bound(timestamp, range.gte.as_ref(), |lhs, rhs| lhs >= rhs)
+        && compare_timestamp_bound(timestamp, range.gt.as_ref(), |lhs, rhs| lhs > rhs)
+        && compare_timestamp_bound(timestamp, range.lte.as_ref(), |lhs, rhs| lhs <= rhs)
+        && compare_timestamp_bound(timestamp, range.lt.as_ref(), |lhs, rhs| lhs < rhs)
+}
+
+fn compare_timestamp_bound(
+    timestamp: DateTime<Utc>,
+    bound: Option<&serde_json::Value>,
+    predicate: impl Fn(DateTime<Utc>, DateTime<Utc>) -> bool,
+) -> bool {
+    match bound {
+        Some(value) => value
+            .as_str()
+            .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+            .map(|parsed| parsed.with_timezone(&Utc))
+            .is_some_and(|bound| predicate(timestamp, bound)),
+        None => true,
     }
 }
 
@@ -212,8 +316,8 @@ fn validate_index_name(name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use cloudsearch_common::{
-        BoolQuery, CreateIndexRequest, IndexSettings, MappingMode, SearchQuery, SearchRequest,
-        TermQuery,
+        BoolQuery, CreateIndexRequest, IndexSettings, MappingMode, RangeQuery, SearchQuery,
+        SearchRequest, TermQuery,
     };
     use tempfile::TempDir;
 
@@ -345,6 +449,72 @@ mod tests {
         assert_eq!(document.id, "doc-42");
         assert_eq!(document.source["message"], "persist me");
         assert!(reopened.get_document("missing").is_none());
+    }
+
+    #[tokio::test]
+    async fn writes_are_searchable_only_after_refresh() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "billing"}),
+            })
+            .await
+            .expect("index doc");
+
+        assert_eq!(handle.search(&SearchRequest::default()).hits.total, 0);
+        assert!(handle.get_document("doc-1").is_some());
+
+        let refreshed = handle.refresh().await.expect("refresh");
+        assert_eq!(refreshed, 1);
+        assert_eq!(handle.search(&SearchRequest::default()).hits.total, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_becomes_search_visible_after_refresh() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "hello"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+        handle.delete_document("doc-1").await.expect("delete doc");
+
+        assert_eq!(handle.search(&SearchRequest::default()).hits.total, 1);
+
+        handle.refresh().await.expect("refresh");
+        assert_eq!(handle.search(&SearchRequest::default()).hits.total, 0);
     }
 
     #[tokio::test]
@@ -635,6 +805,81 @@ mod tests {
             })),
         });
         assert_eq!(wrong_type.hits.total, 0);
+    }
+
+    #[tokio::test]
+    async fn range_queries_match_numeric_and_timestamp_values() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({
+                    "latency": 42,
+                    "timestamp": "2026-03-14T10:00:00Z"
+                }),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({
+                    "latency": 7,
+                    "timestamp": "2026-03-14T12:00:00Z"
+                }),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+
+        let numeric = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Range(RangeQuery {
+                field: "latency".to_string(),
+                gte: Some(serde_json::json!(10)),
+                gt: None,
+                lte: Some(serde_json::json!(50)),
+                lt: None,
+            })),
+        });
+        assert_eq!(numeric.hits.total, 1);
+        assert_eq!(numeric.hits.hits[0].id, "doc-1");
+
+        let timestamp = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Range(RangeQuery {
+                field: "timestamp".to_string(),
+                gte: Some(serde_json::json!("2026-03-14T11:00:00Z")),
+                gt: None,
+                lte: None,
+                lt: Some(serde_json::json!("2026-03-14T13:00:00Z")),
+            })),
+        });
+        assert_eq!(timestamp.hits.total, 1);
+        assert_eq!(timestamp.hits.hits[0].id, "doc-2");
+
+        let missing = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Range(RangeQuery {
+                field: "missing".to_string(),
+                gte: Some(serde_json::json!(1)),
+                gt: None,
+                lte: None,
+                lt: None,
+            })),
+        });
+        assert_eq!(missing.hits.total, 0);
     }
 
     #[tokio::test]
