@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use cloudsearch_common::{
-    CloudSearchError, CreateIndexRequest, HitsMetadata, IndexDocument, IndexMetadata, RangeQuery,
-    Result, SearchHit, SearchQuery, SearchRequest, SearchResponse,
+    BulkItem, BulkItemResult, BulkOperation, BulkRequest, BulkResponse, CloudSearchError,
+    CreateIndexRequest, HitsMetadata, IndexDocument, IndexMetadata, RangeQuery, Result, SearchHit,
+    SearchQuery, SearchRequest, SearchResponse,
 };
 use cloudsearch_storage::{WalManager, WalRecord};
 use std::{
@@ -195,6 +196,43 @@ impl IndexHandle {
         Ok(sequence_number)
     }
 
+    pub async fn bulk_apply(&mut self, request: BulkRequest) -> Result<BulkResponse> {
+        let mut items = Vec::with_capacity(request.operations.len());
+
+        for operation in request.operations {
+            match operation {
+                BulkOperation::Index(index) => {
+                    let sequence_number = self
+                        .index_document(IndexDocument {
+                            id: index.id.clone(),
+                            source: index.source,
+                        })
+                        .await?;
+
+                    items.push(BulkItem::Index(BulkItemResult {
+                        id: index.id,
+                        result: "created".to_string(),
+                        sequence_number,
+                    }));
+                }
+                BulkOperation::Delete(delete) => {
+                    let sequence_number = self.delete_document(&delete.id).await?;
+
+                    items.push(BulkItem::Delete(BulkItemResult {
+                        id: delete.id,
+                        result: "deleted".to_string(),
+                        sequence_number,
+                    }));
+                }
+            }
+        }
+
+        Ok(BulkResponse {
+            errors: false,
+            items,
+        })
+    }
+
     pub async fn refresh(&mut self) -> Result<usize> {
         let refreshed_documents = self.pending_operations.len();
 
@@ -316,8 +354,9 @@ fn validate_index_name(name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use cloudsearch_common::{
-        BoolQuery, CreateIndexRequest, IndexSettings, MappingMode, RangeQuery, SearchQuery,
-        SearchRequest, TermQuery,
+        BoolQuery, BulkDeleteOperation, BulkIndexOperation, BulkOperation, BulkRequest,
+        CreateIndexRequest, IndexSettings, MappingMode, RangeQuery, SearchQuery, SearchRequest,
+        TermQuery,
     };
     use tempfile::TempDir;
 
@@ -960,5 +999,109 @@ mod tests {
         });
 
         assert_eq!(result.hits.total, 2);
+    }
+
+    #[tokio::test]
+    async fn bulk_apply_orders_updates_and_requires_refresh() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        let response = handle
+            .bulk_apply(BulkRequest {
+                operations: vec![
+                    BulkOperation::Index(BulkIndexOperation {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "first"}),
+                    }),
+                    BulkOperation::Index(BulkIndexOperation {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "second"}),
+                    }),
+                    BulkOperation::Delete(BulkDeleteOperation {
+                        id: "doc-2".to_string(),
+                    }),
+                    BulkOperation::Index(BulkIndexOperation {
+                        id: "doc-2".to_string(),
+                        source: serde_json::json!({"message": "survivor"}),
+                    }),
+                ],
+            })
+            .await
+            .expect("bulk apply");
+
+        assert!(!response.errors);
+        assert_eq!(response.items.len(), 4);
+        assert_eq!(handle.search(&SearchRequest::default()).hits.total, 0);
+
+        handle.refresh().await.expect("refresh");
+
+        let all = handle.search(&SearchRequest::default());
+        assert_eq!(all.hits.total, 2);
+        assert_eq!(
+            handle.get_document("doc-1").unwrap().source["message"],
+            "second"
+        );
+        assert_eq!(
+            handle.get_document("doc-2").unwrap().source["message"],
+            "survivor"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_state_survives_reopen_after_refresh() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .bulk_apply(BulkRequest {
+                operations: vec![
+                    BulkOperation::Index(BulkIndexOperation {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"service": "billing"}),
+                    }),
+                    BulkOperation::Index(BulkIndexOperation {
+                        id: "doc-2".to_string(),
+                        source: serde_json::json!({"service": "search"}),
+                    }),
+                    BulkOperation::Delete(BulkDeleteOperation {
+                        id: "doc-1".to_string(),
+                    }),
+                ],
+            })
+            .await
+            .expect("bulk apply");
+        handle.refresh().await.expect("refresh");
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+        assert_eq!(reopened.search(&SearchRequest::default()).hits.total, 1);
+        assert!(reopened.get_document("doc-1").is_none());
+        assert_eq!(
+            reopened.get_document("doc-2").unwrap().source["service"],
+            "search"
+        );
     }
 }
