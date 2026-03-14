@@ -93,6 +93,49 @@ pub struct GetDocumentResponse {
     pub source: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BulkRequest {
+    pub operations: Vec<BulkOperation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkOperation {
+    Index(BulkIndexOperation),
+    Delete(BulkDeleteOperation),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BulkIndexOperation {
+    pub id: String,
+    pub source: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BulkDeleteOperation {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BulkResponse {
+    pub errors: bool,
+    pub items: Vec<BulkItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkItem {
+    Index(BulkItemResult),
+    Delete(BulkItemResult),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BulkItemResult {
+    pub id: String,
+    pub result: String,
+    pub sequence_number: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RefreshResponse {
     pub result: &'static str,
