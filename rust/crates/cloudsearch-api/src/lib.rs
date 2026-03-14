@@ -6,8 +6,9 @@ use axum::{
     routing::{get, put},
 };
 use cloudsearch_common::{
-    CloudSearchError, CreateIndexRequest, ErrorResponse, GetDocumentResponse, HealthResponse,
-    IndexDocument, IndexDocumentRequest, IndexDocumentResponse, RefreshResponse, SearchRequest,
+    BulkRequest, CloudSearchError, CreateIndexRequest, ErrorResponse, GetDocumentResponse,
+    HealthResponse, IndexDocument, IndexDocumentRequest, IndexDocumentResponse, RefreshResponse,
+    SearchRequest,
 };
 use cloudsearch_index::{IndexCatalog, IndexHandle};
 use std::{collections::HashMap, sync::Arc};
@@ -44,6 +45,7 @@ pub fn router(catalog: Arc<IndexCatalog>) -> Router {
     Router::new()
         .route("/_health", get(health))
         .route("/{index}", put(create_index).get(get_index))
+        .route("/{index}/_bulk", put(bulk_index).post(bulk_index))
         .route("/{index}/_doc", put(index_document))
         .route("/{index}/_doc/{id}", get(get_document))
         .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
@@ -96,6 +98,17 @@ async fn index_document(
             sequence_number,
         }),
     ))
+}
+
+async fn bulk_index(
+    State(state): State<ApiState>,
+    Path(index): Path<String>,
+    Json(request): Json<BulkRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let handle = state.index_handle(&index).await?;
+    let mut handle = handle.lock().await;
+    let response = handle.bulk_apply(request).await?;
+    Ok((StatusCode::OK, Json(response)))
 }
 
 async fn get_document(
@@ -181,8 +194,9 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use cloudsearch_common::{
-        BoolQuery, CreateIndexRequest, IndexDocumentRequest, IndexSettings, RangeQuery,
-        SearchQuery, SearchRequest, TermQuery,
+        BoolQuery, BulkDeleteOperation, BulkIndexOperation, BulkOperation, BulkRequest,
+        CreateIndexRequest, IndexDocumentRequest, IndexSettings, RangeQuery, SearchQuery,
+        SearchRequest, TermQuery,
     };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -620,6 +634,150 @@ mod tests {
             serde_json::from_slice(&timestamp_body).expect("deserialize search response");
         assert_eq!(timestamp_json["hits"]["total"], 1);
         assert_eq!(timestamp_json["hits"]["hits"][0]["id"], "doc-2");
+    }
+
+    #[tokio::test]
+    async fn bulk_ingest_orders_operations_and_requires_refresh() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        let bulk_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_bulk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&BulkRequest {
+                            operations: vec![
+                                BulkOperation::Index(BulkIndexOperation {
+                                    id: "doc-1".to_string(),
+                                    source: serde_json::json!({"service": "billing", "message": "first"}),
+                                }),
+                                BulkOperation::Index(BulkIndexOperation {
+                                    id: "doc-1".to_string(),
+                                    source: serde_json::json!({"service": "billing", "message": "second"}),
+                                }),
+                                BulkOperation::Delete(BulkDeleteOperation {
+                                    id: "doc-2".to_string(),
+                                }),
+                                BulkOperation::Index(BulkIndexOperation {
+                                    id: "doc-2".to_string(),
+                                    source: serde_json::json!({"service": "search", "message": "survivor"}),
+                                }),
+                            ],
+                        })
+                        .expect("serialize bulk request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("bulk response");
+
+        assert_eq!(bulk_response.status(), StatusCode::OK);
+
+        let before_refresh = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest::default())
+                            .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        let before_refresh_body = before_refresh
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let before_refresh_json: serde_json::Value =
+            serde_json::from_slice(&before_refresh_body).expect("deserialize search response");
+        assert_eq!(before_refresh_json["hits"]["total"], 0);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+
+        let after_refresh = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest::default())
+                            .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        let after_refresh_body = after_refresh
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let after_refresh_json: serde_json::Value =
+            serde_json::from_slice(&after_refresh_body).expect("deserialize search response");
+        assert_eq!(after_refresh_json["hits"]["total"], 2);
+
+        let get_doc = app
+            .oneshot(
+                Request::builder()
+                    .uri("/logs/_doc/doc-1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("get response");
+
+        let get_doc_body = get_doc
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let get_doc_json: serde_json::Value =
+            serde_json::from_slice(&get_doc_body).expect("deserialize document");
+        assert_eq!(get_doc_json["source"]["message"], "second");
     }
 
     #[tokio::test]
