@@ -7,19 +7,36 @@ use axum::{
 };
 use cloudsearch_common::{
     CloudSearchError, CreateIndexRequest, ErrorResponse, GetDocumentResponse, HealthResponse,
-    IndexDocument, IndexDocumentRequest, IndexDocumentResponse, SearchRequest,
+    IndexDocument, IndexDocumentRequest, IndexDocumentResponse, RefreshResponse, SearchRequest,
 };
-use cloudsearch_index::IndexCatalog;
-use std::sync::Arc;
+use cloudsearch_index::{IndexCatalog, IndexHandle};
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct ApiState {
     catalog: Arc<IndexCatalog>,
+    handles: Arc<Mutex<HashMap<String, Arc<Mutex<IndexHandle>>>>>,
 }
 
 impl ApiState {
     pub fn new(catalog: Arc<IndexCatalog>) -> Self {
-        Self { catalog }
+        Self {
+            catalog,
+            handles: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn index_handle(&self, index: &str) -> Result<Arc<Mutex<IndexHandle>>, ApiError> {
+        let mut handles = self.handles.lock().await;
+
+        if let Some(handle) = handles.get(index) {
+            return Ok(handle.clone());
+        }
+
+        let handle = Arc::new(Mutex::new(self.catalog.open_index(index).await?));
+        handles.insert(index.to_string(), handle.clone());
+        Ok(handle)
     }
 }
 
@@ -29,6 +46,7 @@ pub fn router(catalog: Arc<IndexCatalog>) -> Router {
         .route("/{index}", put(create_index).get(get_index))
         .route("/{index}/_doc", put(index_document))
         .route("/{index}/_doc/{id}", get(get_document))
+        .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
         .route("/{index}/_search", put(search_index).post(search_index))
         .with_state(ApiState::new(catalog))
 }
@@ -43,6 +61,8 @@ async fn create_index(
     Json(request): Json<CreateIndexRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let metadata = state.catalog.create_index(&index, request).await?;
+    let handle = Arc::new(Mutex::new(state.catalog.open_index(&index).await?));
+    state.handles.lock().await.insert(index, handle);
     Ok((StatusCode::CREATED, Json(metadata)))
 }
 
@@ -59,7 +79,8 @@ async fn index_document(
     Path(index): Path<String>,
     Json(request): Json<IndexDocumentRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let mut handle = state.catalog.open_index(&index).await?;
+    let handle = state.index_handle(&index).await?;
+    let mut handle = handle.lock().await;
     let sequence_number = handle
         .index_document(IndexDocument {
             id: request.id.clone(),
@@ -81,7 +102,8 @@ async fn get_document(
     State(state): State<ApiState>,
     Path((index, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let handle = state.catalog.open_index(&index).await?;
+    let handle = state.index_handle(&index).await?;
+    let handle = handle.lock().await;
     let document = handle
         .get_document(&id)
         .ok_or_else(|| ApiError(CloudSearchError::IndexNotFound(format!("document '{id}'"))))?;
@@ -101,8 +123,26 @@ async fn search_index(
     Path(index): Path<String>,
     Json(request): Json<SearchRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let handle = state.catalog.open_index(&index).await?;
+    let handle = state.index_handle(&index).await?;
+    let handle = handle.lock().await;
     Ok((StatusCode::OK, Json(handle.search(&request))))
+}
+
+async fn refresh_index(
+    State(state): State<ApiState>,
+    Path(index): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let handle = state.index_handle(&index).await?;
+    let mut handle = handle.lock().await;
+    let refreshed_documents = handle.refresh().await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(RefreshResponse {
+            result: "refreshed",
+            refreshed_documents,
+        }),
+    ))
 }
 
 #[derive(Debug)]
@@ -141,8 +181,8 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use cloudsearch_common::{
-        BoolQuery, CreateIndexRequest, IndexDocumentRequest, IndexSettings, SearchQuery,
-        SearchRequest, TermQuery,
+        BoolQuery, CreateIndexRequest, IndexDocumentRequest, IndexSettings, RangeQuery,
+        SearchQuery, SearchRequest, TermQuery,
     };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -335,6 +375,50 @@ mod tests {
             assert_eq!(response.status(), StatusCode::CREATED);
         }
 
+        let before_refresh = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest {
+                            query: Some(SearchQuery::Term(TermQuery {
+                                field: "service".to_string(),
+                                value: serde_json::json!("billing"),
+                            })),
+                        })
+                        .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        let before_refresh_body = before_refresh
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let before_refresh_json: serde_json::Value =
+            serde_json::from_slice(&before_refresh_body).expect("deserialize search response");
+        assert_eq!(before_refresh_json["hits"]["total"], 0);
+
+        let refresh_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+        assert_eq!(refresh_response.status(), StatusCode::OK);
+
         let term_response = app
             .clone()
             .oneshot(
@@ -398,6 +482,144 @@ mod tests {
             .to_bytes();
         let bool_text = String::from_utf8(bool_body.to_vec()).expect("utf8");
         assert!(bool_text.contains("\"total\":2"));
+    }
+
+    #[tokio::test]
+    async fn refresh_and_range_queries_work_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        for request in [
+            IndexDocumentRequest {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({
+                    "latency": 42,
+                    "timestamp": "2026-03-14T10:00:00Z"
+                }),
+            },
+            IndexDocumentRequest {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({
+                    "latency": 7,
+                    "timestamp": "2026-03-14T12:00:00Z"
+                }),
+            },
+        ] {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/logs/_doc")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize index request"),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("index response");
+        }
+
+        let refresh_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+        assert_eq!(refresh_response.status(), StatusCode::OK);
+
+        let numeric_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest {
+                            query: Some(SearchQuery::Range(RangeQuery {
+                                field: "latency".to_string(),
+                                gte: Some(serde_json::json!(10)),
+                                gt: None,
+                                lte: Some(serde_json::json!(50)),
+                                lt: None,
+                            })),
+                        })
+                        .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        let numeric_body = numeric_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let numeric_json: serde_json::Value =
+            serde_json::from_slice(&numeric_body).expect("deserialize search response");
+        assert_eq!(numeric_json["hits"]["total"], 1);
+        assert_eq!(numeric_json["hits"]["hits"][0]["id"], "doc-1");
+
+        let timestamp_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest {
+                            query: Some(SearchQuery::Range(RangeQuery {
+                                field: "timestamp".to_string(),
+                                gte: Some(serde_json::json!("2026-03-14T11:00:00Z")),
+                                gt: None,
+                                lte: None,
+                                lt: Some(serde_json::json!("2026-03-14T13:00:00Z")),
+                            })),
+                        })
+                        .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        let timestamp_body = timestamp_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let timestamp_json: serde_json::Value =
+            serde_json::from_slice(&timestamp_body).expect("deserialize search response");
+        assert_eq!(timestamp_json["hits"]["total"], 1);
+        assert_eq!(timestamp_json["hits"]["hits"][0]["id"], "doc-2");
     }
 
     #[tokio::test]

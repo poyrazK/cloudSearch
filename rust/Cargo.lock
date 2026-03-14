@@ -171,6 +171,7 @@ dependencies = [
 name = "cloudsearch-index"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "cloudsearch-common",
  "cloudsearch-storage",
  "serde",

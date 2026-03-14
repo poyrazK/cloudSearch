@@ -93,6 +93,12 @@ pub struct GetDocumentResponse {
     pub source: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RefreshResponse {
+    pub result: &'static str,
+    pub refreshed_documents: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SearchRequest {
     pub query: Option<SearchQuery>,
@@ -103,6 +109,7 @@ pub struct SearchRequest {
 pub enum SearchQuery {
     MatchAll,
     Term(TermQuery),
+    Range(RangeQuery),
     Bool(BoolQuery),
 }
 
@@ -110,6 +117,15 @@ pub enum SearchQuery {
 pub struct TermQuery {
     pub field: String,
     pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RangeQuery {
+    pub field: String,
+    pub gte: Option<serde_json::Value>,
+    pub gt: Option<serde_json::Value>,
+    pub lte: Option<serde_json::Value>,
+    pub lt: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
