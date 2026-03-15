@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use cloudsearch_common::{
     BulkItem, BulkItemResult, BulkOperation, BulkRequest, BulkResponse, CloudSearchError,
     CreateIndexRequest, HitsMetadata, IndexDocument, IndexMetadata, RangeQuery, Result, SearchHit,
-    SearchQuery, SearchRequest, SearchResponse,
+    SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec, TermsQuery,
 };
 use cloudsearch_storage::{WalManager, WalRecord};
 use std::{
@@ -146,7 +146,7 @@ impl IndexHandle {
 
     pub fn search(&self, request: &SearchRequest) -> SearchResponse {
         let query = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll);
-        let hits = self
+        let mut hits = self
             .searchable_documents
             .values()
             .filter(|document| matches_query(document, query))
@@ -156,11 +156,18 @@ impl IndexHandle {
             })
             .collect::<Vec<_>>();
 
+        let total = hits.len();
+
+        if let Some(sort) = &request.sort {
+            hits.sort_by(|left, right| compare_hits(left, right, sort));
+        }
+
+        let from = request.from.unwrap_or(0);
+        let size = request.size.unwrap_or(total);
+        let hits = hits.into_iter().skip(from).take(size).collect::<Vec<_>>();
+
         SearchResponse {
-            hits: HitsMetadata {
-                total: hits.len(),
-                hits,
-            },
+            hits: HitsMetadata { total, hits },
         }
     }
 
@@ -260,12 +267,20 @@ fn matches_query(document: &IndexDocument, query: &SearchQuery) -> bool {
             .source
             .get(&term.field)
             .is_some_and(|value| value == &term.value),
+        SearchQuery::Terms(terms) => matches_terms_query(document, terms),
         SearchQuery::Range(range) => matches_range_query(document, range),
         SearchQuery::Bool(bool_query) => bool_query
             .filter
             .iter()
             .all(|filter_query| matches_query(document, filter_query)),
     }
+}
+
+fn matches_terms_query(document: &IndexDocument, terms: &TermsQuery) -> bool {
+    document
+        .source
+        .get(&terms.field)
+        .is_some_and(|value| terms.values.iter().any(|candidate| candidate == value))
 }
 
 fn matches_range_query(document: &IndexDocument, range: &RangeQuery) -> bool {
@@ -276,6 +291,7 @@ fn matches_range_query(document: &IndexDocument, range: &RangeQuery) -> bool {
     match comparable_value(value) {
         Some(ComparableValue::Number(number)) => matches_numeric_range(number, range),
         Some(ComparableValue::Timestamp(timestamp)) => matches_timestamp_range(timestamp, range),
+        Some(ComparableValue::String(_)) | Some(ComparableValue::Boolean(_)) => false,
         None => false,
     }
 }
@@ -283,6 +299,8 @@ fn matches_range_query(document: &IndexDocument, range: &RangeQuery) -> bool {
 enum ComparableValue {
     Number(f64),
     Timestamp(DateTime<Utc>),
+    String(String),
+    Boolean(bool),
 }
 
 fn comparable_value(value: &serde_json::Value) -> Option<ComparableValue> {
@@ -290,10 +308,56 @@ fn comparable_value(value: &serde_json::Value) -> Option<ComparableValue> {
         return Some(ComparableValue::Number(number));
     }
 
-    value
-        .as_str()
-        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
-        .map(|timestamp| ComparableValue::Timestamp(timestamp.with_timezone(&Utc)))
+    if let Some(boolean) = value.as_bool() {
+        return Some(ComparableValue::Boolean(boolean));
+    }
+
+    if let Some(raw) = value.as_str() {
+        if let Ok(timestamp) = DateTime::parse_from_rfc3339(raw) {
+            return Some(ComparableValue::Timestamp(timestamp.with_timezone(&Utc)));
+        }
+
+        return Some(ComparableValue::String(raw.to_string()));
+    }
+
+    None
+}
+
+fn compare_hits(left: &SearchHit, right: &SearchHit, sort: &SortSpec) -> std::cmp::Ordering {
+    let left_value = left.source.get(&sort.field).and_then(comparable_value);
+    let right_value = right.source.get(&sort.field).and_then(comparable_value);
+
+    let ordering = match (left_value, right_value) {
+        (Some(left), Some(right)) => compare_sort_values(&left, &right, sort),
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, None) => left.id.cmp(&right.id),
+    };
+
+    if ordering == std::cmp::Ordering::Equal {
+        left.id.cmp(&right.id)
+    } else {
+        ordering
+    }
+}
+
+fn compare_sort_values(
+    left: &ComparableValue,
+    right: &ComparableValue,
+    sort: &SortSpec,
+) -> std::cmp::Ordering {
+    let ordering = match (left, right) {
+        (ComparableValue::Number(left), ComparableValue::Number(right)) => left.total_cmp(right),
+        (ComparableValue::Timestamp(left), ComparableValue::Timestamp(right)) => left.cmp(right),
+        (ComparableValue::String(left), ComparableValue::String(right)) => left.cmp(right),
+        (ComparableValue::Boolean(left), ComparableValue::Boolean(right)) => left.cmp(right),
+        _ => std::cmp::Ordering::Equal,
+    };
+
+    match sort.order {
+        SortOrder::Asc => ordering,
+        SortOrder::Desc => ordering.reverse(),
+    }
 }
 
 fn matches_numeric_range(number: f64, range: &RangeQuery) -> bool {
@@ -356,7 +420,7 @@ mod tests {
     use cloudsearch_common::{
         BoolQuery, BulkDeleteOperation, BulkIndexOperation, BulkOperation, BulkRequest,
         CreateIndexRequest, IndexSettings, MappingMode, RangeQuery, SearchQuery, SearchRequest,
-        TermQuery,
+        SortOrder, SortSpec, TermQuery, TermsQuery,
     };
     use tempfile::TempDir;
 
@@ -598,6 +662,7 @@ mod tests {
                 field: "service".to_string(),
                 value: serde_json::json!("billing"),
             })),
+            ..Default::default()
         });
         assert_eq!(term.hits.total, 1);
         assert_eq!(term.hits.hits[0].id, "doc-1");
@@ -609,6 +674,7 @@ mod tests {
                     value: serde_json::json!("info"),
                 })],
             })),
+            ..Default::default()
         });
         assert_eq!(filtered.hits.total, 2);
     }
@@ -694,6 +760,7 @@ mod tests {
                 field: "missing".to_string(),
                 value: serde_json::json!("nope"),
             })),
+            ..Default::default()
         });
         assert_eq!(missing_field.hits.total, 0);
 
@@ -710,6 +777,7 @@ mod tests {
                     }),
                 ],
             })),
+            ..Default::default()
         });
         assert_eq!(multiple_filters.hits.total, 1);
         assert_eq!(multiple_filters.hits.hits[0].id, "doc-1");
@@ -826,6 +894,7 @@ mod tests {
                 field: "active".to_string(),
                 value: serde_json::json!(true),
             })),
+            ..Default::default()
         });
         assert_eq!(bool_query.hits.total, 1);
 
@@ -834,6 +903,7 @@ mod tests {
                 field: "latency".to_string(),
                 value: serde_json::json!(42),
             })),
+            ..Default::default()
         });
         assert_eq!(numeric_query.hits.total, 1);
 
@@ -842,6 +912,7 @@ mod tests {
                 field: "latency".to_string(),
                 value: serde_json::json!("42"),
             })),
+            ..Default::default()
         });
         assert_eq!(wrong_type.hits.total, 0);
     }
@@ -893,6 +964,7 @@ mod tests {
                 lte: Some(serde_json::json!(50)),
                 lt: None,
             })),
+            ..Default::default()
         });
         assert_eq!(numeric.hits.total, 1);
         assert_eq!(numeric.hits.hits[0].id, "doc-1");
@@ -905,6 +977,7 @@ mod tests {
                 lte: None,
                 lt: Some(serde_json::json!("2026-03-14T13:00:00Z")),
             })),
+            ..Default::default()
         });
         assert_eq!(timestamp.hits.total, 1);
         assert_eq!(timestamp.hits.hits[0].id, "doc-2");
@@ -917,6 +990,7 @@ mod tests {
                 lte: None,
                 lt: None,
             })),
+            ..Default::default()
         });
         assert_eq!(missing.hits.total, 0);
     }
@@ -996,6 +1070,7 @@ mod tests {
         let reopened = catalog.open_index("logs").await.expect("reopen index");
         let result = reopened.search(&SearchRequest {
             query: Some(SearchQuery::Bool(BoolQuery { filter: vec![] })),
+            ..Default::default()
         });
 
         assert_eq!(result.hits.total, 2);
@@ -1103,5 +1178,133 @@ mod tests {
             reopened.get_document("doc-2").unwrap().source["service"],
             "search"
         );
+    }
+
+    #[tokio::test]
+    async fn terms_query_matches_multiple_values() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        for (id, service) in [("doc-1", "billing"), ("doc-2", "search"), ("doc-3", "auth")] {
+            handle
+                .index_document(IndexDocument {
+                    id: id.to_string(),
+                    source: serde_json::json!({"service": service}),
+                })
+                .await
+                .expect("index doc");
+        }
+        handle.refresh().await.expect("refresh");
+
+        let response = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Terms(TermsQuery {
+                field: "service".to_string(),
+                values: vec![serde_json::json!("billing"), serde_json::json!("auth")],
+            })),
+            from: None,
+            size: None,
+            sort: None,
+        });
+
+        assert_eq!(response.hits.total, 2);
+        assert_eq!(response.hits.hits[0].id, "doc-1");
+        assert_eq!(response.hits.hits[1].id, "doc-3");
+    }
+
+    #[tokio::test]
+    async fn search_supports_pagination_and_sorting() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        for (id, latency, service, active, timestamp) in [
+            ("doc-1", 30, "billing", true, "2026-03-14T10:00:00Z"),
+            ("doc-2", 10, "search", false, "2026-03-14T11:00:00Z"),
+            ("doc-3", 20, "auth", true, "2026-03-14T12:00:00Z"),
+        ] {
+            handle
+                .index_document(IndexDocument {
+                    id: id.to_string(),
+                    source: serde_json::json!({
+                        "latency": latency,
+                        "service": service,
+                        "active": active,
+                        "timestamp": timestamp,
+                    }),
+                })
+                .await
+                .expect("index doc");
+        }
+        handle.refresh().await.expect("refresh");
+
+        let paged = handle.search(&SearchRequest {
+            query: None,
+            from: Some(1),
+            size: Some(1),
+            sort: Some(SortSpec {
+                field: "latency".to_string(),
+                order: SortOrder::Asc,
+            }),
+        });
+        assert_eq!(paged.hits.total, 3);
+        assert_eq!(paged.hits.hits.len(), 1);
+        assert_eq!(paged.hits.hits[0].id, "doc-3");
+
+        let strings = handle.search(&SearchRequest {
+            query: None,
+            from: None,
+            size: Some(2),
+            sort: Some(SortSpec {
+                field: "service".to_string(),
+                order: SortOrder::Desc,
+            }),
+        });
+        assert_eq!(strings.hits.hits[0].id, "doc-2");
+        assert_eq!(strings.hits.hits[1].id, "doc-1");
+
+        let booleans = handle.search(&SearchRequest {
+            query: None,
+            from: None,
+            size: None,
+            sort: Some(SortSpec {
+                field: "active".to_string(),
+                order: SortOrder::Asc,
+            }),
+        });
+        assert_eq!(booleans.hits.hits[0].id, "doc-2");
+
+        let timestamps = handle.search(&SearchRequest {
+            query: None,
+            from: None,
+            size: None,
+            sort: Some(SortSpec {
+                field: "timestamp".to_string(),
+                order: SortOrder::Desc,
+            }),
+        });
+        assert_eq!(timestamps.hits.hits[0].id, "doc-3");
     }
 }
