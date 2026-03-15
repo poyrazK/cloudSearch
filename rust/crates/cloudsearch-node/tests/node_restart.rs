@@ -89,6 +89,92 @@ async fn preserves_documents_and_search_results_across_node_restart() {
     stop_node(&mut second);
 }
 
+#[tokio::test]
+async fn preserves_flushed_documents_and_replays_wal_tail_across_restart() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut first = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/logs"))
+        .json(&json!({
+            "settings": {
+                "mapping_mode": "controlled_dynamic",
+                "primary_time_field": null
+            }
+        }))
+        .send()
+        .await
+        .expect("create index request")
+        .error_for_status()
+        .expect("create index status");
+
+    client
+        .put(format!("{base_url}/logs/_doc"))
+        .json(&json!({
+            "id": "doc-1",
+            "source": {"service": "billing", "message": "flushed"}
+        }))
+        .send()
+        .await
+        .expect("index doc request")
+        .error_for_status()
+        .expect("index doc status");
+
+    client
+        .post(format!("{base_url}/logs/_refresh"))
+        .send()
+        .await
+        .expect("refresh request")
+        .error_for_status()
+        .expect("refresh status");
+
+    client
+        .post(format!("{base_url}/logs/_flush"))
+        .send()
+        .await
+        .expect("flush request")
+        .error_for_status()
+        .expect("flush status");
+
+    client
+        .put(format!("{base_url}/logs/_doc"))
+        .json(&json!({
+            "id": "doc-2",
+            "source": {"service": "search", "message": "wal-tail"}
+        }))
+        .send()
+        .await
+        .expect("index doc request")
+        .error_for_status()
+        .expect("index doc status");
+
+    stop_node(&mut first);
+
+    let mut second = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let search = client
+        .post(format!("{base_url}/logs/_search"))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status")
+        .json::<serde_json::Value>()
+        .await
+        .expect("search body");
+
+    assert_eq!(search["hits"]["total"], 2);
+
+    stop_node(&mut second);
+}
+
 fn reserve_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind random port");
     listener.local_addr().expect("local addr").port()

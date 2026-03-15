@@ -6,9 +6,9 @@ use axum::{
     routing::{get, put},
 };
 use cloudsearch_common::{
-    BulkRequest, CloudSearchError, CreateIndexRequest, ErrorResponse, GetDocumentResponse,
-    HealthResponse, IndexDocument, IndexDocumentRequest, IndexDocumentResponse, RefreshResponse,
-    SearchRequest,
+    BulkRequest, CloudSearchError, CreateIndexRequest, ErrorResponse, FlushResponse,
+    GetDocumentResponse, HealthResponse, IndexDocument, IndexDocumentRequest,
+    IndexDocumentResponse, RefreshResponse, SearchRequest,
 };
 use cloudsearch_index::{IndexCatalog, IndexHandle};
 use std::{collections::HashMap, sync::Arc};
@@ -48,6 +48,7 @@ pub fn router(catalog: Arc<IndexCatalog>) -> Router {
         .route("/{index}/_bulk", put(bulk_index).post(bulk_index))
         .route("/{index}/_doc", put(index_document))
         .route("/{index}/_doc/{id}", get(get_document))
+        .route("/{index}/_flush", put(flush_index).post(flush_index))
         .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
         .route("/{index}/_search", put(search_index).post(search_index))
         .with_state(ApiState::new(catalog))
@@ -156,6 +157,17 @@ async fn refresh_index(
             refreshed_documents,
         }),
     ))
+}
+
+async fn flush_index(
+    State(state): State<ApiState>,
+    Path(index): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let handle = state.index_handle(&index).await?;
+    let mut handle = handle.lock().await;
+    let response = handle.flush().await?;
+
+    Ok((StatusCode::OK, Json::<FlushResponse>(response)))
 }
 
 #[derive(Debug)]
@@ -1273,5 +1285,105 @@ mod tests {
             serde_json::from_slice(&sorted_body).expect("deserialize search response");
         assert_eq!(sorted_json["hits"]["total"], 3);
         assert_eq!(sorted_json["hits"]["hits"][0]["id"], "doc-3");
+    }
+
+    #[tokio::test]
+    async fn flush_persists_state_and_returns_response_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs/_doc")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&IndexDocumentRequest {
+                            id: "doc-1".to_string(),
+                            source: serde_json::json!({"message": "visible"}),
+                        })
+                        .expect("serialize index request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("index response");
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+
+        let flush_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_flush")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("flush response");
+
+        assert_eq!(flush_response.status(), StatusCode::OK);
+        let flush_body = flush_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let flush_json: serde_json::Value =
+            serde_json::from_slice(&flush_body).expect("deserialize flush response");
+        assert_eq!(flush_json["result"], "flushed");
+        assert_eq!(flush_json["flushed_documents"], 1);
+        assert_eq!(flush_json["sequence_number"], 1);
+    }
+
+    #[tokio::test]
+    async fn flush_missing_index_returns_not_found() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/missing/_flush")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

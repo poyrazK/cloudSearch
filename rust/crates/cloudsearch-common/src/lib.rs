@@ -144,6 +144,13 @@ pub struct RefreshResponse {
     pub refreshed_documents: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FlushResponse {
+    pub result: &'static str,
+    pub flushed_documents: usize,
+    pub sequence_number: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SearchRequest {
     pub query: Option<SearchQuery>,
