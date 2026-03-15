@@ -172,7 +172,9 @@ impl IntoResponse for ApiError {
         let status = match self.0 {
             CloudSearchError::IndexAlreadyExists(_) => StatusCode::CONFLICT,
             CloudSearchError::IndexNotFound(_) => StatusCode::NOT_FOUND,
-            CloudSearchError::InvalidIndexName(_) => StatusCode::BAD_REQUEST,
+            CloudSearchError::InvalidIndexName(_) | CloudSearchError::InvalidSearchRequest(_) => {
+                StatusCode::BAD_REQUEST
+            }
             CloudSearchError::InvalidWalRecord(_)
             | CloudSearchError::WalChecksumMismatch
             | CloudSearchError::Io(_)
@@ -196,7 +198,7 @@ mod tests {
     use cloudsearch_common::{
         BoolQuery, BulkDeleteOperation, BulkIndexOperation, BulkOperation, BulkRequest,
         CreateIndexRequest, IndexDocumentRequest, IndexSettings, RangeQuery, SearchQuery,
-        SearchRequest, TermQuery,
+        SearchRequest, SortOrder, SortSpec, TermQuery, TermsQuery,
     };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -402,6 +404,7 @@ mod tests {
                                 field: "service".to_string(),
                                 value: serde_json::json!("billing"),
                             })),
+                            ..Default::default()
                         })
                         .expect("serialize search request"),
                     ))
@@ -446,6 +449,7 @@ mod tests {
                                 field: "service".to_string(),
                                 value: serde_json::json!("billing"),
                             })),
+                            ..Default::default()
                         })
                         .expect("serialize search request"),
                     ))
@@ -479,6 +483,7 @@ mod tests {
                                     value: serde_json::json!("info"),
                                 })],
                             })),
+                            ..Default::default()
                         })
                         .expect("serialize search request"),
                     ))
@@ -582,6 +587,7 @@ mod tests {
                                 lte: Some(serde_json::json!(50)),
                                 lt: None,
                             })),
+                            ..Default::default()
                         })
                         .expect("serialize search request"),
                     ))
@@ -616,6 +622,7 @@ mod tests {
                                 lte: None,
                                 lt: Some(serde_json::json!("2026-03-14T13:00:00Z")),
                             })),
+                            ..Default::default()
                         })
                         .expect("serialize search request"),
                     ))
@@ -1132,5 +1139,139 @@ mod tests {
             .expect("response");
 
         assert!(response.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn terms_query_and_sorted_pagination_work_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        for request in [
+            IndexDocumentRequest {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "billing", "latency": 30}),
+            },
+            IndexDocumentRequest {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"service": "search", "latency": 10}),
+            },
+            IndexDocumentRequest {
+                id: "doc-3".to_string(),
+                source: serde_json::json!({"service": "auth", "latency": 20}),
+            },
+        ] {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/logs/_doc")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize index request"),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("index response");
+        }
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+
+        let terms_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest {
+                            query: Some(SearchQuery::Terms(TermsQuery {
+                                field: "service".to_string(),
+                                values: vec![
+                                    serde_json::json!("billing"),
+                                    serde_json::json!("auth"),
+                                ],
+                            })),
+                            ..Default::default()
+                        })
+                        .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        let terms_body = terms_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let terms_json: serde_json::Value =
+            serde_json::from_slice(&terms_body).expect("deserialize search response");
+        assert_eq!(terms_json["hits"]["total"], 2);
+
+        let sorted_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest {
+                            query: None,
+                            from: Some(1),
+                            size: Some(1),
+                            sort: Some(SortSpec {
+                                field: "latency".to_string(),
+                                order: SortOrder::Asc,
+                            }),
+                        })
+                        .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        let sorted_body = sorted_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let sorted_json: serde_json::Value =
+            serde_json::from_slice(&sorted_body).expect("deserialize search response");
+        assert_eq!(sorted_json["hits"]["total"], 3);
+        assert_eq!(sorted_json["hits"]["hits"][0]["id"], "doc-3");
     }
 }
