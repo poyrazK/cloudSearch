@@ -1,10 +1,12 @@
 use chrono::{DateTime, Utc};
 use cloudsearch_common::{
     BulkItem, BulkItemResult, BulkOperation, BulkRequest, BulkResponse, CloudSearchError,
-    CreateIndexRequest, HitsMetadata, IndexDocument, IndexMetadata, RangeQuery, Result, SearchHit,
-    SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec, TermsQuery,
+    CreateIndexRequest, FlushResponse, HitsMetadata, IndexDocument, IndexMetadata, RangeQuery,
+    Result, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec, TermsQuery,
 };
-use cloudsearch_storage::{WalManager, WalRecord};
+use cloudsearch_storage::{
+    SegmentSnapshot, WalManager, WalRecord, read_segment_snapshot, write_segment_snapshot,
+};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -66,11 +68,27 @@ impl IndexCatalog {
 
     pub async fn open_index(&self, name: &str) -> Result<IndexHandle> {
         let metadata = self.get_index(name).await?;
+        let segments_dir = self.index_dir(name).join("segments");
         let wal = WalManager::open(self.index_dir(name).join("wal")).await?;
-        let entries = wal.replay().await?;
+        let snapshot = read_segment_snapshot(&segments_dir).await?;
 
-        let mut searchable_documents = BTreeMap::new();
-        let mut last_sequence_number = 0;
+        let mut searchable_documents = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .documents
+                    .iter()
+                    .cloned()
+                    .map(|document| (document.id.clone(), document))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let mut last_sequence_number = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.last_sequence_number)
+            .unwrap_or(0);
+
+        let entries = wal.replay_from(last_sequence_number).await?;
 
         for entry in entries {
             last_sequence_number = entry.sequence_number;
@@ -89,6 +107,7 @@ impl IndexCatalog {
         Ok(IndexHandle {
             metadata,
             wal,
+            segments_dir,
             searchable_documents,
             pending_operations: BTreeMap::new(),
             last_sequence_number,
@@ -116,6 +135,7 @@ impl IndexCatalog {
 pub struct IndexHandle {
     metadata: IndexMetadata,
     wal: WalManager,
+    segments_dir: PathBuf,
     searchable_documents: BTreeMap<String, IndexDocument>,
     pending_operations: BTreeMap<String, PendingOperation>,
     last_sequence_number: u64,
@@ -257,6 +277,21 @@ impl IndexHandle {
         self.metadata.updated_at = Utc::now();
 
         Ok(refreshed_documents)
+    }
+
+    pub async fn flush(&mut self) -> Result<FlushResponse> {
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: self.last_sequence_number,
+            documents: self.searchable_documents.values().cloned().collect(),
+        };
+
+        write_segment_snapshot(&self.segments_dir, &snapshot).await?;
+
+        Ok(FlushResponse {
+            result: "flushed",
+            flushed_documents: snapshot.documents.len(),
+            sequence_number: snapshot.last_sequence_number,
+        })
     }
 }
 
@@ -618,6 +653,86 @@ mod tests {
 
         handle.refresh().await.expect("refresh");
         assert_eq!(handle.search(&SearchRequest::default()).hits.total, 0);
+    }
+
+    #[tokio::test]
+    async fn flush_persists_searchable_state_but_not_pending_writes() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "visible"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+        handle.flush().await.expect("flush");
+
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"message": "pending"}),
+            })
+            .await
+            .expect("index doc");
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+        assert_eq!(reopened.search(&SearchRequest::default()).hits.total, 2);
+        assert_eq!(
+            reopened.get_document("doc-1").unwrap().source["message"],
+            "visible"
+        );
+        assert_eq!(
+            reopened.get_document("doc-2").unwrap().source["message"],
+            "pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_response_reports_sequence_and_document_count() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "hello"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+
+        let flushed = handle.flush().await.expect("flush");
+
+        assert_eq!(flushed.result, "flushed");
+        assert_eq!(flushed.flushed_documents, 1);
+        assert_eq!(flushed.sequence_number, 1);
     }
 
     #[tokio::test]
