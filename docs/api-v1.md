@@ -16,6 +16,7 @@ Compatibility is intentionally pragmatic:
 - `GET /{index}`
 - `DELETE /{index}`
 - `POST /{index}/_refresh`
+- `POST /{index}/_flush`
 
 ### Expected V1 Semantics
 
@@ -23,6 +24,7 @@ Compatibility is intentionally pragmatic:
 - fetch stored index metadata
 - delete index and its local storage
 - refresh to make recent writes searchable
+- flush to persist the current searchable state to a durable segment snapshot
 
 ## Supported Document APIs
 
