@@ -14,6 +14,8 @@ pub enum CloudSearchError {
     IndexNotFound(String),
     #[error("invalid index name '{0}'")]
     InvalidIndexName(String),
+    #[error("invalid search request: {0}")]
+    InvalidSearchRequest(String),
     #[error("invalid WAL record: {0}")]
     InvalidWalRecord(String),
     #[error("WAL checksum mismatch")]
@@ -145,6 +147,9 @@ pub struct RefreshResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SearchRequest {
     pub query: Option<SearchQuery>,
+    pub from: Option<usize>,
+    pub size: Option<usize>,
+    pub sort: Option<SortSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -152,6 +157,7 @@ pub struct SearchRequest {
 pub enum SearchQuery {
     MatchAll,
     Term(TermQuery),
+    Terms(TermsQuery),
     Range(RangeQuery),
     Bool(BoolQuery),
 }
@@ -160,6 +166,12 @@ pub enum SearchQuery {
 pub struct TermQuery {
     pub field: String,
     pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TermsQuery {
+    pub field: String,
+    pub values: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -175,6 +187,20 @@ pub struct RangeQuery {
 pub struct BoolQuery {
     #[serde(default)]
     pub filter: Vec<SearchQuery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SortSpec {
+    pub field: String,
+    pub order: SortOrder,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SortOrder {
+    #[default]
+    Asc,
+    Desc,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
