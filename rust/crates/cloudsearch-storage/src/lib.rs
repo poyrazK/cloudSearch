@@ -38,6 +38,12 @@ pub struct WalManager {
     wal_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SegmentSnapshot {
+    pub last_sequence_number: u64,
+    pub documents: Vec<IndexDocument>,
+}
+
 impl WalManager {
     pub async fn open(wal_dir: impl Into<PathBuf>) -> Result<Self> {
         let wal_dir = wal_dir.into();
@@ -76,6 +82,10 @@ impl WalManager {
     }
 
     pub async fn replay(&self) -> Result<Vec<WalEntry>> {
+        self.replay_from(0).await
+    }
+
+    pub async fn replay_from(&self, sequence_number_exclusive: u64) -> Result<Vec<WalEntry>> {
         let generation = self.current_generation().await?;
         let path = self.generation_path(generation);
 
@@ -118,11 +128,13 @@ impl WalManager {
             }
 
             let record = decode_record(record_type, payload)?;
-            entries.push(WalEntry {
-                sequence_number,
-                recorded_at_unix_ms,
-                record,
-            });
+            if sequence_number > sequence_number_exclusive {
+                entries.push(WalEntry {
+                    sequence_number,
+                    recorded_at_unix_ms,
+                    record,
+                });
+            }
 
             offset = payload_end;
         }
@@ -169,6 +181,39 @@ impl WalManager {
     }
 }
 
+pub async fn read_segment_snapshot(
+    segments_dir: impl AsRef<Path>,
+) -> Result<Option<SegmentSnapshot>> {
+    let path = segment_snapshot_path(segments_dir.as_ref());
+
+    if !fs::try_exists(&path).await? {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(path).await?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+pub async fn write_segment_snapshot(
+    segments_dir: impl AsRef<Path>,
+    snapshot: &SegmentSnapshot,
+) -> Result<()> {
+    let segments_dir = segments_dir.as_ref();
+    fs::create_dir_all(segments_dir).await?;
+
+    let path = segment_snapshot_path(segments_dir);
+    let temp_path = segments_dir.join("current.tmp");
+    let bytes = serde_json::to_vec_pretty(snapshot)?;
+
+    fs::write(&temp_path, bytes).await?;
+    fs::rename(temp_path, path).await?;
+    Ok(())
+}
+
+fn segment_snapshot_path(segments_dir: &Path) -> PathBuf {
+    segments_dir.join("current.json")
+}
+
 fn record_type(record: &WalRecord) -> u8 {
     match record {
         WalRecord::IndexDocument { .. } => 1,
@@ -190,6 +235,40 @@ fn decode_record(record_type: u8, payload: &[u8]) -> Result<WalRecord> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn writes_and_reads_segment_snapshot() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: 7,
+            documents: vec![IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "hello"}),
+            }],
+        };
+
+        write_segment_snapshot(temp_dir.path(), &snapshot)
+            .await
+            .expect("write snapshot");
+
+        let loaded = read_segment_snapshot(temp_dir.path())
+            .await
+            .expect("read snapshot")
+            .expect("snapshot exists");
+
+        assert_eq!(loaded, snapshot);
+    }
+
+    #[tokio::test]
+    async fn missing_segment_snapshot_returns_none() {
+        let temp_dir = TempDir::new().expect("temp dir");
+
+        let loaded = read_segment_snapshot(temp_dir.path())
+            .await
+            .expect("read snapshot");
+
+        assert!(loaded.is_none());
+    }
 
     #[tokio::test]
     async fn appends_and_replays_records_in_order() {
@@ -309,6 +388,31 @@ mod tests {
             .expect("append doc");
 
         assert_eq!(manager.next_sequence_number().await.expect("next seq"), 2);
+    }
+
+    #[tokio::test]
+    async fn replay_from_skips_covered_sequence_numbers() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        for sequence_number in 1..=3 {
+            manager
+                .append(
+                    sequence_number,
+                    WalRecord::IndexDocument {
+                        document: IndexDocument {
+                            id: format!("doc-{sequence_number}"),
+                            source: serde_json::json!({"value": sequence_number}),
+                        },
+                    },
+                )
+                .await
+                .expect("append doc");
+        }
+
+        let entries = manager.replay_from(2).await.expect("replay from");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].sequence_number, 3);
     }
 
     #[tokio::test]
