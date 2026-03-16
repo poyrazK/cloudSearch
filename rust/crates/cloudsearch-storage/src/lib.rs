@@ -584,6 +584,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trim_through_is_noop_when_nothing_is_eligible() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "first"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        let trimmed = manager.trim_through(0).await.expect("trim");
+        assert_eq!(trimmed, 0);
+        let generations = manager.list_generations().await.expect("list generations");
+        assert_eq!(generations, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn rollover_twice_without_writes_keeps_empty_active_generation() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        assert_eq!(manager.rollover().await.expect("first rollover"), 2);
+        assert_eq!(manager.rollover().await.expect("second rollover"), 3);
+
+        let generations = manager.list_generations().await.expect("list generations");
+        assert!(generations.is_empty());
+        assert_eq!(
+            manager
+                .current_generation()
+                .await
+                .expect("current generation"),
+            3
+        );
+        assert!(manager.replay().await.expect("replay").is_empty());
+    }
+
+    #[tokio::test]
     async fn fails_when_current_generation_file_is_invalid() {
         let temp_dir = TempDir::new().expect("temp dir");
         let manager = WalManager::open(temp_dir.path()).await.expect("open wal");

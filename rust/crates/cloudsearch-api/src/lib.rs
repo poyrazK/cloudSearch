@@ -216,6 +216,35 @@ mod tests {
     use tower::ServiceExt;
 
     #[tokio::test]
+    async fn health_returns_exact_response_shape() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/_health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("health response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
+
+        assert_eq!(value, serde_json::json!({"status": "ok"}));
+    }
+
+    #[tokio::test]
     async fn creates_and_fetches_index_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
@@ -276,10 +305,9 @@ mod tests {
             .await
             .expect("body")
             .to_bytes();
-        let body_text = String::from_utf8(body.to_vec()).expect("utf8");
-
-        assert!(body_text.contains("logs"));
-        assert!(body_text.contains("@timestamp"));
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
+        assert_eq!(value["name"], "logs");
+        assert_eq!(value["settings"]["primary_time_field"], "@timestamp");
     }
 
     #[tokio::test]
@@ -714,6 +742,16 @@ mod tests {
             .expect("bulk response");
 
         assert_eq!(bulk_response.status(), StatusCode::OK);
+        let bulk_body = bulk_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let bulk_json: serde_json::Value =
+            serde_json::from_slice(&bulk_body).expect("deserialize bulk");
+        assert_eq!(bulk_json["errors"], false);
+        assert_eq!(bulk_json["items"].as_array().expect("items array").len(), 4);
 
         let before_refresh = app
             .clone()
@@ -1285,6 +1323,238 @@ mod tests {
             serde_json::from_slice(&sorted_body).expect("deserialize search response");
         assert_eq!(sorted_json["hits"]["total"], 3);
         assert_eq!(sorted_json["hits"]["hits"][0]["id"], "doc-3");
+    }
+
+    #[tokio::test]
+    async fn invalid_sort_payload_returns_bad_request() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sort": {
+                                "field": "service",
+                                "order": "sideways"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert!(response.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn bulk_returns_exact_success_shape() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_bulk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&BulkRequest {
+                            operations: vec![BulkOperation::Index(BulkIndexOperation {
+                                id: "doc-1".to_string(),
+                                source: serde_json::json!({"service": "billing"}),
+                            })],
+                        })
+                        .expect("serialize bulk request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("bulk response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize bulk");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "errors": false,
+                "items": [
+                    {
+                        "index": {
+                            "id": "doc-1",
+                            "result": "created",
+                            "sequence_number": 1
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_search_response_shape_is_exact_for_paginated_sort() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        for request in [
+            IndexDocumentRequest {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "billing", "latency": 30}),
+            },
+            IndexDocumentRequest {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"service": "search", "latency": 10}),
+            },
+            IndexDocumentRequest {
+                id: "doc-3".to_string(),
+                source: serde_json::json!({"service": "auth", "latency": 20}),
+            },
+        ] {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/logs/_doc")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize index request"),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("index response");
+        }
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest {
+                            from: Some(1),
+                            size: Some(1),
+                            sort: Some(SortSpec {
+                                field: "latency".to_string(),
+                                order: SortOrder::Asc,
+                            }),
+                            ..Default::default()
+                        })
+                        .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize search");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "hits": {
+                    "total": 3,
+                    "hits": [
+                        {
+                            "id": "doc-3",
+                            "source": {
+                                "service": "auth",
+                                "latency": 20
+                            }
+                        }
+                    ]
+                }
+            })
+        );
     }
 
     #[tokio::test]
