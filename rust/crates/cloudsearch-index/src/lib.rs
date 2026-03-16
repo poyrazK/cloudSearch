@@ -286,6 +286,8 @@ impl IndexHandle {
         };
 
         write_segment_snapshot(&self.segments_dir, &snapshot).await?;
+        self.wal.rollover().await?;
+        self.wal.trim_through(snapshot.last_sequence_number).await?;
 
         Ok(FlushResponse {
             result: "flushed",
@@ -733,6 +735,47 @@ mod tests {
         assert_eq!(flushed.result, "flushed");
         assert_eq!(flushed.flushed_documents, 1);
         assert_eq!(flushed.sequence_number, 1);
+    }
+
+    #[tokio::test]
+    async fn flush_rolls_over_and_trims_covered_wal_generations() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "hello"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+        handle.flush().await.expect("flush");
+
+        let wal_dir = temp_dir.path().join("indexes").join("logs").join("wal");
+        assert!(!wal_dir.join("000001.log").exists());
+
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"message": "tail"}),
+            })
+            .await
+            .expect("index doc");
+
+        assert!(wal_dir.join("000002.log").exists());
     }
 
     #[tokio::test]
