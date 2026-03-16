@@ -254,6 +254,11 @@ Suggested triggers:
 
 Rollover should be explicit and observable in metrics and logs.
 
+Current implementation notes:
+
+- flush forces a WAL generation rollover in the current engine
+- appends continue in the new active generation after rollover
+
 ## Trimming Rules
 
 WAL trimming should happen only after a successful flush checkpoint proves records are no longer needed for recovery.
@@ -263,6 +268,12 @@ Recommended rule:
 - trim whole generations only in v1
 
 This keeps deletion simple and avoids tricky partial-file compaction logic.
+
+Current implementation notes:
+
+- only inactive generations are eligible for trimming
+- a generation is trimmed only when its max sequence is covered by the flushed snapshot sequence
+- the active generation is never trimmed
 
 ## Mapping Consistency
 
