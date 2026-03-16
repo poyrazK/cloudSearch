@@ -86,57 +86,61 @@ impl WalManager {
     }
 
     pub async fn replay_from(&self, sequence_number_exclusive: u64) -> Result<Vec<WalEntry>> {
-        let generation = self.current_generation().await?;
-        let path = self.generation_path(generation);
-
-        if !fs::try_exists(&path).await? {
-            return Ok(Vec::new());
-        }
-
-        let mut file = OpenOptions::new().read(true).open(path).await?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).await?;
-
         let mut entries = Vec::new();
-        let mut offset = 0usize;
+        let current_generation = self.current_generation().await?;
 
-        while offset + HEADER_LEN <= bytes.len() {
-            let header = &bytes[offset..offset + HEADER_LEN];
-            let version = header[0];
-            if version != WAL_VERSION {
-                return Err(CloudSearchError::InvalidWalRecord(format!(
-                    "unsupported WAL version {version}"
-                )));
+        for generation in self.list_generations().await? {
+            let path = self.generation_path(generation);
+            let mut file = OpenOptions::new().read(true).open(path).await?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).await?;
+
+            let mut offset = 0usize;
+
+            while offset + HEADER_LEN <= bytes.len() {
+                let header = &bytes[offset..offset + HEADER_LEN];
+                let version = header[0];
+                if version != WAL_VERSION {
+                    return Err(CloudSearchError::InvalidWalRecord(format!(
+                        "unsupported WAL version {version}"
+                    )));
+                }
+
+                let record_type = header[1];
+                let payload_len = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
+                let sequence_number = u64::from_le_bytes(header[6..14].try_into().unwrap());
+                let recorded_at_unix_ms = i64::from_le_bytes(header[14..22].try_into().unwrap());
+                let checksum = u32::from_le_bytes(header[22..26].try_into().unwrap());
+
+                let payload_start = offset + HEADER_LEN;
+                let payload_end = payload_start + payload_len;
+
+                if payload_end > bytes.len() {
+                    if generation == current_generation {
+                        break;
+                    }
+
+                    return Err(CloudSearchError::InvalidWalRecord(format!(
+                        "partial record in inactive WAL generation {generation:06}"
+                    )));
+                }
+
+                let payload = &bytes[payload_start..payload_end];
+                if crc32c::crc32c(payload) != checksum {
+                    return Err(CloudSearchError::WalChecksumMismatch);
+                }
+
+                let record = decode_record(record_type, payload)?;
+                if sequence_number > sequence_number_exclusive {
+                    entries.push(WalEntry {
+                        sequence_number,
+                        recorded_at_unix_ms,
+                        record,
+                    });
+                }
+
+                offset = payload_end;
             }
-
-            let record_type = header[1];
-            let payload_len = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
-            let sequence_number = u64::from_le_bytes(header[6..14].try_into().unwrap());
-            let recorded_at_unix_ms = i64::from_le_bytes(header[14..22].try_into().unwrap());
-            let checksum = u32::from_le_bytes(header[22..26].try_into().unwrap());
-
-            let payload_start = offset + HEADER_LEN;
-            let payload_end = payload_start + payload_len;
-
-            if payload_end > bytes.len() {
-                break;
-            }
-
-            let payload = &bytes[payload_start..payload_end];
-            if crc32c::crc32c(payload) != checksum {
-                return Err(CloudSearchError::WalChecksumMismatch);
-            }
-
-            let record = decode_record(record_type, payload)?;
-            if sequence_number > sequence_number_exclusive {
-                entries.push(WalEntry {
-                    sequence_number,
-                    recorded_at_unix_ms,
-                    record,
-                });
-            }
-
-            offset = payload_end;
         }
 
         Ok(entries)
@@ -154,6 +158,60 @@ impl WalManager {
 
     pub fn wal_dir(&self) -> &Path {
         &self.wal_dir
+    }
+
+    pub async fn list_generations(&self) -> Result<Vec<u64>> {
+        let mut generations = Vec::new();
+        let mut entries = fs::read_dir(&self.wal_dir).await?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+                continue;
+            }
+
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+
+            let generation = stem.parse::<u64>().map_err(|_| {
+                CloudSearchError::InvalidWalRecord(format!(
+                    "invalid WAL generation file '{}'",
+                    path.display()
+                ))
+            })?;
+            generations.push(generation);
+        }
+
+        generations.sort_unstable();
+        Ok(generations)
+    }
+
+    pub async fn rollover(&self) -> Result<u64> {
+        let next_generation = self.current_generation().await? + 1;
+        fs::write(self.current_path(), format!("{next_generation:06}\n")).await?;
+        Ok(next_generation)
+    }
+
+    pub async fn trim_through(&self, sequence_number_inclusive: u64) -> Result<usize> {
+        let current_generation = self.current_generation().await?;
+        let mut trimmed = 0;
+
+        for generation in self.list_generations().await? {
+            if generation == current_generation {
+                continue;
+            }
+
+            let max_sequence = self.max_sequence_in_generation(generation).await?;
+            if let Some(max_sequence) = max_sequence
+                && max_sequence <= sequence_number_inclusive
+            {
+                fs::remove_file(self.generation_path(generation)).await?;
+                trimmed += 1;
+            }
+        }
+
+        Ok(trimmed)
     }
 
     async fn ensure_current_generation(&self) -> Result<()> {
@@ -178,6 +236,36 @@ impl WalManager {
 
     fn generation_path(&self, generation: u64) -> PathBuf {
         self.wal_dir.join(format!("{generation:06}.log"))
+    }
+
+    async fn max_sequence_in_generation(&self, generation: u64) -> Result<Option<u64>> {
+        let path = self.generation_path(generation);
+        if !fs::try_exists(&path).await? {
+            return Ok(None);
+        }
+
+        let mut file = OpenOptions::new().read(true).open(path).await?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).await?;
+
+        let mut offset = 0usize;
+        let mut max_sequence = None;
+
+        while offset + HEADER_LEN <= bytes.len() {
+            let header = &bytes[offset..offset + HEADER_LEN];
+            let payload_len = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
+            let sequence_number = u64::from_le_bytes(header[6..14].try_into().unwrap());
+            let payload_end = offset + HEADER_LEN + payload_len;
+
+            if payload_end > bytes.len() {
+                break;
+            }
+
+            max_sequence = Some(sequence_number);
+            offset = payload_end;
+        }
+
+        Ok(max_sequence)
     }
 }
 
@@ -413,6 +501,86 @@ mod tests {
         let entries = manager.replay_from(2).await.expect("replay from");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].sequence_number, 3);
+    }
+
+    #[tokio::test]
+    async fn rollover_creates_new_current_generation_and_replays_across_generations() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "first"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        let next_generation = manager.rollover().await.expect("rollover");
+        assert_eq!(next_generation, 2);
+
+        manager
+            .append(
+                2,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-2".to_string(),
+                        source: serde_json::json!({"message": "second"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        let generations = manager.list_generations().await.expect("list generations");
+        assert_eq!(generations, vec![1, 2]);
+
+        let entries = manager.replay().await.expect("replay");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].sequence_number, 1);
+        assert_eq!(entries[1].sequence_number, 2);
+    }
+
+    #[tokio::test]
+    async fn trim_through_removes_covered_inactive_generations_only() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "first"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+        manager.rollover().await.expect("rollover");
+        manager
+            .append(
+                2,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-2".to_string(),
+                        source: serde_json::json!({"message": "second"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        let trimmed = manager.trim_through(1).await.expect("trim");
+        assert_eq!(trimmed, 1);
+        let generations = manager.list_generations().await.expect("list generations");
+        assert_eq!(generations, vec![2]);
     }
 
     #[tokio::test]
