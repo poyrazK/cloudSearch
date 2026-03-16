@@ -128,6 +128,12 @@ Recommended v1 responsibilities:
 - write a commit marker or checkpoint
 - mark older WAL generations as recoverable/trimmable
 
+Current implementation notes:
+
+- flush writes a simple searchable segment snapshot to `segments/current.json`
+- flush forces a WAL generation rollover
+- inactive WAL generations fully covered by the flushed sequence are trimmed
+
 Flush should run less frequently than refresh.
 
 ## Merge Policy
@@ -176,6 +182,11 @@ Recovery sequence:
 4. replay uncommitted WAL records
 5. rebuild in-memory pending state
 6. publish recovered view
+
+Current implementation notes:
+
+- recovery loads the flushed segment snapshot first
+- WAL replay then starts after the flushed sequence boundary
 
 Recovery correctness is more important than startup speed in the first version.
 
