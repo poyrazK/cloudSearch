@@ -1382,6 +1382,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terms_query_handles_empty_duplicate_numeric_and_boolean_values() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        for (id, source) in [
+            (
+                "doc-1",
+                serde_json::json!({"service": "billing", "latency": 30, "active": true}),
+            ),
+            (
+                "doc-2",
+                serde_json::json!({"service": "search", "latency": 10, "active": false}),
+            ),
+        ] {
+            handle
+                .index_document(IndexDocument {
+                    id: id.to_string(),
+                    source,
+                })
+                .await
+                .expect("index doc");
+        }
+        handle.refresh().await.expect("refresh");
+
+        let empty = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Terms(TermsQuery {
+                field: "service".to_string(),
+                values: vec![],
+            })),
+            ..Default::default()
+        });
+        assert_eq!(empty.hits.total, 0);
+
+        let duplicates = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Terms(TermsQuery {
+                field: "service".to_string(),
+                values: vec![serde_json::json!("billing"), serde_json::json!("billing")],
+            })),
+            ..Default::default()
+        });
+        assert_eq!(duplicates.hits.total, 1);
+        assert_eq!(duplicates.hits.hits[0].id, "doc-1");
+
+        let numeric = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Terms(TermsQuery {
+                field: "latency".to_string(),
+                values: vec![serde_json::json!(10), serde_json::json!(99)],
+            })),
+            ..Default::default()
+        });
+        assert_eq!(numeric.hits.total, 1);
+        assert_eq!(numeric.hits.hits[0].id, "doc-2");
+
+        let booleans = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Terms(TermsQuery {
+                field: "active".to_string(),
+                values: vec![serde_json::json!(true)],
+            })),
+            ..Default::default()
+        });
+        assert_eq!(booleans.hits.total, 1);
+        assert_eq!(booleans.hits.hits[0].id, "doc-1");
+    }
+
+    #[tokio::test]
     async fn search_supports_pagination_and_sorting() {
         let temp_dir = TempDir::new().expect("temp dir");
         let catalog = IndexCatalog::new(temp_dir.path());
@@ -1464,5 +1541,151 @@ mod tests {
             }),
         });
         assert_eq!(timestamps.hits.hits[0].id, "doc-3");
+    }
+
+    #[tokio::test]
+    async fn pagination_edges_and_missing_sort_field_are_stable() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        for (id, source) in [
+            ("doc-1", serde_json::json!({"latency": 30})),
+            ("doc-2", serde_json::json!({"latency": 10})),
+            ("doc-3", serde_json::json!({"message": "missing-latency"})),
+        ] {
+            handle
+                .index_document(IndexDocument {
+                    id: id.to_string(),
+                    source,
+                })
+                .await
+                .expect("index doc");
+        }
+        handle.refresh().await.expect("refresh");
+
+        let zero_size = handle.search(&SearchRequest {
+            size: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(zero_size.hits.total, 3);
+        assert!(zero_size.hits.hits.is_empty());
+
+        let exact_end = handle.search(&SearchRequest {
+            from: Some(3),
+            size: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(exact_end.hits.total, 3);
+        assert!(exact_end.hits.hits.is_empty());
+
+        let missing_last = handle.search(&SearchRequest {
+            sort: Some(SortSpec {
+                field: "latency".to_string(),
+                order: SortOrder::Asc,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(missing_last.hits.hits[0].id, "doc-2");
+        assert_eq!(missing_last.hits.hits[1].id, "doc-1");
+        assert_eq!(missing_last.hits.hits[2].id, "doc-3");
+    }
+
+    #[tokio::test]
+    async fn range_query_rejects_string_and_boolean_fields() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "billing", "active": true}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+
+        let string_range = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Range(RangeQuery {
+                field: "service".to_string(),
+                gte: Some(serde_json::json!("a")),
+                gt: None,
+                lte: None,
+                lt: None,
+            })),
+            ..Default::default()
+        });
+        assert_eq!(string_range.hits.total, 0);
+
+        let bool_range = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Range(RangeQuery {
+                field: "active".to_string(),
+                gte: Some(serde_json::json!(true)),
+                gt: None,
+                lte: None,
+                lt: None,
+            })),
+            ..Default::default()
+        });
+        assert_eq!(bool_range.hits.total, 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_flushes_without_new_writes_are_stable() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "hello"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+
+        let first = handle.flush().await.expect("first flush");
+        let second = handle.flush().await.expect("second flush");
+
+        assert_eq!(first.flushed_documents, 1);
+        assert_eq!(second.flushed_documents, 1);
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+        assert_eq!(reopened.search(&SearchRequest::default()).hits.total, 1);
     }
 }
