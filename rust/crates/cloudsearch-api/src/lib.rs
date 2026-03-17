@@ -208,9 +208,10 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use cloudsearch_common::{
-        BoolQuery, BulkDeleteOperation, BulkIndexOperation, BulkOperation, BulkRequest,
-        CreateIndexRequest, IndexDocumentRequest, IndexSettings, RangeQuery, SearchQuery,
-        SearchRequest, SortOrder, SortSpec, TermQuery, TermsQuery,
+        AggregationRequest, BoolQuery, BulkDeleteOperation, BulkIndexOperation, BulkOperation,
+        BulkRequest, CreateIndexRequest, IndexDocumentRequest, IndexSettings, RangeQuery,
+        SearchQuery, SearchRequest, SortOrder, SortSpec, StatsAggregationRequest, TermQuery,
+        TermsAggregationRequest, TermsQuery,
     };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -1017,7 +1018,8 @@ mod tests {
                 "hits": {
                     "total": 0,
                     "hits": []
-                }
+                },
+                "aggregations": {}
             })
         );
     }
@@ -1305,6 +1307,7 @@ mod tests {
                                 field: "latency".to_string(),
                                 order: SortOrder::Asc,
                             }),
+                            ..Default::default()
                         })
                         .expect("serialize search request"),
                     ))
@@ -1520,6 +1523,7 @@ mod tests {
                                 field: "latency".to_string(),
                                 order: SortOrder::Asc,
                             }),
+                            aggs: None,
                             ..Default::default()
                         })
                         .expect("serialize search request"),
@@ -1552,9 +1556,132 @@ mod tests {
                             }
                         }
                     ]
-                }
+                },
+                "aggregations": {}
             })
         );
+    }
+
+    #[tokio::test]
+    async fn terms_and_stats_aggregations_work_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        for request in [
+            IndexDocumentRequest {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "billing", "latency": 10, "level": "info"}),
+            },
+            IndexDocumentRequest {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"service": "billing", "latency": 20, "level": "error"}),
+            },
+            IndexDocumentRequest {
+                id: "doc-3".to_string(),
+                source: serde_json::json!({"service": "search", "latency": 30, "level": "info"}),
+            },
+        ] {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/logs/_doc")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize index request"),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("index response");
+        }
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest {
+                            query: Some(SearchQuery::Term(TermQuery {
+                                field: "level".to_string(),
+                                value: serde_json::json!("info"),
+                            })),
+                            aggs: Some(std::collections::BTreeMap::from([
+                                (
+                                    "services".to_string(),
+                                    AggregationRequest::Terms(TermsAggregationRequest {
+                                        field: "service".to_string(),
+                                    }),
+                                ),
+                                (
+                                    "latency_stats".to_string(),
+                                    AggregationRequest::Stats(StatsAggregationRequest {
+                                        field: "latency".to_string(),
+                                    }),
+                                ),
+                            ])),
+                            ..Default::default()
+                        })
+                        .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize search");
+
+        assert_eq!(value["hits"]["total"], 2);
+        assert_eq!(
+            value["aggregations"]["services"]["terms"]["buckets"][0]["key"],
+            "billing"
+        );
+        assert_eq!(
+            value["aggregations"]["services"]["terms"]["buckets"][0]["doc_count"],
+            1
+        );
+        assert_eq!(value["aggregations"]["latency_stats"]["stats"]["count"], 2);
+        assert_eq!(value["aggregations"]["latency_stats"]["stats"]["sum"], 40.0);
+        assert_eq!(value["aggregations"]["latency_stats"]["stats"]["avg"], 20.0);
     }
 
     #[tokio::test]

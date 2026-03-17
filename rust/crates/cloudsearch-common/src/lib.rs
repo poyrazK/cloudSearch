@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use thiserror::Error;
 use uuid::Uuid;
@@ -157,6 +158,7 @@ pub struct SearchRequest {
     pub from: Option<usize>,
     pub size: Option<usize>,
     pub sort: Option<SortSpec>,
+    pub aggs: Option<BTreeMap<String, AggregationRequest>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -210,9 +212,10 @@ pub enum SortOrder {
     Desc,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchResponse {
     pub hits: HitsMetadata,
+    pub aggregations: BTreeMap<String, AggregationResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -225,6 +228,50 @@ pub struct HitsMetadata {
 pub struct SearchHit {
     pub id: String,
     pub source: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AggregationRequest {
+    Terms(TermsAggregationRequest),
+    Stats(StatsAggregationRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TermsAggregationRequest {
+    pub field: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StatsAggregationRequest {
+    pub field: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AggregationResult {
+    Terms(TermsAggregationResult),
+    Stats(StatsAggregationResult),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TermsAggregationResult {
+    pub buckets: Vec<TermsBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TermsBucket {
+    pub key: serde_json::Value,
+    pub doc_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StatsAggregationResult {
+    pub count: usize,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub avg: Option<f64>,
+    pub sum: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
