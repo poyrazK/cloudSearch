@@ -1,14 +1,15 @@
 use chrono::{DateTime, Utc};
 use cloudsearch_common::{
-    BulkItem, BulkItemResult, BulkOperation, BulkRequest, BulkResponse, CloudSearchError,
-    CreateIndexRequest, FlushResponse, HitsMetadata, IndexDocument, IndexMetadata, RangeQuery,
-    Result, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec, TermsQuery,
+    AggregationRequest, AggregationResult, BulkItem, BulkItemResult, BulkOperation, BulkRequest,
+    BulkResponse, CloudSearchError, CreateIndexRequest, FlushResponse, HitsMetadata, IndexDocument,
+    IndexMetadata, RangeQuery, Result, SearchHit, SearchQuery, SearchRequest, SearchResponse,
+    SortOrder, SortSpec, StatsAggregationResult, TermsAggregationResult, TermsBucket, TermsQuery,
 };
 use cloudsearch_storage::{
     SegmentSnapshot, WalManager, WalRecord, read_segment_snapshot, write_segment_snapshot,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
 };
 use tokio::fs;
@@ -166,10 +167,15 @@ impl IndexHandle {
 
     pub fn search(&self, request: &SearchRequest) -> SearchResponse {
         let query = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll);
-        let mut hits = self
+        let matching_documents = self
             .searchable_documents
             .values()
             .filter(|document| matches_query(document, query))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut hits = matching_documents
+            .iter()
             .map(|document| SearchHit {
                 id: document.id.clone(),
                 source: document.source.clone(),
@@ -177,6 +183,7 @@ impl IndexHandle {
             .collect::<Vec<_>>();
 
         let total = hits.len();
+        let aggregations = compute_aggregations(&matching_documents, request.aggs.as_ref());
 
         if let Some(sort) = &request.sort {
             hits.sort_by(|left, right| compare_hits(left, right, sort));
@@ -188,6 +195,7 @@ impl IndexHandle {
 
         SearchResponse {
             hits: HitsMetadata { total, hits },
+            aggregations,
         }
     }
 
@@ -318,6 +326,95 @@ fn matches_terms_query(document: &IndexDocument, terms: &TermsQuery) -> bool {
         .source
         .get(&terms.field)
         .is_some_and(|value| terms.values.iter().any(|candidate| candidate == value))
+}
+
+fn compute_aggregations(
+    documents: &[IndexDocument],
+    requests: Option<&BTreeMap<String, AggregationRequest>>,
+) -> BTreeMap<String, AggregationResult> {
+    let mut aggregations = BTreeMap::new();
+
+    let Some(requests) = requests else {
+        return aggregations;
+    };
+
+    for (name, request) in requests {
+        let result = match request {
+            AggregationRequest::Terms(terms) => {
+                AggregationResult::Terms(compute_terms_aggregation(documents, &terms.field))
+            }
+            AggregationRequest::Stats(stats) => {
+                AggregationResult::Stats(compute_stats_aggregation(documents, &stats.field))
+            }
+        };
+
+        aggregations.insert(name.clone(), result);
+    }
+
+    aggregations
+}
+
+fn compute_terms_aggregation(documents: &[IndexDocument], field: &str) -> TermsAggregationResult {
+    let mut counts: HashMap<String, (serde_json::Value, usize)> = HashMap::new();
+
+    for document in documents {
+        let Some(value) = document.source.get(field) else {
+            continue;
+        };
+
+        if !matches!(
+            value,
+            serde_json::Value::String(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::Bool(_)
+        ) {
+            continue;
+        }
+
+        let key = value.to_string();
+        let entry = counts.entry(key).or_insert_with(|| (value.clone(), 0));
+        entry.1 += 1;
+    }
+
+    let mut buckets = counts
+        .into_values()
+        .map(|(key, doc_count)| TermsBucket { key, doc_count })
+        .collect::<Vec<_>>();
+
+    buckets.sort_by(|left, right| {
+        right
+            .doc_count
+            .cmp(&left.doc_count)
+            .then_with(|| left.key.to_string().cmp(&right.key.to_string()))
+    });
+
+    TermsAggregationResult { buckets }
+}
+
+fn compute_stats_aggregation(documents: &[IndexDocument], field: &str) -> StatsAggregationResult {
+    let values = documents
+        .iter()
+        .filter_map(|document| document.source.get(field))
+        .filter_map(serde_json::Value::as_f64)
+        .collect::<Vec<_>>();
+
+    let count = values.len();
+    let sum = values.iter().sum::<f64>();
+    let min = values.iter().copied().reduce(f64::min);
+    let max = values.iter().copied().reduce(f64::max);
+    let avg = if count > 0 {
+        Some(sum / count as f64)
+    } else {
+        None
+    };
+
+    StatsAggregationResult {
+        count,
+        min,
+        max,
+        avg,
+        sum,
+    }
 }
 
 fn matches_range_query(document: &IndexDocument, range: &RangeQuery) -> bool {
@@ -455,9 +552,10 @@ fn validate_index_name(name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use cloudsearch_common::{
-        BoolQuery, BulkDeleteOperation, BulkIndexOperation, BulkOperation, BulkRequest,
-        CreateIndexRequest, IndexSettings, MappingMode, RangeQuery, SearchQuery, SearchRequest,
-        SortOrder, SortSpec, TermQuery, TermsQuery,
+        AggregationRequest, AggregationResult, BoolQuery, BulkDeleteOperation, BulkIndexOperation,
+        BulkOperation, BulkRequest, CreateIndexRequest, IndexSettings, MappingMode, RangeQuery,
+        SearchQuery, SearchRequest, SortOrder, SortSpec, StatsAggregationRequest, TermQuery,
+        TermsAggregationRequest, TermsQuery,
     };
     use tempfile::TempDir;
 
@@ -1371,9 +1469,7 @@ mod tests {
                 field: "service".to_string(),
                 values: vec![serde_json::json!("billing"), serde_json::json!("auth")],
             })),
-            from: None,
-            size: None,
-            sort: None,
+            ..Default::default()
         });
 
         assert_eq!(response.hits.total, 2);
@@ -1503,6 +1599,7 @@ mod tests {
                 field: "latency".to_string(),
                 order: SortOrder::Asc,
             }),
+            ..Default::default()
         });
         assert_eq!(paged.hits.total, 3);
         assert_eq!(paged.hits.hits.len(), 1);
@@ -1510,37 +1607,130 @@ mod tests {
 
         let strings = handle.search(&SearchRequest {
             query: None,
-            from: None,
             size: Some(2),
             sort: Some(SortSpec {
                 field: "service".to_string(),
                 order: SortOrder::Desc,
             }),
+            ..Default::default()
         });
         assert_eq!(strings.hits.hits[0].id, "doc-2");
         assert_eq!(strings.hits.hits[1].id, "doc-1");
 
         let booleans = handle.search(&SearchRequest {
             query: None,
-            from: None,
-            size: None,
             sort: Some(SortSpec {
                 field: "active".to_string(),
                 order: SortOrder::Asc,
             }),
+            ..Default::default()
         });
         assert_eq!(booleans.hits.hits[0].id, "doc-2");
 
         let timestamps = handle.search(&SearchRequest {
             query: None,
-            from: None,
-            size: None,
             sort: Some(SortSpec {
                 field: "timestamp".to_string(),
                 order: SortOrder::Desc,
             }),
+            ..Default::default()
         });
         assert_eq!(timestamps.hits.hits[0].id, "doc-3");
+    }
+
+    #[tokio::test]
+    async fn terms_and_stats_aggregations_respect_query_and_ignore_pagination() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        for (id, source) in [
+            (
+                "doc-1",
+                serde_json::json!({"service": "billing", "level": "info", "latency": 10}),
+            ),
+            (
+                "doc-2",
+                serde_json::json!({"service": "billing", "level": "error", "latency": 20}),
+            ),
+            (
+                "doc-3",
+                serde_json::json!({"service": "search", "level": "info", "latency": 30}),
+            ),
+            (
+                "doc-4",
+                serde_json::json!({"service": "search", "level": "info"}),
+            ),
+        ] {
+            handle
+                .index_document(IndexDocument {
+                    id: id.to_string(),
+                    source,
+                })
+                .await
+                .expect("index doc");
+        }
+        handle.refresh().await.expect("refresh");
+
+        let response = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Term(TermQuery {
+                field: "level".to_string(),
+                value: serde_json::json!("info"),
+            })),
+            from: Some(0),
+            size: Some(1),
+            aggs: Some(BTreeMap::from([
+                (
+                    "services".to_string(),
+                    AggregationRequest::Terms(TermsAggregationRequest {
+                        field: "service".to_string(),
+                    }),
+                ),
+                (
+                    "latency_stats".to_string(),
+                    AggregationRequest::Stats(StatsAggregationRequest {
+                        field: "latency".to_string(),
+                    }),
+                ),
+            ])),
+            ..Default::default()
+        });
+
+        assert_eq!(response.hits.total, 3);
+        assert_eq!(response.hits.hits.len(), 1);
+
+        match response.aggregations.get("services") {
+            Some(AggregationResult::Terms(terms)) => {
+                assert_eq!(terms.buckets.len(), 2);
+                assert_eq!(terms.buckets[0].key, serde_json::json!("search"));
+                assert_eq!(terms.buckets[0].doc_count, 2);
+                assert_eq!(terms.buckets[1].key, serde_json::json!("billing"));
+                assert_eq!(terms.buckets[1].doc_count, 1);
+            }
+            other => panic!("unexpected aggregation result: {other:?}"),
+        }
+
+        match response.aggregations.get("latency_stats") {
+            Some(AggregationResult::Stats(stats)) => {
+                assert_eq!(stats.count, 2);
+                assert_eq!(stats.min, Some(10.0));
+                assert_eq!(stats.max, Some(30.0));
+                assert_eq!(stats.avg, Some(20.0));
+                assert_eq!(stats.sum, 40.0);
+            }
+            other => panic!("unexpected aggregation result: {other:?}"),
+        }
     }
 
     #[tokio::test]
