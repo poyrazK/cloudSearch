@@ -22,6 +22,12 @@ It runs on:
 - pushes to `main`
 - pull requests targeting `main`
 
+The workflow also opts into the GitHub Actions Node 24 runtime early with:
+
+- `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true`
+
+This keeps the repository ahead of GitHub-hosted runner runtime deprecations.
+
 ## Checks
 
 The current CI pipeline is split into separate jobs:
