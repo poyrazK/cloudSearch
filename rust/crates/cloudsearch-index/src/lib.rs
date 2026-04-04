@@ -1,7 +1,8 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use cloudsearch_common::{
     AggregationRequest, AggregationResult, BulkItem, BulkItemResult, BulkOperation, BulkRequest,
-    BulkResponse, CloudSearchError, CreateIndexRequest, FlushResponse, HitsMetadata, IndexDocument,
+    BulkResponse, CloudSearchError, CreateIndexRequest, DateHistogramAggregationResult,
+    DateHistogramBucket, DateHistogramInterval, FlushResponse, HitsMetadata, IndexDocument,
     IndexMetadata, RangeQuery, Result, SearchHit, SearchQuery, SearchRequest, SearchResponse,
     SortOrder, SortSpec, StatsAggregationResult, TermsAggregationResult, TermsBucket, TermsQuery,
 };
@@ -346,6 +347,13 @@ fn compute_aggregations(
             AggregationRequest::Stats(stats) => {
                 AggregationResult::Stats(compute_stats_aggregation(documents, &stats.field))
             }
+            AggregationRequest::DateHistogram(histogram) => {
+                AggregationResult::DateHistogram(compute_date_histogram_aggregation(
+                    documents,
+                    &histogram.field,
+                    &histogram.interval,
+                ))
+            }
         };
 
         aggregations.insert(name.clone(), result);
@@ -414,6 +422,59 @@ fn compute_stats_aggregation(documents: &[IndexDocument], field: &str) -> StatsA
         max,
         avg,
         sum,
+    }
+}
+
+fn compute_date_histogram_aggregation(
+    documents: &[IndexDocument],
+    field: &str,
+    interval: &DateHistogramInterval,
+) -> DateHistogramAggregationResult {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+
+    for document in documents {
+        let Some(raw) = document
+            .source
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+
+        let Ok(timestamp) = DateTime::parse_from_rfc3339(raw) else {
+            continue;
+        };
+
+        let bucket_key = truncate_timestamp(timestamp.with_timezone(&Utc), interval)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        *counts.entry(bucket_key).or_default() += 1;
+    }
+
+    DateHistogramAggregationResult {
+        buckets: counts
+            .into_iter()
+            .map(|(key, doc_count)| DateHistogramBucket { key, doc_count })
+            .collect(),
+    }
+}
+
+fn truncate_timestamp(timestamp: DateTime<Utc>, interval: &DateHistogramInterval) -> DateTime<Utc> {
+    match interval {
+        DateHistogramInterval::Minute => timestamp
+            .with_second(0)
+            .and_then(|ts| ts.with_nanosecond(0))
+            .expect("valid minute truncation"),
+        DateHistogramInterval::Hour => timestamp
+            .with_minute(0)
+            .and_then(|ts| ts.with_second(0))
+            .and_then(|ts| ts.with_nanosecond(0))
+            .expect("valid hour truncation"),
+        DateHistogramInterval::Day => timestamp
+            .with_hour(0)
+            .and_then(|ts| ts.with_minute(0))
+            .and_then(|ts| ts.with_second(0))
+            .and_then(|ts| ts.with_nanosecond(0))
+            .expect("valid day truncation"),
     }
 }
 
@@ -553,9 +614,10 @@ mod tests {
     use super::*;
     use cloudsearch_common::{
         AggregationRequest, AggregationResult, BoolQuery, BulkDeleteOperation, BulkIndexOperation,
-        BulkOperation, BulkRequest, CreateIndexRequest, IndexSettings, MappingMode, RangeQuery,
-        SearchQuery, SearchRequest, SortOrder, SortSpec, StatsAggregationRequest, TermQuery,
-        TermsAggregationRequest, TermsQuery,
+        BulkOperation, BulkRequest, CreateIndexRequest, DateHistogramAggregationRequest,
+        DateHistogramInterval, IndexSettings, MappingMode, RangeQuery, SearchQuery, SearchRequest,
+        SortOrder, SortSpec, StatsAggregationRequest, TermQuery, TermsAggregationRequest,
+        TermsQuery,
     };
     use tempfile::TempDir;
 
@@ -1728,6 +1790,75 @@ mod tests {
                 assert_eq!(stats.max, Some(30.0));
                 assert_eq!(stats.avg, Some(20.0));
                 assert_eq!(stats.sum, 40.0);
+            }
+            other => panic!("unexpected aggregation result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn date_histogram_buckets_by_hour_and_ignores_invalid_values() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        for (id, source) in [
+            (
+                "doc-1",
+                serde_json::json!({"timestamp": "2026-03-14T10:05:00Z", "service": "billing"}),
+            ),
+            (
+                "doc-2",
+                serde_json::json!({"timestamp": "2026-03-14T10:45:00Z", "service": "billing"}),
+            ),
+            (
+                "doc-3",
+                serde_json::json!({"timestamp": "2026-03-14T11:15:00Z", "service": "billing"}),
+            ),
+            (
+                "doc-4",
+                serde_json::json!({"timestamp": "not-a-date", "service": "billing"}),
+            ),
+            ("doc-5", serde_json::json!({"service": "billing"})),
+        ] {
+            handle
+                .index_document(IndexDocument {
+                    id: id.to_string(),
+                    source,
+                })
+                .await
+                .expect("index doc");
+        }
+        handle.refresh().await.expect("refresh");
+
+        let response = handle.search(&SearchRequest {
+            aggs: Some(BTreeMap::from([(
+                "events_over_time".to_string(),
+                AggregationRequest::DateHistogram(DateHistogramAggregationRequest {
+                    field: "timestamp".to_string(),
+                    interval: DateHistogramInterval::Hour,
+                }),
+            )])),
+            ..Default::default()
+        });
+
+        match response.aggregations.get("events_over_time") {
+            Some(AggregationResult::DateHistogram(histogram)) => {
+                assert_eq!(histogram.buckets.len(), 2);
+                assert_eq!(histogram.buckets[0].key, "2026-03-14T10:00:00Z");
+                assert_eq!(histogram.buckets[0].doc_count, 2);
+                assert_eq!(histogram.buckets[1].key, "2026-03-14T11:00:00Z");
+                assert_eq!(histogram.buckets[1].doc_count, 1);
             }
             other => panic!("unexpected aggregation result: {other:?}"),
         }

@@ -209,9 +209,9 @@ mod tests {
     use axum::{body::Body, http::Request};
     use cloudsearch_common::{
         AggregationRequest, BoolQuery, BulkDeleteOperation, BulkIndexOperation, BulkOperation,
-        BulkRequest, CreateIndexRequest, IndexDocumentRequest, IndexSettings, RangeQuery,
-        SearchQuery, SearchRequest, SortOrder, SortSpec, StatsAggregationRequest, TermQuery,
-        TermsAggregationRequest, TermsQuery,
+        BulkRequest, CreateIndexRequest, DateHistogramAggregationRequest, DateHistogramInterval,
+        IndexDocumentRequest, IndexSettings, RangeQuery, SearchQuery, SearchRequest, SortOrder,
+        SortSpec, StatsAggregationRequest, TermQuery, TermsAggregationRequest, TermsQuery,
     };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -1682,6 +1682,123 @@ mod tests {
         assert_eq!(value["aggregations"]["latency_stats"]["stats"]["count"], 2);
         assert_eq!(value["aggregations"]["latency_stats"]["stats"]["sum"], 40.0);
         assert_eq!(value["aggregations"]["latency_stats"]["stats"]["avg"], 20.0);
+    }
+
+    #[tokio::test]
+    async fn date_histogram_aggregation_works_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        for request in [
+            IndexDocumentRequest {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"timestamp": "2026-03-14T10:05:00Z", "service": "billing"}),
+            },
+            IndexDocumentRequest {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"timestamp": "2026-03-14T10:45:00Z", "service": "billing"}),
+            },
+            IndexDocumentRequest {
+                id: "doc-3".to_string(),
+                source: serde_json::json!({"timestamp": "2026-03-14T11:15:00Z", "service": "search"}),
+            },
+        ] {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/logs/_doc")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize index request"),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("index response");
+        }
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SearchRequest {
+                            aggs: Some(std::collections::BTreeMap::from([(
+                                "events_over_time".to_string(),
+                                AggregationRequest::DateHistogram(
+                                    DateHistogramAggregationRequest {
+                                        field: "timestamp".to_string(),
+                                        interval: DateHistogramInterval::Hour,
+                                    },
+                                ),
+                            )])),
+                            ..Default::default()
+                        })
+                        .expect("serialize search request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize search");
+
+        assert_eq!(
+            value["aggregations"]["events_over_time"]["date_histogram"]["buckets"][0]["key"],
+            "2026-03-14T10:00:00Z"
+        );
+        assert_eq!(
+            value["aggregations"]["events_over_time"]["date_histogram"]["buckets"][0]["doc_count"],
+            2
+        );
+        assert_eq!(
+            value["aggregations"]["events_over_time"]["date_histogram"]["buckets"][1]["key"],
+            "2026-03-14T11:00:00Z"
+        );
+        assert_eq!(
+            value["aggregations"]["events_over_time"]["date_histogram"]["buckets"][1]["doc_count"],
+            1
+        );
     }
 
     #[tokio::test]
