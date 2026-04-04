@@ -2,9 +2,10 @@ use chrono::{DateTime, Timelike, Utc};
 use cloudsearch_common::{
     AggregationRequest, AggregationResult, BulkItem, BulkItemResult, BulkOperation, BulkRequest,
     BulkResponse, CloudSearchError, CreateIndexRequest, DateHistogramAggregationResult,
-    DateHistogramBucket, DateHistogramInterval, FlushResponse, HitsMetadata, IndexDocument,
-    IndexMetadata, RangeQuery, Result, SearchHit, SearchQuery, SearchRequest, SearchResponse,
-    SortOrder, SortSpec, StatsAggregationResult, TermsAggregationResult, TermsBucket, TermsQuery,
+    DateHistogramBucket, DateHistogramInterval, FieldMapping, FieldType, FlushResponse,
+    HitsMetadata, IndexDocument, IndexMetadata, MappingMode, RangeQuery, Result, SearchHit,
+    SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec, StatsAggregationResult,
+    TermsAggregationResult, TermsBucket, TermsQuery,
 };
 use cloudsearch_storage::{
     SegmentSnapshot, WalManager, WalRecord, read_segment_snapshot, write_segment_snapshot,
@@ -14,6 +15,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::fs;
+
+const MAX_FIELDS_PER_INDEX: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub struct IndexCatalog {
@@ -70,6 +73,7 @@ impl IndexCatalog {
 
     pub async fn open_index(&self, name: &str) -> Result<IndexHandle> {
         let metadata = self.get_index(name).await?;
+        let metadata_path = self.metadata_path(name);
         let segments_dir = self.index_dir(name).join("segments");
         let wal = WalManager::open(self.index_dir(name).join("wal")).await?;
         let snapshot = read_segment_snapshot(&segments_dir).await?;
@@ -108,6 +112,7 @@ impl IndexCatalog {
 
         Ok(IndexHandle {
             metadata,
+            metadata_path,
             wal,
             segments_dir,
             searchable_documents,
@@ -136,6 +141,7 @@ impl IndexCatalog {
 #[derive(Debug)]
 pub struct IndexHandle {
     metadata: IndexMetadata,
+    metadata_path: PathBuf,
     wal: WalManager,
     segments_dir: PathBuf,
     searchable_documents: BTreeMap<String, IndexDocument>,
@@ -200,7 +206,43 @@ impl IndexHandle {
         }
     }
 
+    pub fn validate_search_request(&self, request: &SearchRequest) -> Result<()> {
+        if let Some(query) = &request.query {
+            self.validate_query(query)?;
+        }
+
+        if let Some(sort) = &request.sort
+            && let Some(mapping) = self.metadata.mappings.get(&sort.field)
+            && matches!(mapping.field_type, FieldType::Object)
+        {
+            return Err(CloudSearchError::InvalidSearchRequest(format!(
+                "field '{}' cannot be used for sorting",
+                sort.field
+            )));
+        }
+
+        if let Some(aggs) = &request.aggs {
+            for (name, agg) in aggs {
+                match agg {
+                    AggregationRequest::Terms(terms) => {
+                        self.ensure_scalar_field(&terms.field, name)?;
+                    }
+                    AggregationRequest::Stats(stats) => {
+                        self.ensure_numeric_field(&stats.field, name)?;
+                    }
+                    AggregationRequest::DateHistogram(histogram) => {
+                        self.ensure_timestamp_field(&histogram.field, name)?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn index_document(&mut self, document: IndexDocument) -> Result<u64> {
+        self.validate_and_update_mappings(&document.source).await?;
+
         let sequence_number = self.last_sequence_number + 1;
         self.wal
             .append(
@@ -304,6 +346,174 @@ impl IndexHandle {
             sequence_number: snapshot.last_sequence_number,
         })
     }
+
+    async fn validate_and_update_mappings(&mut self, source: &serde_json::Value) -> Result<()> {
+        let object = source.as_object().ok_or_else(|| {
+            CloudSearchError::MappingConflict("document source must be a JSON object".to_string())
+        })?;
+
+        let mut new_mappings = Vec::new();
+
+        for (field, value) in object {
+            let Some(inferred_type) = infer_field_type(field, value)? else {
+                continue;
+            };
+
+            match self.metadata.mappings.get(field) {
+                Some(existing) if existing.field_type != inferred_type => {
+                    return Err(CloudSearchError::MappingConflict(format!(
+                        "field '{}' expected {:?} but received {:?}",
+                        field, existing.field_type, inferred_type
+                    )));
+                }
+                Some(_) => {}
+                None => match self.metadata.settings.mapping_mode {
+                    MappingMode::Strict => {
+                        return Err(CloudSearchError::UnknownFieldRejected(field.clone()));
+                    }
+                    MappingMode::ControlledDynamic => {
+                        new_mappings.push((
+                            field.clone(),
+                            FieldMapping {
+                                field_type: inferred_type,
+                            },
+                        ));
+                    }
+                },
+            }
+        }
+
+        if self.metadata.mappings.len() + new_mappings.len() > MAX_FIELDS_PER_INDEX {
+            return Err(CloudSearchError::MappingLimitExceeded(format!(
+                "index '{}' exceeded maximum field count of {}",
+                self.metadata.name, MAX_FIELDS_PER_INDEX
+            )));
+        }
+
+        if !new_mappings.is_empty() {
+            for (field, mapping) in new_mappings {
+                self.metadata.mappings.insert(field, mapping);
+            }
+            self.metadata.updated_at = Utc::now();
+            self.persist_metadata().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn persist_metadata(&self) -> Result<()> {
+        let json = serde_json::to_vec_pretty(&self.metadata)?;
+        fs::write(&self.metadata_path, json).await?;
+        Ok(())
+    }
+
+    fn validate_query(&self, query: &SearchQuery) -> Result<()> {
+        match query {
+            SearchQuery::MatchAll => Ok(()),
+            SearchQuery::Term(term) => self.ensure_scalar_field(&term.field, &term.field),
+            SearchQuery::Terms(terms) => self.ensure_scalar_field(&terms.field, &terms.field),
+            SearchQuery::Range(range) => self.ensure_range_field(&range.field),
+            SearchQuery::Bool(boolean) => boolean
+                .filter
+                .iter()
+                .try_for_each(|query| self.validate_query(query)),
+        }
+    }
+
+    fn ensure_scalar_field(&self, field: &str, context: &str) -> Result<()> {
+        if let Some(mapping) = self.metadata.mappings.get(field)
+            && matches!(mapping.field_type, FieldType::Object)
+        {
+            return Err(CloudSearchError::InvalidSearchRequest(format!(
+                "field '{}' cannot be used as a scalar in '{}'",
+                field, context
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn ensure_numeric_field(&self, field: &str, context: &str) -> Result<()> {
+        if let Some(mapping) = self.metadata.mappings.get(field)
+            && !matches!(
+                mapping.field_type,
+                FieldType::Integer | FieldType::Long | FieldType::Double
+            )
+        {
+            return Err(CloudSearchError::InvalidSearchRequest(format!(
+                "field '{}' is not numeric for '{}'",
+                field, context
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn ensure_timestamp_field(&self, field: &str, context: &str) -> Result<()> {
+        if let Some(mapping) = self.metadata.mappings.get(field)
+            && mapping.field_type != FieldType::Timestamp
+        {
+            return Err(CloudSearchError::InvalidSearchRequest(format!(
+                "field '{}' is not a timestamp for '{}'",
+                field, context
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn ensure_range_field(&self, field: &str) -> Result<()> {
+        if let Some(mapping) = self.metadata.mappings.get(field)
+            && !matches!(
+                mapping.field_type,
+                FieldType::Integer | FieldType::Long | FieldType::Double | FieldType::Timestamp
+            )
+        {
+            return Err(CloudSearchError::InvalidSearchRequest(format!(
+                "field '{}' does not support range queries",
+                field
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+fn infer_field_type(field: &str, value: &serde_json::Value) -> Result<Option<FieldType>> {
+    Ok(match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(_) => Some(FieldType::Boolean),
+        serde_json::Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                if i32::try_from(integer).is_ok() {
+                    Some(FieldType::Integer)
+                } else {
+                    Some(FieldType::Long)
+                }
+            } else if let Some(integer) = number.as_u64() {
+                if i32::try_from(integer).is_ok() {
+                    Some(FieldType::Integer)
+                } else if i64::try_from(integer).is_ok() {
+                    Some(FieldType::Long)
+                } else {
+                    Some(FieldType::Double)
+                }
+            } else {
+                Some(FieldType::Double)
+            }
+        }
+        serde_json::Value::String(raw) => {
+            if DateTime::parse_from_rfc3339(raw).is_ok() {
+                Some(FieldType::Timestamp)
+            } else {
+                Some(FieldType::Keyword)
+            }
+        }
+        serde_json::Value::Array(_) => {
+            return Err(CloudSearchError::UnsupportedArrayField(field.to_string()));
+        }
+        serde_json::Value::Object(_) => Some(FieldType::Object),
+    })
 }
 
 fn matches_query(document: &IndexDocument, query: &SearchQuery) -> bool {
@@ -615,9 +825,9 @@ mod tests {
     use cloudsearch_common::{
         AggregationRequest, AggregationResult, BoolQuery, BulkDeleteOperation, BulkIndexOperation,
         BulkOperation, BulkRequest, CreateIndexRequest, DateHistogramAggregationRequest,
-        DateHistogramInterval, IndexSettings, MappingMode, RangeQuery, SearchQuery, SearchRequest,
-        SortOrder, SortSpec, StatsAggregationRequest, TermQuery, TermsAggregationRequest,
-        TermsQuery,
+        DateHistogramInterval, FieldType, IndexSettings, MappingMode, RangeQuery, SearchQuery,
+        SearchRequest, SortOrder, SortSpec, StatsAggregationRequest, TermQuery,
+        TermsAggregationRequest, TermsQuery,
     };
     use tempfile::TempDir;
 
@@ -676,6 +886,145 @@ mod tests {
             .expect_err("duplicate should fail");
 
         assert!(matches!(error, CloudSearchError::IndexAlreadyExists(_)));
+    }
+
+    #[tokio::test]
+    async fn infers_and_persists_mappings_across_reopen() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({
+                    "service": "billing",
+                    "latency": 42,
+                    "active": true,
+                    "timestamp": "2026-03-14T10:00:00Z"
+                }),
+            })
+            .await
+            .expect("index doc");
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+        assert_eq!(
+            reopened.metadata().mappings["service"].field_type,
+            FieldType::Keyword
+        );
+        assert_eq!(
+            reopened.metadata().mappings["latency"].field_type,
+            FieldType::Integer
+        );
+        assert_eq!(
+            reopened.metadata().mappings["active"].field_type,
+            FieldType::Boolean
+        );
+        assert_eq!(
+            reopened.metadata().mappings["timestamp"].field_type,
+            FieldType::Timestamp
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_mode_rejects_unknown_fields_and_arrays() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: IndexSettings {
+                        mapping_mode: MappingMode::Strict,
+                        primary_time_field: None,
+                    },
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+
+        let unknown = handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "billing"}),
+            })
+            .await
+            .expect_err("strict mode should reject unknown field");
+        assert!(matches!(unknown, CloudSearchError::UnknownFieldRejected(_)));
+
+        let array = handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"services": ["billing", "search"]}),
+            })
+            .await
+            .expect_err("arrays should be rejected");
+        assert!(matches!(array, CloudSearchError::UnsupportedArrayField(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_mapping_conflicts_and_invalid_query_usage() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "billing", "meta": {"host": "a"}}),
+            })
+            .await
+            .expect("index doc");
+
+        let conflict = handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"meta": "not-an-object"}),
+            })
+            .await
+            .expect_err("conflict should fail");
+        assert!(matches!(conflict, CloudSearchError::MappingConflict(_)));
+
+        let invalid_query = handle.validate_search_request(&SearchRequest {
+            query: Some(SearchQuery::Range(RangeQuery {
+                field: "service".to_string(),
+                gte: Some(serde_json::json!("a")),
+                gt: None,
+                lte: None,
+                lt: None,
+            })),
+            ..Default::default()
+        });
+        assert!(matches!(
+            invalid_query,
+            Err(CloudSearchError::InvalidSearchRequest(_))
+        ));
     }
 
     #[tokio::test]
@@ -1796,7 +2145,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn date_histogram_buckets_by_hour_and_ignores_invalid_values() {
+    async fn date_histogram_buckets_by_hour_and_ignores_missing_values() {
         let temp_dir = TempDir::new().expect("temp dir");
         let catalog = IndexCatalog::new(temp_dir.path());
         catalog.initialize().await.expect("init catalog");
@@ -1825,10 +2174,7 @@ mod tests {
                 "doc-3",
                 serde_json::json!({"timestamp": "2026-03-14T11:15:00Z", "service": "billing"}),
             ),
-            (
-                "doc-4",
-                serde_json::json!({"timestamp": "not-a-date", "service": "billing"}),
-            ),
+            ("doc-4", serde_json::json!({"service": "billing"})),
             ("doc-5", serde_json::json!({"service": "billing"})),
         ] {
             handle
