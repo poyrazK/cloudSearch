@@ -57,6 +57,7 @@ Current implementation notes:
 
 - `term`, `terms`, `range`, and simple `bool.filter` are implemented
 - `from`, `size`, and single-field sort are implemented
+- the API now accepts both the internal request shape and a closer Elasticsearch-style shape for `term`, `terms`, `range`, simple `bool.filter`, and single-entry sort arrays
 - search currently supports top-level fields only
 - bulk format is simplified JSON, not Elasticsearch NDJSON
 

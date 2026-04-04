@@ -6,11 +6,13 @@ use axum::{
     routing::{get, put},
 };
 use cloudsearch_common::{
-    BulkRequest, CloudSearchError, CreateIndexRequest, ErrorResponse, FlushResponse,
-    GetDocumentResponse, HealthResponse, IndexDocument, IndexDocumentRequest,
-    IndexDocumentResponse, RefreshResponse, SearchRequest,
+    AggregationRequest, BoolQuery, BulkRequest, CloudSearchError, CreateIndexRequest,
+    ErrorResponse, FlushResponse, GetDocumentResponse, HealthResponse, IndexDocument,
+    IndexDocumentRequest, IndexDocumentResponse, RangeQuery, RefreshResponse, SearchQuery,
+    SearchRequest, SortSpec, TermQuery, TermsQuery,
 };
 use cloudsearch_index::{IndexCatalog, IndexHandle};
+use serde_json::Value;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -135,11 +137,295 @@ async fn get_document(
 async fn search_index(
     State(state): State<ApiState>,
     Path(index): Path<String>,
-    Json(request): Json<SearchRequest>,
+    Json(request): Json<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let request = parse_search_request(request)?;
     let handle = state.index_handle(&index).await?;
     let handle = handle.lock().await;
     Ok((StatusCode::OK, Json(handle.search(&request))))
+}
+
+fn parse_search_request(value: Value) -> Result<SearchRequest, ApiError> {
+    let mut request = SearchRequest::default();
+    let object = value.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "search request must be a JSON object".to_string(),
+        ))
+    })?;
+
+    if let Some(query) = object.get("query").filter(|value| !value.is_null()) {
+        request.query = Some(parse_query(query)?);
+    }
+
+    if let Some(from) = object.get("from").filter(|value| !value.is_null()) {
+        request.from = Some(parse_usize_field(from, "from")?);
+    }
+
+    if let Some(size) = object.get("size").filter(|value| !value.is_null()) {
+        request.size = Some(parse_usize_field(size, "size")?);
+    }
+
+    if let Some(sort) = object.get("sort").filter(|value| !value.is_null()) {
+        request.sort = Some(parse_sort(sort)?);
+    }
+
+    if let Some(aggs) = object
+        .get("aggs")
+        .or_else(|| object.get("aggregations"))
+        .filter(|value| !value.is_null())
+    {
+        request.aggs = Some(
+            serde_json::from_value::<std::collections::BTreeMap<String, AggregationRequest>>(
+                aggs.clone(),
+            )
+            .map_err(CloudSearchError::from)
+            .map_err(ApiError::from)?,
+        );
+    }
+
+    Ok(request)
+}
+
+fn parse_query(value: &Value) -> Result<SearchQuery, ApiError> {
+    let object = value.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "query must be a JSON object".to_string(),
+        ))
+    })?;
+
+    if object.len() != 1 {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "query object must contain exactly one clause".to_string(),
+        )));
+    }
+
+    let (kind, body) = object.iter().next().expect("single query entry");
+    match kind.as_str() {
+        "match_all" => Ok(SearchQuery::MatchAll),
+        "term" => Ok(SearchQuery::Term(parse_term_query(body)?)),
+        "terms" => Ok(SearchQuery::Terms(parse_terms_query(body)?)),
+        "range" => Ok(SearchQuery::Range(parse_range_query(body)?)),
+        "bool" => Ok(SearchQuery::Bool(parse_bool_query(body)?)),
+        other => Err(ApiError(CloudSearchError::InvalidSearchRequest(format!(
+            "unsupported query clause '{other}'"
+        )))),
+    }
+}
+
+fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
+    let object = value.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "term query must be a JSON object".to_string(),
+        ))
+    })?;
+
+    if object.contains_key("field") || object.contains_key("value") {
+        let field = object.get("field").and_then(Value::as_str).ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "internal term query shape requires string 'field'".to_string(),
+            ))
+        })?;
+        let value = object.get("value").cloned().ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "internal term query shape requires 'value'".to_string(),
+            ))
+        })?;
+
+        return Ok(TermQuery {
+            field: field.to_string(),
+            value,
+        });
+    }
+
+    if object.len() != 1 {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "term query must contain exactly one field".to_string(),
+        )));
+    }
+
+    let (field, raw_value) = object.iter().next().expect("single term field");
+    Ok(TermQuery {
+        field: field.clone(),
+        value: raw_value.clone(),
+    })
+}
+
+fn parse_terms_query(value: &Value) -> Result<TermsQuery, ApiError> {
+    let object = value.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "terms query must be a JSON object".to_string(),
+        ))
+    })?;
+
+    if object.contains_key("field") || object.contains_key("values") {
+        let field = object.get("field").and_then(Value::as_str).ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "internal terms query shape requires string 'field'".to_string(),
+            ))
+        })?;
+        let values = object
+            .get("values")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| {
+                ApiError(CloudSearchError::InvalidSearchRequest(
+                    "internal terms query shape requires array 'values'".to_string(),
+                ))
+            })?;
+
+        return Ok(TermsQuery {
+            field: field.to_string(),
+            values,
+        });
+    }
+
+    if object.len() != 1 {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "terms query must contain exactly one field".to_string(),
+        )));
+    }
+
+    let (field, raw_values) = object.iter().next().expect("single terms field");
+    let values = raw_values.as_array().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "terms query field must map to an array".to_string(),
+        ))
+    })?;
+
+    Ok(TermsQuery {
+        field: field.clone(),
+        values: values.clone(),
+    })
+}
+
+fn parse_range_query(value: &Value) -> Result<RangeQuery, ApiError> {
+    let object = value.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "range query must be a JSON object".to_string(),
+        ))
+    })?;
+
+    if object.contains_key("field") {
+        let field = object.get("field").and_then(Value::as_str).ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "internal range query shape requires string 'field'".to_string(),
+            ))
+        })?;
+
+        return Ok(RangeQuery {
+            field: field.to_string(),
+            gte: object.get("gte").filter(|value| !value.is_null()).cloned(),
+            gt: object.get("gt").filter(|value| !value.is_null()).cloned(),
+            lte: object.get("lte").filter(|value| !value.is_null()).cloned(),
+            lt: object.get("lt").filter(|value| !value.is_null()).cloned(),
+        });
+    }
+
+    if object.len() != 1 {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "range query must contain exactly one field".to_string(),
+        )));
+    }
+
+    let (field, bounds) = object.iter().next().expect("single range field");
+    let bounds = bounds.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "range bounds must be a JSON object".to_string(),
+        ))
+    })?;
+
+    Ok(RangeQuery {
+        field: field.clone(),
+        gte: bounds.get("gte").filter(|value| !value.is_null()).cloned(),
+        gt: bounds.get("gt").filter(|value| !value.is_null()).cloned(),
+        lte: bounds.get("lte").filter(|value| !value.is_null()).cloned(),
+        lt: bounds.get("lt").filter(|value| !value.is_null()).cloned(),
+    })
+}
+
+fn parse_bool_query(value: &Value) -> Result<BoolQuery, ApiError> {
+    let object = value.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "bool query must be a JSON object".to_string(),
+        ))
+    })?;
+
+    let Some(filters) = object.get("filter") else {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "only bool.filter is currently supported".to_string(),
+        )));
+    };
+
+    let filters = filters.as_array().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "bool.filter must be an array".to_string(),
+        ))
+    })?;
+
+    let filter = filters
+        .iter()
+        .map(parse_query)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(BoolQuery { filter })
+}
+
+fn parse_sort(value: &Value) -> Result<SortSpec, ApiError> {
+    if let Ok(sort) = serde_json::from_value::<SortSpec>(value.clone()) {
+        return Ok(sort);
+    }
+
+    let item = match value {
+        Value::Array(items) => {
+            if items.len() != 1 {
+                return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+                    "only one sort entry is supported".to_string(),
+                )));
+            }
+            &items[0]
+        }
+        _ => value,
+    };
+
+    let object = item.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "sort must be an object or single-entry array".to_string(),
+        ))
+    })?;
+
+    if object.len() != 1 {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "sort object must contain exactly one field".to_string(),
+        )));
+    }
+
+    let (field, body) = object.iter().next().expect("single sort field");
+    let order = body
+        .as_object()
+        .and_then(|body| body.get("order"))
+        .cloned()
+        .unwrap_or_else(|| Value::String("asc".to_string()));
+
+    Ok(SortSpec {
+        field: field.clone(),
+        order: serde_json::from_value(order)
+            .map_err(CloudSearchError::from)
+            .map_err(ApiError::from)?,
+    })
+}
+
+fn parse_usize_field(value: &Value, field: &str) -> Result<usize, ApiError> {
+    let value = value.as_u64().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(format!(
+            "{field} must be a non-negative integer"
+        )))
+    })?;
+
+    usize::try_from(value).map_err(|_| {
+        ApiError(CloudSearchError::InvalidSearchRequest(format!(
+            "{field} is too large"
+        )))
+    })
 }
 
 async fn refresh_index(
@@ -1373,6 +1659,292 @@ mod tests {
             .expect("response");
 
         assert!(response.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn supports_elasticsearch_style_query_shapes_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        for request in [
+            IndexDocumentRequest {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({
+                    "service": "billing",
+                    "level": "info",
+                    "latency": 10,
+                    "timestamp": "2026-03-14T10:10:00Z"
+                }),
+            },
+            IndexDocumentRequest {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({
+                    "service": "search",
+                    "level": "info",
+                    "latency": 30,
+                    "timestamp": "2026-03-14T11:10:00Z"
+                }),
+            },
+            IndexDocumentRequest {
+                id: "doc-3".to_string(),
+                source: serde_json::json!({
+                    "service": "auth",
+                    "level": "error",
+                    "latency": 20,
+                    "timestamp": "2026-03-14T12:10:00Z"
+                }),
+            },
+        ] {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/logs/_doc")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize index request"),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("index response");
+        }
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+
+        let term_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": {
+                                "term": {
+                                    "service": "billing"
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+        let term_body = term_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let term_json: serde_json::Value = serde_json::from_slice(&term_body).expect("json");
+        assert_eq!(term_json["hits"]["total"], 1);
+        assert_eq!(term_json["hits"]["hits"][0]["id"], "doc-1");
+
+        let terms_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": {
+                                "terms": {
+                                    "service": ["billing", "auth"]
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+        let terms_body = terms_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let terms_json: serde_json::Value = serde_json::from_slice(&terms_body).expect("json");
+        assert_eq!(terms_json["hits"]["total"], 2);
+
+        let range_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": {
+                                "range": {
+                                    "latency": {
+                                        "gte": 15,
+                                        "lt": 25
+                                    }
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+        let range_body = range_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let range_json: serde_json::Value = serde_json::from_slice(&range_body).expect("json");
+        assert_eq!(range_json["hits"]["total"], 1);
+        assert_eq!(range_json["hits"]["hits"][0]["id"], "doc-3");
+
+        let bool_sort_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": {
+                                "bool": {
+                                    "filter": [
+                                        {"term": {"level": "info"}}
+                                    ]
+                                }
+                            },
+                            "sort": [
+                                {"latency": {"order": "desc"}}
+                            ],
+                            "from": 0,
+                            "size": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+        let bool_sort_body = bool_sort_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let bool_sort_json: serde_json::Value =
+            serde_json::from_slice(&bool_sort_body).expect("json");
+        assert_eq!(bool_sort_json["hits"]["total"], 2);
+        assert_eq!(bool_sort_json["hits"]["hits"][0]["id"], "doc-2");
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_elasticsearch_style_shapes() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        for payload in [
+            serde_json::json!({
+                "query": {
+                    "term": {
+                        "service": "billing",
+                        "level": "info"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "query": {
+                    "terms": {
+                        "service": "billing"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"service": "billing"}}
+                        ]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "sort": [
+                    {"latency": {"order": "asc"}},
+                    {"service": {"order": "desc"}}
+                ]
+            }),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/logs/_search")
+                        .header("content-type", "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
     }
 
     #[tokio::test]
