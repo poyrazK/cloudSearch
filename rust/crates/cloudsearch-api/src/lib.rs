@@ -142,6 +142,7 @@ async fn search_index(
     let request = parse_search_request(request)?;
     let handle = state.index_handle(&index).await?;
     let handle = handle.lock().await;
+    handle.validate_search_request(&request)?;
     Ok((StatusCode::OK, Json(handle.search(&request))))
 }
 
@@ -470,9 +471,12 @@ impl IntoResponse for ApiError {
         let status = match self.0 {
             CloudSearchError::IndexAlreadyExists(_) => StatusCode::CONFLICT,
             CloudSearchError::IndexNotFound(_) => StatusCode::NOT_FOUND,
-            CloudSearchError::InvalidIndexName(_) | CloudSearchError::InvalidSearchRequest(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            CloudSearchError::InvalidIndexName(_)
+            | CloudSearchError::InvalidSearchRequest(_)
+            | CloudSearchError::MappingConflict(_)
+            | CloudSearchError::UnknownFieldRejected(_)
+            | CloudSearchError::UnsupportedArrayField(_)
+            | CloudSearchError::MappingLimitExceeded(_) => StatusCode::BAD_REQUEST,
             CloudSearchError::InvalidWalRecord(_)
             | CloudSearchError::WalChecksumMismatch
             | CloudSearchError::Io(_)
@@ -1945,6 +1949,122 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
+    }
+
+    #[tokio::test]
+    async fn strict_mode_and_mapping_conflicts_return_bad_request() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/strict-logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: IndexSettings {
+                                mapping_mode: cloudsearch_common::MappingMode::Strict,
+                                primary_time_field: None,
+                            },
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        let strict_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/strict-logs/_doc")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&IndexDocumentRequest {
+                            id: "doc-1".to_string(),
+                            source: serde_json::json!({"service": "billing"}),
+                        })
+                        .expect("serialize index request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(strict_response.status(), StatusCode::BAD_REQUEST);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        for request in [
+            IndexDocumentRequest {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"meta": {"host": "a"}}),
+            },
+            IndexDocumentRequest {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"meta": "not-an-object"}),
+            },
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/logs/_doc")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize index request"),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            if request.id == "doc-1" {
+                assert_eq!(response.status(), StatusCode::CREATED);
+            } else {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+        }
+
+        let array_response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs/_doc")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&IndexDocumentRequest {
+                            id: "doc-3".to_string(),
+                            source: serde_json::json!({"services": ["billing", "search"]}),
+                        })
+                        .expect("serialize index request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(array_response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
