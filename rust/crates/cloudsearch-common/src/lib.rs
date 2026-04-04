@@ -235,6 +235,7 @@ pub struct SearchHit {
 pub enum AggregationRequest {
     Terms(TermsAggregationRequest),
     Stats(StatsAggregationRequest),
+    DateHistogram(DateHistogramAggregationRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -247,11 +248,26 @@ pub struct StatsAggregationRequest {
     pub field: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DateHistogramAggregationRequest {
+    pub field: String,
+    pub interval: DateHistogramInterval,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DateHistogramInterval {
+    Minute,
+    Hour,
+    Day,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum AggregationResult {
     Terms(TermsAggregationResult),
     Stats(StatsAggregationResult),
+    DateHistogram(DateHistogramAggregationResult),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -272,6 +288,17 @@ pub struct StatsAggregationResult {
     pub max: Option<f64>,
     pub avg: Option<f64>,
     pub sum: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DateHistogramAggregationResult {
+    pub buckets: Vec<DateHistogramBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DateHistogramBucket {
+    pub key: String,
+    pub doc_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
