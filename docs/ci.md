@@ -38,6 +38,8 @@ The current CI pipeline is split into separate jobs:
 - `integration-tests`
 - `coverage`
 
+Cargo dependencies and `rust/target` are cached with `actions/cache` using the Rust lockfile and crate manifests as the cache key input.
+
 Commands run from `rust/`:
 
 - `cargo fmt --all --check`
