@@ -72,7 +72,7 @@ Current implementation notes:
 - default mapping mode is `controlled_dynamic`
 - inferred mappings are persisted
 - field conflicts return explicit errors
-- arrays are currently rejected
+- arrays are rejected
 - strings currently infer as `keyword`
 
 ## Time-Aware Behavior
