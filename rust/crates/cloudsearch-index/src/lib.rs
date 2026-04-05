@@ -13,20 +13,23 @@ use cloudsearch_storage::{
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
+    sync::Arc,
 };
-use tokio::fs;
+use tokio::{fs, sync::RwLock};
 
 const MAX_FIELDS_PER_INDEX: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub struct IndexCatalog {
     root_dir: PathBuf,
+    lifecycle_lock: Arc<RwLock<()>>,
 }
 
 impl IndexCatalog {
     pub fn new(root_dir: impl Into<PathBuf>) -> Self {
         Self {
             root_dir: root_dir.into(),
+            lifecycle_lock: Arc::new(RwLock::new(())),
         }
     }
 
@@ -40,6 +43,7 @@ impl IndexCatalog {
         name: &str,
         request: CreateIndexRequest,
     ) -> Result<IndexMetadata> {
+        let _guard = self.lifecycle_lock.write().await;
         validate_index_name(name)?;
 
         let index_dir = self.index_dir(name);
@@ -69,6 +73,19 @@ impl IndexCatalog {
 
         let bytes = fs::read(metadata_path).await?;
         Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    pub async fn delete_index(&self, name: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.write().await;
+        validate_index_name(name)?;
+
+        let index_dir = self.index_dir(name);
+        if !fs::try_exists(&index_dir).await? {
+            return Err(CloudSearchError::IndexNotFound(name.to_string()));
+        }
+
+        fs::remove_dir_all(index_dir).await?;
+        Ok(())
     }
 
     pub async fn open_index(&self, name: &str) -> Result<IndexHandle> {
@@ -909,6 +926,55 @@ mod tests {
             .expect_err("duplicate should fail");
 
         assert!(matches!(error, CloudSearchError::IndexAlreadyExists(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_index_removes_storage_and_allows_recreate() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let index_dir = temp_dir.path().join("indexes").join("logs");
+        assert!(index_dir.exists());
+
+        catalog.delete_index("logs").await.expect("delete index");
+        assert!(!index_dir.exists());
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("recreate index");
+
+        assert!(index_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_missing_index_returns_not_found() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        let error = catalog
+            .delete_index("missing")
+            .await
+            .expect_err("missing index should fail");
+
+        assert!(matches!(error, CloudSearchError::IndexNotFound(_)));
     }
 
     #[tokio::test]
