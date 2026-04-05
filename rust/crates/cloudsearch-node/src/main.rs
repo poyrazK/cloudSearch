@@ -1,5 +1,5 @@
-use cloudsearch_api::router;
-use cloudsearch_index::IndexCatalog;
+use cloudsearch_api::router_with_registry;
+use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use std::{env, sync::Arc};
 use tokio::net::TcpListener;
 
@@ -10,8 +10,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let catalog = Arc::new(IndexCatalog::new(data_dir));
     catalog.initialize().await?;
+    let registry = Arc::new(IndexRegistry::new(catalog));
 
-    let app = router(catalog);
+    let app = router_with_registry(registry);
     let listener = TcpListener::bind(&bind_addr).await?;
 
     println!("cloudSearch node listening on {bind_addr}");
