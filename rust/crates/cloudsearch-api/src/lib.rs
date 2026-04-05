@@ -6,15 +6,81 @@ use axum::{
     routing::{get, put},
 };
 use cloudsearch_common::{
-    AggregationRequest, BoolQuery, BulkRequest, CloudSearchError, CreateIndexRequest,
-    ErrorResponse, FlushResponse, GetDocumentResponse, HealthResponse, IndexDocument,
-    IndexDocumentRequest, IndexDocumentResponse, RangeQuery, RefreshResponse, SearchQuery,
-    SearchRequest, SortSpec, TermQuery, TermsQuery,
+    AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkRequest,
+    BulkResponse, CloudSearchError, CreateIndexRequest, DateHistogramAggregationResult,
+    ErrorResponse, FlushResponse, HealthResponse, IndexDocument, IndexDocumentRequest, RangeQuery,
+    RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
+    StatsAggregationResult, TermQuery, TermsAggregationResult, TermsQuery,
 };
 use cloudsearch_index::{IndexCatalog, IndexHandle};
 use serde_json::Value;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use tokio::sync::Mutex;
+
+#[derive(serde::Serialize)]
+struct CompatIndexDocumentResponse {
+    #[serde(rename = "_id")]
+    id: String,
+    result: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct CompatGetDocumentResponse {
+    #[serde(rename = "_id")]
+    id: String,
+    found: bool,
+    #[serde(rename = "_source")]
+    source: Value,
+}
+
+#[derive(serde::Serialize)]
+struct CompatSearchResponse {
+    hits: CompatHitsMetadata,
+    aggregations: BTreeMap<String, Value>,
+}
+
+#[derive(serde::Serialize)]
+struct CompatHitsMetadata {
+    total: CompatTotalHits,
+    hits: Vec<CompatSearchHit>,
+}
+
+#[derive(serde::Serialize)]
+struct CompatTotalHits {
+    value: usize,
+    relation: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct CompatSearchHit {
+    #[serde(rename = "_id")]
+    id: String,
+    #[serde(rename = "_source")]
+    source: Value,
+}
+
+#[derive(serde::Serialize)]
+struct CompatBulkResponse {
+    errors: bool,
+    items: Vec<CompatBulkItem>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CompatBulkItem {
+    Index(CompatBulkItemResult),
+    Delete(CompatBulkItemResult),
+}
+
+#[derive(serde::Serialize)]
+struct CompatBulkItemResult {
+    #[serde(rename = "_id")]
+    id: String,
+    result: String,
+}
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -86,7 +152,12 @@ async fn index_document(
 ) -> Result<impl IntoResponse, ApiError> {
     let handle = state.index_handle(&index).await?;
     let mut handle = handle.lock().await;
-    let sequence_number = handle
+    let result = if handle.get_document(&request.id).is_some() {
+        "updated"
+    } else {
+        "created"
+    };
+    handle
         .index_document(IndexDocument {
             id: request.id.clone(),
             source: request.source,
@@ -95,10 +166,9 @@ async fn index_document(
 
     Ok((
         StatusCode::CREATED,
-        Json(IndexDocumentResponse {
+        Json(CompatIndexDocumentResponse {
             id: request.id,
-            result: "created",
-            sequence_number,
+            result,
         }),
     ))
 }
@@ -111,7 +181,7 @@ async fn bulk_index(
     let handle = state.index_handle(&index).await?;
     let mut handle = handle.lock().await;
     let response = handle.bulk_apply(request).await?;
-    Ok((StatusCode::OK, Json(response)))
+    Ok((StatusCode::OK, Json(to_compat_bulk_response(response))))
 }
 
 async fn get_document(
@@ -126,7 +196,7 @@ async fn get_document(
 
     Ok((
         StatusCode::OK,
-        Json(GetDocumentResponse {
+        Json(CompatGetDocumentResponse {
             id: document.id.clone(),
             found: true,
             source: document.source.clone(),
@@ -143,7 +213,10 @@ async fn search_index(
     let handle = state.index_handle(&index).await?;
     let handle = handle.lock().await;
     handle.validate_search_request(&request)?;
-    Ok((StatusCode::OK, Json(handle.search(&request))))
+    Ok((
+        StatusCode::OK,
+        Json(to_compat_search_response(handle.search(&request))),
+    ))
 }
 
 fn parse_search_request(value: Value) -> Result<SearchRequest, ApiError> {
@@ -448,6 +521,90 @@ fn parse_usize_field(value: &Value, field: &str) -> Result<usize, ApiError> {
         ApiError(CloudSearchError::InvalidSearchRequest(format!(
             "{field} is too large"
         )))
+    })
+}
+
+fn to_compat_search_response(response: SearchResponse) -> CompatSearchResponse {
+    CompatSearchResponse {
+        hits: CompatHitsMetadata {
+            total: CompatTotalHits {
+                value: response.hits.total,
+                relation: "eq",
+            },
+            hits: response
+                .hits
+                .hits
+                .into_iter()
+                .map(to_compat_search_hit)
+                .collect(),
+        },
+        aggregations: response
+            .aggregations
+            .into_iter()
+            .map(|(name, aggregation)| (name, aggregation_to_json(aggregation)))
+            .collect(),
+    }
+}
+
+fn to_compat_search_hit(hit: SearchHit) -> CompatSearchHit {
+    CompatSearchHit {
+        id: hit.id,
+        source: hit.source,
+    }
+}
+
+fn to_compat_bulk_response(response: BulkResponse) -> CompatBulkResponse {
+    CompatBulkResponse {
+        errors: response.errors,
+        items: response
+            .items
+            .into_iter()
+            .map(|item| match item {
+                BulkItem::Index(result) => {
+                    CompatBulkItem::Index(to_compat_bulk_item_result(result))
+                }
+                BulkItem::Delete(result) => {
+                    CompatBulkItem::Delete(to_compat_bulk_item_result(result))
+                }
+            })
+            .collect(),
+    }
+}
+
+fn to_compat_bulk_item_result(result: BulkItemResult) -> CompatBulkItemResult {
+    CompatBulkItemResult {
+        id: result.id,
+        result: result.result,
+    }
+}
+
+fn aggregation_to_json(aggregation: AggregationResult) -> Value {
+    match aggregation {
+        AggregationResult::Terms(result) => terms_aggregation_to_json(result),
+        AggregationResult::Stats(result) => stats_aggregation_to_json(result),
+        AggregationResult::DateHistogram(result) => date_histogram_aggregation_to_json(result),
+    }
+}
+
+fn terms_aggregation_to_json(result: TermsAggregationResult) -> Value {
+    serde_json::json!({
+        "buckets": result.buckets
+    })
+}
+
+fn stats_aggregation_to_json(result: StatsAggregationResult) -> Value {
+    serde_json::json!({
+        "count": result.count,
+        "min": result.min,
+        "max": result.max,
+        "avg": result.avg,
+        "sum": result.sum,
+    })
+}
+
+fn date_histogram_aggregation_to_json(result: DateHistogramAggregationResult) -> Value {
+    serde_json::json!({
+        "buckets": result.buckets
     })
 }
 
@@ -774,7 +931,7 @@ mod tests {
             .to_bytes();
         let before_refresh_json: serde_json::Value =
             serde_json::from_slice(&before_refresh_body).expect("deserialize search response");
-        assert_eq!(before_refresh_json["hits"]["total"], 0);
+        assert_eq!(before_refresh_json["hits"]["total"]["value"], 0);
 
         let refresh_response = app
             .clone()
@@ -819,7 +976,7 @@ mod tests {
             .expect("body")
             .to_bytes();
         let term_text = String::from_utf8(term_body.to_vec()).expect("utf8");
-        assert!(term_text.contains("\"total\":1"));
+        assert!(term_text.contains("\"value\":1"));
         assert!(term_text.contains("doc-1"));
 
         let bool_response = app
@@ -853,8 +1010,8 @@ mod tests {
             .await
             .expect("body")
             .to_bytes();
-        let bool_text = String::from_utf8(bool_body.to_vec()).expect("utf8");
-        assert!(bool_text.contains("\"total\":2"));
+        let bool_json: serde_json::Value = serde_json::from_slice(&bool_body).expect("json");
+        assert_eq!(bool_json["hits"]["total"]["value"], 2);
     }
 
     #[tokio::test]
@@ -958,8 +1115,8 @@ mod tests {
             .to_bytes();
         let numeric_json: serde_json::Value =
             serde_json::from_slice(&numeric_body).expect("deserialize search response");
-        assert_eq!(numeric_json["hits"]["total"], 1);
-        assert_eq!(numeric_json["hits"]["hits"][0]["id"], "doc-1");
+        assert_eq!(numeric_json["hits"]["total"]["value"], 1);
+        assert_eq!(numeric_json["hits"]["hits"][0]["_id"], "doc-1");
 
         let timestamp_response = app
             .oneshot(
@@ -993,8 +1150,8 @@ mod tests {
             .to_bytes();
         let timestamp_json: serde_json::Value =
             serde_json::from_slice(&timestamp_body).expect("deserialize search response");
-        assert_eq!(timestamp_json["hits"]["total"], 1);
-        assert_eq!(timestamp_json["hits"]["hits"][0]["id"], "doc-2");
+        assert_eq!(timestamp_json["hits"]["total"]["value"], 1);
+        assert_eq!(timestamp_json["hits"]["hits"][0]["_id"], "doc-2");
     }
 
     #[tokio::test]
@@ -1091,7 +1248,7 @@ mod tests {
             .to_bytes();
         let before_refresh_json: serde_json::Value =
             serde_json::from_slice(&before_refresh_body).expect("deserialize search response");
-        assert_eq!(before_refresh_json["hits"]["total"], 0);
+        assert_eq!(before_refresh_json["hits"]["total"]["value"], 0);
 
         app.clone()
             .oneshot(
@@ -1128,7 +1285,7 @@ mod tests {
             .to_bytes();
         let after_refresh_json: serde_json::Value =
             serde_json::from_slice(&after_refresh_body).expect("deserialize search response");
-        assert_eq!(after_refresh_json["hits"]["total"], 2);
+        assert_eq!(after_refresh_json["hits"]["total"]["value"], 2);
 
         let get_doc = app
             .oneshot(
@@ -1148,7 +1305,7 @@ mod tests {
             .to_bytes();
         let get_doc_json: serde_json::Value =
             serde_json::from_slice(&get_doc_body).expect("deserialize document");
-        assert_eq!(get_doc_json["source"]["message"], "second");
+        assert_eq!(get_doc_json["_source"]["message"], "second");
     }
 
     #[tokio::test]
@@ -1329,7 +1486,10 @@ mod tests {
             value,
             serde_json::json!({
                 "hits": {
-                    "total": 0,
+                    "total": {
+                        "value": 0,
+                        "relation": "eq"
+                    },
                     "hits": []
                 },
                 "aggregations": {}
@@ -1409,9 +1569,9 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "id": "doc-1",
+                "_id": "doc-1",
                 "found": true,
-                "source": {
+                "_source": {
                     "message": "second"
                 }
             })
@@ -1603,7 +1763,7 @@ mod tests {
             .to_bytes();
         let terms_json: serde_json::Value =
             serde_json::from_slice(&terms_body).expect("deserialize search response");
-        assert_eq!(terms_json["hits"]["total"], 2);
+        assert_eq!(terms_json["hits"]["total"]["value"], 2);
 
         let sorted_response = app
             .oneshot(
@@ -1637,8 +1797,8 @@ mod tests {
             .to_bytes();
         let sorted_json: serde_json::Value =
             serde_json::from_slice(&sorted_body).expect("deserialize search response");
-        assert_eq!(sorted_json["hits"]["total"], 3);
-        assert_eq!(sorted_json["hits"]["hits"][0]["id"], "doc-3");
+        assert_eq!(sorted_json["hits"]["total"]["value"], 3);
+        assert_eq!(sorted_json["hits"]["hits"][0]["_id"], "doc-3");
     }
 
     #[tokio::test]
@@ -1795,8 +1955,8 @@ mod tests {
             .expect("body")
             .to_bytes();
         let term_json: serde_json::Value = serde_json::from_slice(&term_body).expect("json");
-        assert_eq!(term_json["hits"]["total"], 1);
-        assert_eq!(term_json["hits"]["hits"][0]["id"], "doc-1");
+        assert_eq!(term_json["hits"]["total"]["value"], 1);
+        assert_eq!(term_json["hits"]["hits"][0]["_id"], "doc-1");
 
         let terms_response = app
             .clone()
@@ -1826,7 +1986,7 @@ mod tests {
             .expect("body")
             .to_bytes();
         let terms_json: serde_json::Value = serde_json::from_slice(&terms_body).expect("json");
-        assert_eq!(terms_json["hits"]["total"], 2);
+        assert_eq!(terms_json["hits"]["total"]["value"], 2);
 
         let range_response = app
             .clone()
@@ -1859,8 +2019,8 @@ mod tests {
             .expect("body")
             .to_bytes();
         let range_json: serde_json::Value = serde_json::from_slice(&range_body).expect("json");
-        assert_eq!(range_json["hits"]["total"], 1);
-        assert_eq!(range_json["hits"]["hits"][0]["id"], "doc-3");
+        assert_eq!(range_json["hits"]["total"]["value"], 1);
+        assert_eq!(range_json["hits"]["hits"][0]["_id"], "doc-3");
 
         let bool_sort_response = app
             .oneshot(
@@ -1897,8 +2057,8 @@ mod tests {
             .to_bytes();
         let bool_sort_json: serde_json::Value =
             serde_json::from_slice(&bool_sort_body).expect("json");
-        assert_eq!(bool_sort_json["hits"]["total"], 2);
-        assert_eq!(bool_sort_json["hits"]["hits"][0]["id"], "doc-2");
+        assert_eq!(bool_sort_json["hits"]["total"]["value"], 2);
+        assert_eq!(bool_sort_json["hits"]["hits"][0]["_id"], "doc-2");
     }
 
     #[tokio::test]
@@ -1998,8 +2158,8 @@ mod tests {
             .expect("body")
             .to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(value["hits"]["total"], 1);
-        assert_eq!(value["hits"]["hits"][0]["id"], "doc-1");
+        assert_eq!(value["hits"]["total"]["value"], 1);
+        assert_eq!(value["hits"]["hits"][0]["_id"], "doc-1");
     }
 
     #[tokio::test]
@@ -2249,9 +2409,8 @@ mod tests {
                 "items": [
                     {
                         "index": {
-                            "id": "doc-1",
-                            "result": "created",
-                            "sequence_number": 1
+                            "_id": "doc-1",
+                            "result": "created"
                         }
                     }
                 ]
@@ -2360,11 +2519,14 @@ mod tests {
             value,
             serde_json::json!({
                 "hits": {
-                    "total": 3,
+                    "total": {
+                        "value": 3,
+                        "relation": "eq"
+                    },
                     "hits": [
                         {
-                            "id": "doc-3",
-                            "source": {
+                            "_id": "doc-3",
+                            "_source": {
                                 "service": "auth",
                                 "latency": 20
                             }
@@ -2484,18 +2646,18 @@ mod tests {
             .to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize search");
 
-        assert_eq!(value["hits"]["total"], 2);
+        assert_eq!(value["hits"]["total"]["value"], 2);
         assert_eq!(
-            value["aggregations"]["services"]["terms"]["buckets"][0]["key"],
+            value["aggregations"]["services"]["buckets"][0]["key"],
             "billing"
         );
         assert_eq!(
-            value["aggregations"]["services"]["terms"]["buckets"][0]["doc_count"],
+            value["aggregations"]["services"]["buckets"][0]["doc_count"],
             1
         );
-        assert_eq!(value["aggregations"]["latency_stats"]["stats"]["count"], 2);
-        assert_eq!(value["aggregations"]["latency_stats"]["stats"]["sum"], 40.0);
-        assert_eq!(value["aggregations"]["latency_stats"]["stats"]["avg"], 20.0);
+        assert_eq!(value["aggregations"]["latency_stats"]["count"], 2);
+        assert_eq!(value["aggregations"]["latency_stats"]["sum"], 40.0);
+        assert_eq!(value["aggregations"]["latency_stats"]["avg"], 20.0);
     }
 
     #[tokio::test]
@@ -2598,19 +2760,19 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize search");
 
         assert_eq!(
-            value["aggregations"]["events_over_time"]["date_histogram"]["buckets"][0]["key"],
+            value["aggregations"]["events_over_time"]["buckets"][0]["key"],
             "2026-03-14T10:00:00Z"
         );
         assert_eq!(
-            value["aggregations"]["events_over_time"]["date_histogram"]["buckets"][0]["doc_count"],
+            value["aggregations"]["events_over_time"]["buckets"][0]["doc_count"],
             2
         );
         assert_eq!(
-            value["aggregations"]["events_over_time"]["date_histogram"]["buckets"][1]["key"],
+            value["aggregations"]["events_over_time"]["buckets"][1]["key"],
             "2026-03-14T11:00:00Z"
         );
         assert_eq!(
-            value["aggregations"]["events_over_time"]["date_histogram"]["buckets"][1]["doc_count"],
+            value["aggregations"]["events_over_time"]["buckets"][1]["doc_count"],
             1
         );
     }
