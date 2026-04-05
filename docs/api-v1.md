@@ -58,6 +58,8 @@ Current implementation notes:
 - `term`, `terms`, `range`, and `bool` with `filter`, `must`, `should`, and `must_not` are implemented
 - `from`, `size`, and single-field sort are implemented
 - the API now accepts both the internal request shape and a closer Elasticsearch-style shape for `term`, `terms`, `range`, `bool`, and single-entry sort arrays
+- search responses now use Elasticsearch-style `_id`, `_source`, and `hits.total.value` / `relation` wrappers
+- document get and bulk item responses now use `_id` and `_source`-style fields where applicable
 - search currently supports top-level fields only
 - bulk format is simplified JSON, not Elasticsearch NDJSON
 
