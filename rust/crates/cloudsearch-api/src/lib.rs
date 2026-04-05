@@ -351,24 +351,46 @@ fn parse_bool_query(value: &Value) -> Result<BoolQuery, ApiError> {
         ))
     })?;
 
-    let Some(filters) = object.get("filter") else {
-        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
-            "only bool.filter is currently supported".to_string(),
-        )));
+    let allowed = ["must", "should", "filter", "must_not"];
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(ApiError(CloudSearchError::InvalidSearchRequest(format!(
+                "unsupported bool clause '{key}'"
+            ))));
+        }
+    }
+
+    Ok(BoolQuery {
+        must: parse_bool_clause_array(object.get("must"), "bool.must")?,
+        should: parse_bool_clause_array(object.get("should"), "bool.should")?,
+        filter: parse_bool_clause_array(object.get("filter"), "bool.filter")?,
+        must_not: parse_bool_clause_array(object.get("must_not"), "bool.must_not")?,
+    })
+}
+
+fn parse_bool_clause_array(
+    value: Option<&Value>,
+    field: &str,
+) -> Result<Vec<SearchQuery>, ApiError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
     };
 
-    let filters = filters.as_array().ok_or_else(|| {
-        ApiError(CloudSearchError::InvalidSearchRequest(
-            "bool.filter must be an array".to_string(),
-        ))
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let values = value.as_array().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(format!(
+            "{field} must be an array"
+        )))
     })?;
 
-    let filter = filters
+    values
         .iter()
+        .filter(|value| !value.is_null())
         .map(parse_query)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(BoolQuery { filter })
+        .collect()
 }
 
 fn parse_sort(value: &Value) -> Result<SortSpec, ApiError> {
@@ -813,6 +835,7 @@ mod tests {
                                     field: "level".to_string(),
                                     value: serde_json::json!("info"),
                                 })],
+                                ..Default::default()
                             })),
                             ..Default::default()
                         })
@@ -1879,6 +1902,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supports_expanded_bool_query_shapes_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        for request in [
+            IndexDocumentRequest {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "billing", "level": "info"}),
+            },
+            IndexDocumentRequest {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"service": "billing", "level": "error"}),
+            },
+            IndexDocumentRequest {
+                id: "doc-3".to_string(),
+                source: serde_json::json!({"service": "search", "level": "info"}),
+            },
+        ] {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/logs/_doc")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&request).expect("serialize index request"),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("index response");
+        }
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": {
+                                "bool": {
+                                    "must": [
+                                        {"term": {"service": "billing"}}
+                                    ],
+                                    "must_not": [
+                                        {"term": {"level": "error"}}
+                                    ]
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["hits"]["total"], 1);
+        assert_eq!(value["hits"]["hits"][0]["id"], "doc-1");
+    }
+
+    #[tokio::test]
     async fn rejects_unsupported_elasticsearch_style_shapes() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
@@ -1921,9 +2045,7 @@ mod tests {
             serde_json::json!({
                 "query": {
                     "bool": {
-                        "must": [
-                            {"term": {"service": "billing"}}
-                        ]
+                        "must": {"term": {"service": "billing"}}
                     }
                 }
             }),

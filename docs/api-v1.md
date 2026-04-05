@@ -55,9 +55,9 @@ Compatibility is intentionally pragmatic:
 
 Current implementation notes:
 
-- `term`, `terms`, `range`, and simple `bool.filter` are implemented
+- `term`, `terms`, `range`, and `bool` with `filter`, `must`, `should`, and `must_not` are implemented
 - `from`, `size`, and single-field sort are implemented
-- the API now accepts both the internal request shape and a closer Elasticsearch-style shape for `term`, `terms`, `range`, simple `bool.filter`, and single-entry sort arrays
+- the API now accepts both the internal request shape and a closer Elasticsearch-style shape for `term`, `terms`, `range`, `bool`, and single-entry sort arrays
 - search currently supports top-level fields only
 - bulk format is simplified JSON, not Elasticsearch NDJSON
 

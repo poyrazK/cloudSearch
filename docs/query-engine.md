@@ -84,6 +84,12 @@ The AST should be independent from HTTP and JSON details.
 
 The engine should strongly distinguish scoring clauses from filter-only clauses.
 
+Current implementation notes:
+
+- `must`, `filter`, and `must_not` are enforced as boolean inclusion/exclusion checks
+- `should` is required only when there are no `must` or `filter` clauses
+- scoring is still effectively neutral; bool is currently used for logical composition only
+
 ## Filter-First Bias
 
 Because `cloudSearch` is log and event first, filter execution quality matters as much as full-text relevance.

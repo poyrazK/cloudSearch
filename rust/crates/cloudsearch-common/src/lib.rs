@@ -222,7 +222,13 @@ pub struct RangeQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct BoolQuery {
     #[serde(default)]
+    pub must: Vec<SearchQuery>,
+    #[serde(default)]
+    pub should: Vec<SearchQuery>,
+    #[serde(default)]
     pub filter: Vec<SearchQuery>,
+    #[serde(default)]
+    pub must_not: Vec<SearchQuery>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
