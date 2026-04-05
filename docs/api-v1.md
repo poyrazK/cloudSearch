@@ -26,6 +26,11 @@ Compatibility is intentionally pragmatic:
 - refresh to make recent writes searchable
 - flush to persist the current searchable state to a durable segment snapshot
 
+Current implementation notes:
+
+- deleting an index evicts any cached in-memory handle and removes its local storage directory
+- deleting a missing index returns `404`
+
 ## Supported Document APIs
 
 - `POST /{index}/_doc`
