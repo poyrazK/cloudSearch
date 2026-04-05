@@ -61,8 +61,8 @@ async fn preserves_documents_and_search_results_across_node_restart() {
         .await
         .expect("document body");
 
-    assert_eq!(document["id"], "doc-1");
-    assert_eq!(document["source"]["message"], "hello");
+    assert_eq!(document["_id"], "doc-1");
+    assert_eq!(document["_source"]["message"], "hello");
 
     let search = client
         .post(format!("{base_url}/logs/_search"))
@@ -83,8 +83,8 @@ async fn preserves_documents_and_search_results_across_node_restart() {
         .await
         .expect("search body");
 
-    assert_eq!(search["hits"]["total"], 1);
-    assert_eq!(search["hits"]["hits"][0]["id"], "doc-1");
+    assert_eq!(search["hits"]["total"]["value"], 1);
+    assert_eq!(search["hits"]["hits"][0]["_id"], "doc-1");
 
     stop_node(&mut second);
 }
@@ -170,7 +170,7 @@ async fn preserves_flushed_documents_and_replays_wal_tail_across_restart() {
         .await
         .expect("search body");
 
-    assert_eq!(search["hits"]["total"], 2);
+    assert_eq!(search["hits"]["total"]["value"], 2);
 
     stop_node(&mut second);
 }
@@ -280,10 +280,10 @@ async fn preserves_bulk_flushed_state_and_sorted_search_after_restart() {
         .await
         .expect("search body");
 
-    assert_eq!(search["hits"]["total"], 3);
-    assert_eq!(search["hits"]["hits"][0]["id"], "doc-4");
-    assert_eq!(search["hits"]["hits"][1]["id"], "doc-3");
-    assert_eq!(search["hits"]["hits"][2]["id"], "doc-1");
+    assert_eq!(search["hits"]["total"]["value"], 3);
+    assert_eq!(search["hits"]["hits"][0]["_id"], "doc-4");
+    assert_eq!(search["hits"]["hits"][1]["_id"], "doc-3");
+    assert_eq!(search["hits"]["hits"][2]["_id"], "doc-1");
 
     stop_node(&mut second);
 }
