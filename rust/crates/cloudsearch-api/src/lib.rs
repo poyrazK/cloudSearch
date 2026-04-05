@@ -152,6 +152,11 @@ async fn index_document(
 ) -> Result<impl IntoResponse, ApiError> {
     let handle = state.index_handle(&index).await?;
     let mut handle = handle.lock().await;
+    let result = if handle.get_document(&request.id).is_some() {
+        "updated"
+    } else {
+        "created"
+    };
     handle
         .index_document(IndexDocument {
             id: request.id.clone(),
@@ -163,7 +168,7 @@ async fn index_document(
         StatusCode::CREATED,
         Json(CompatIndexDocumentResponse {
             id: request.id,
-            result: "created",
+            result,
         }),
     ))
 }
