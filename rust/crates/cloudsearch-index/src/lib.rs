@@ -1,11 +1,11 @@
 use chrono::{DateTime, Timelike, Utc};
 use cloudsearch_common::{
-    AggregationRequest, AggregationResult, BulkItem, BulkItemResult, BulkOperation, BulkRequest,
-    BulkResponse, CloudSearchError, CreateIndexRequest, DateHistogramAggregationResult,
-    DateHistogramBucket, DateHistogramInterval, FieldMapping, FieldType, FlushResponse,
-    HitsMetadata, IndexDocument, IndexMetadata, MappingMode, RangeQuery, Result, SearchHit,
-    SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec, StatsAggregationResult,
-    TermsAggregationResult, TermsBucket, TermsQuery,
+    AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkOperation,
+    BulkRequest, BulkResponse, CloudSearchError, CreateIndexRequest,
+    DateHistogramAggregationResult, DateHistogramBucket, DateHistogramInterval, FieldMapping,
+    FieldType, FlushResponse, HitsMetadata, IndexDocument, IndexMetadata, MappingMode, RangeQuery,
+    Result, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec,
+    StatsAggregationResult, TermsAggregationResult, TermsBucket, TermsQuery,
 };
 use cloudsearch_storage::{
     SegmentSnapshot, WalManager, WalRecord, read_segment_snapshot, write_segment_snapshot,
@@ -414,8 +414,11 @@ impl IndexHandle {
             SearchQuery::Terms(terms) => self.ensure_scalar_field(&terms.field, &terms.field),
             SearchQuery::Range(range) => self.ensure_range_field(&range.field),
             SearchQuery::Bool(boolean) => boolean
-                .filter
+                .must
                 .iter()
+                .chain(boolean.should.iter())
+                .chain(boolean.filter.iter())
+                .chain(boolean.must_not.iter())
                 .try_for_each(|query| self.validate_query(query)),
         }
     }
@@ -525,11 +528,31 @@ fn matches_query(document: &IndexDocument, query: &SearchQuery) -> bool {
             .is_some_and(|value| value == &term.value),
         SearchQuery::Terms(terms) => matches_terms_query(document, terms),
         SearchQuery::Range(range) => matches_range_query(document, range),
-        SearchQuery::Bool(bool_query) => bool_query
-            .filter
-            .iter()
-            .all(|filter_query| matches_query(document, filter_query)),
+        SearchQuery::Bool(bool_query) => matches_bool_query(document, bool_query),
     }
+}
+
+fn matches_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> bool {
+    let must_matches = bool_query
+        .must
+        .iter()
+        .all(|query| matches_query(document, query));
+    let filter_matches = bool_query
+        .filter
+        .iter()
+        .all(|query| matches_query(document, query));
+    let must_not_matches = bool_query
+        .must_not
+        .iter()
+        .all(|query| !matches_query(document, query));
+    let should_matches = bool_query
+        .should
+        .iter()
+        .any(|query| matches_query(document, query));
+    let should_required =
+        bool_query.must.is_empty() && bool_query.filter.is_empty() && !bool_query.should.is_empty();
+
+    must_matches && filter_matches && must_not_matches && (!should_required || should_matches)
 }
 
 fn matches_terms_query(document: &IndexDocument, terms: &TermsQuery) -> bool {
@@ -1340,6 +1363,7 @@ mod tests {
                     field: "level".to_string(),
                     value: serde_json::json!("info"),
                 })],
+                ..Default::default()
             })),
             ..Default::default()
         });
@@ -1443,6 +1467,7 @@ mod tests {
                         value: serde_json::json!(true),
                     }),
                 ],
+                ..Default::default()
             })),
             ..Default::default()
         });
@@ -1736,11 +1761,103 @@ mod tests {
 
         let reopened = catalog.open_index("logs").await.expect("reopen index");
         let result = reopened.search(&SearchRequest {
-            query: Some(SearchQuery::Bool(BoolQuery { filter: vec![] })),
+            query: Some(SearchQuery::Bool(BoolQuery {
+                filter: vec![],
+                ..Default::default()
+            })),
             ..Default::default()
         });
 
         assert_eq!(result.hits.total, 2);
+    }
+
+    #[tokio::test]
+    async fn expanded_bool_query_supports_must_should_and_must_not() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        for (id, source) in [
+            (
+                "doc-1",
+                serde_json::json!({"service": "billing", "level": "info"}),
+            ),
+            (
+                "doc-2",
+                serde_json::json!({"service": "billing", "level": "error"}),
+            ),
+            (
+                "doc-3",
+                serde_json::json!({"service": "search", "level": "info"}),
+            ),
+        ] {
+            handle
+                .index_document(IndexDocument {
+                    id: id.to_string(),
+                    source,
+                })
+                .await
+                .expect("index doc");
+        }
+        handle.refresh().await.expect("refresh");
+
+        let must = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Bool(BoolQuery {
+                must: vec![SearchQuery::Term(TermQuery {
+                    field: "service".to_string(),
+                    value: serde_json::json!("billing"),
+                })],
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        assert_eq!(must.hits.total, 2);
+
+        let should = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Bool(BoolQuery {
+                should: vec![
+                    SearchQuery::Term(TermQuery {
+                        field: "service".to_string(),
+                        value: serde_json::json!("billing"),
+                    }),
+                    SearchQuery::Term(TermQuery {
+                        field: "service".to_string(),
+                        value: serde_json::json!("search"),
+                    }),
+                ],
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        assert_eq!(should.hits.total, 3);
+
+        let must_not = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Bool(BoolQuery {
+                filter: vec![SearchQuery::Term(TermQuery {
+                    field: "service".to_string(),
+                    value: serde_json::json!("billing"),
+                })],
+                must_not: vec![SearchQuery::Term(TermQuery {
+                    field: "level".to_string(),
+                    value: serde_json::json!("error"),
+                })],
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        assert_eq!(must_not.hits.total, 1);
+        assert_eq!(must_not.hits.hits[0].id, "doc-1");
     }
 
     #[tokio::test]
