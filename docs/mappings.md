@@ -41,6 +41,12 @@ This is meant to be simpler than strict schema-only systems and safer than Elast
 - later writes must follow the stored mapping
 - this is the recommended default for v1
 
+Current implementation notes:
+
+- new top-level fields are inferred on write and persisted into `metadata.json`
+- arrays are rejected rather than inferred
+- inferred mappings survive reopen and restart
+
 ### `template_guided`
 
 - dynamic inference is constrained by user-defined templates
@@ -91,10 +97,21 @@ Field inference must be stable, explicit, and easy to reason about.
 
 - decimal numbers map to `double` by default unless we later want a narrower numeric heuristic
 
+Current implementation notes:
+
+- integers fitting `i32` map to `integer`
+- larger integers map to `long`
+- decimals map to `double`
+
 ### Timestamp
 
 - RFC3339 or configured timestamp formats may infer `timestamp`
 - the primary time field may also be explicitly configured at index creation
+
+Current implementation notes:
+
+- RFC3339 strings are inferred as `timestamp`
+- non-RFC3339 strings are inferred as `keyword`
 
 ### Object
 
@@ -135,6 +152,11 @@ Recommended use cases:
 
 The engine should avoid dual indexing by default when the benefit is weak.
 
+Current implementation notes:
+
+- v1 currently infers strings as `keyword`
+- `text` semantics are not yet implemented in the engine
+
 ## Mapping Persistence
 
 Once a field is inferred, the mapping must be persisted in index metadata.
@@ -163,6 +185,12 @@ Rules:
 - return the field name, existing type, incoming type, and likely fix
 - never silently remap an existing field
 
+Current implementation notes:
+
+- object/scalar conflicts are rejected
+- timestamp/string conflicts are rejected
+- arrays are always rejected
+
 ## Nulls And Missing Fields
 
 V1 should keep null behavior simple.
@@ -172,6 +200,10 @@ Recommended behavior:
 - missing fields are ignored
 - explicit `null` does not create a new mapping by itself
 - explicit `null` does not overwrite the stored field type
+
+Current implementation notes:
+
+- `null` values are accepted but do not create or change mappings
 
 This avoids noisy schema changes from sparse data.
 
@@ -210,6 +242,10 @@ Recommended behavior:
 - validate that the field is mapped as `timestamp`
 - use this metadata for pruning, retention, and future rollover logic
 
+Current implementation notes:
+
+- query validation rejects `date_histogram` on non-`timestamp` fields
+
 The time field should be first-class in metadata, not rediscovered on every query.
 
 ## Operational Limits
@@ -222,6 +258,11 @@ Recommended limits:
 - maximum object depth
 - optional dynamic-field rate warnings
 - explicit error when limits are exceeded
+
+Current implementation notes:
+
+- the current implementation enforces a maximum of `1000` mapped fields per index
+- depth limits are not yet implemented
 
 This is especially important for SaaS and log-oriented workloads.
 

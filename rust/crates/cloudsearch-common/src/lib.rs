@@ -17,6 +17,14 @@ pub enum CloudSearchError {
     InvalidIndexName(String),
     #[error("invalid search request: {0}")]
     InvalidSearchRequest(String),
+    #[error("mapping conflict: {0}")]
+    MappingConflict(String),
+    #[error("unknown field rejected: {0}")]
+    UnknownFieldRejected(String),
+    #[error("array fields are unsupported: {0}")]
+    UnsupportedArrayField(String),
+    #[error("mapping limit exceeded: {0}")]
+    MappingLimitExceeded(String),
     #[error("invalid WAL record: {0}")]
     InvalidWalRecord(String),
     #[error("WAL checksum mismatch")]
@@ -48,6 +56,7 @@ pub struct IndexMetadata {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub settings: IndexSettings,
+    pub mappings: BTreeMap<String, FieldMapping>,
 }
 
 impl IndexMetadata {
@@ -60,8 +69,26 @@ impl IndexMetadata {
             created_at: now,
             updated_at: now,
             settings,
+            mappings: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FieldMapping {
+    pub field_type: FieldType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldType {
+    Keyword,
+    Boolean,
+    Integer,
+    Long,
+    Double,
+    Timestamp,
+    Object,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

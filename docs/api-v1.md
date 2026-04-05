@@ -72,7 +72,8 @@ Current implementation notes:
 - default mapping mode is `controlled_dynamic`
 - inferred mappings are persisted
 - field conflicts return explicit errors
-- string fields use heuristic-based inference rather than always becoming `text + keyword`
+- arrays are rejected
+- strings currently infer as `keyword`
 
 ## Time-Aware Behavior
 
