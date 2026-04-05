@@ -376,13 +376,21 @@ fn parse_bool_clause_array(
         return Ok(Vec::new());
     };
 
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+
     let values = value.as_array().ok_or_else(|| {
         ApiError(CloudSearchError::InvalidSearchRequest(format!(
             "{field} must be an array"
         )))
     })?;
 
-    values.iter().map(parse_query).collect()
+    values
+        .iter()
+        .filter(|value| !value.is_null())
+        .map(parse_query)
+        .collect()
 }
 
 fn parse_sort(value: &Value) -> Result<SortSpec, ApiError> {
