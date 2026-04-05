@@ -157,8 +157,8 @@ async fn delete_index(
     State(state): State<ApiState>,
     Path(index): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.handles.lock().await.remove(&index);
     state.catalog.delete_index(&index).await?;
+    state.handles.lock().await.remove(&index);
 
     Ok((
         StatusCode::OK,

@@ -13,20 +13,23 @@ use cloudsearch_storage::{
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
+    sync::Arc,
 };
-use tokio::fs;
+use tokio::{fs, sync::RwLock};
 
 const MAX_FIELDS_PER_INDEX: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub struct IndexCatalog {
     root_dir: PathBuf,
+    lifecycle_lock: Arc<RwLock<()>>,
 }
 
 impl IndexCatalog {
     pub fn new(root_dir: impl Into<PathBuf>) -> Self {
         Self {
             root_dir: root_dir.into(),
+            lifecycle_lock: Arc::new(RwLock::new(())),
         }
     }
 
@@ -40,6 +43,7 @@ impl IndexCatalog {
         name: &str,
         request: CreateIndexRequest,
     ) -> Result<IndexMetadata> {
+        let _guard = self.lifecycle_lock.write().await;
         validate_index_name(name)?;
 
         let index_dir = self.index_dir(name);
@@ -72,6 +76,7 @@ impl IndexCatalog {
     }
 
     pub async fn delete_index(&self, name: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.write().await;
         validate_index_name(name)?;
 
         let index_dir = self.index_dir(name);
