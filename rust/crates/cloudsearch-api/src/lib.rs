@@ -82,6 +82,11 @@ struct CompatBulkItemResult {
     result: String,
 }
 
+#[derive(serde::Serialize)]
+struct CompatDeleteIndexResponse {
+    result: &'static str,
+}
+
 #[derive(Clone)]
 pub struct ApiState {
     catalog: Arc<IndexCatalog>,
@@ -112,7 +117,10 @@ impl ApiState {
 pub fn router(catalog: Arc<IndexCatalog>) -> Router {
     Router::new()
         .route("/_health", get(health))
-        .route("/{index}", put(create_index).get(get_index))
+        .route(
+            "/{index}",
+            put(create_index).get(get_index).delete(delete_index),
+        )
         .route("/{index}/_bulk", put(bulk_index).post(bulk_index))
         .route("/{index}/_doc", put(index_document))
         .route("/{index}/_doc/{id}", get(get_document))
@@ -143,6 +151,19 @@ async fn get_index(
 ) -> Result<impl IntoResponse, ApiError> {
     let metadata = state.catalog.get_index(&index).await?;
     Ok((StatusCode::OK, Json(metadata)))
+}
+
+async fn delete_index(
+    State(state): State<ApiState>,
+    Path(index): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    state.handles.lock().await.remove(&index);
+    state.catalog.delete_index(&index).await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(CompatDeleteIndexResponse { result: "deleted" }),
+    ))
 }
 
 async fn index_document(
@@ -781,6 +802,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deletes_index_over_http_and_allows_recreate() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        for _ in 0..2 {
+            let create_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/logs")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&CreateIndexRequest {
+                                settings: Default::default(),
+                            })
+                            .expect("serialize create request"),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("create response");
+            assert_eq!(create_response.status(), StatusCode::CREATED);
+
+            let delete_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri("/logs")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("delete response");
+            assert_eq!(delete_response.status(), StatusCode::OK);
+
+            let delete_body = delete_response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let delete_json: serde_json::Value =
+                serde_json::from_slice(&delete_body).expect("deserialize delete response");
+            assert_eq!(delete_json, serde_json::json!({"result": "deleted"}));
+
+            let get_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/logs")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("get response");
+            assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
     async fn indexes_and_fetches_document_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
@@ -1345,6 +1430,7 @@ mod tests {
             .expect("create response");
 
         let missing_doc_response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/logs/_doc/missing")
@@ -1354,6 +1440,18 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(missing_doc_response.status(), StatusCode::NOT_FOUND);
+
+        let missing_delete_response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/missing")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing_delete_response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
