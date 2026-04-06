@@ -230,6 +230,10 @@ impl IndexRegistry {
     pub async fn cached_handle_count(&self) -> usize {
         self.handles.lock().await.len()
     }
+
+    pub async fn cached_handles(&self) -> Vec<Arc<Mutex<IndexHandle>>> {
+        self.handles.lock().await.values().cloned().collect()
+    }
 }
 
 #[derive(Debug)]
