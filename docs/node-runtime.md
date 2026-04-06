@@ -88,6 +88,12 @@ Responsibilities:
 
 Refresh should never be confused with flush in runtime APIs or logs.
 
+Current implementation notes:
+
+- the node now runs a simple background refresh loop over cached/open indexes
+- the default refresh interval is `1s`
+- manual `/_refresh` remains supported alongside background refresh
+
 ## Flush Scheduler
 
 Flush establishes more durable checkpoints and helps control WAL growth.
@@ -100,6 +106,12 @@ Possible triggers:
 - administrative command later
 
 The runtime should make flush reasons observable.
+
+Current implementation notes:
+
+- the node now runs a simple background flush loop over cached/open indexes
+- the default flush interval is `30s`
+- manual `/_flush` remains supported alongside background flush
 
 ## Merge Worker
 

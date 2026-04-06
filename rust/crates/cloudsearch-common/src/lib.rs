@@ -348,6 +348,8 @@ pub struct ErrorResponse {
 pub struct AppConfig {
     pub bind_addr: String,
     pub data_dir: PathBuf,
+    pub refresh_interval_secs: u64,
+    pub flush_interval_secs: u64,
 }
 
 impl Default for AppConfig {
@@ -355,6 +357,20 @@ impl Default for AppConfig {
         Self {
             bind_addr: "127.0.0.1:4000".to_string(),
             data_dir: PathBuf::from("./data"),
+            refresh_interval_secs: 1,
+            flush_interval_secs: 30,
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn normalize_intervals(&mut self) {
+        if self.refresh_interval_secs == 0 {
+            self.refresh_interval_secs = 1;
+        }
+
+        if self.flush_interval_secs == 0 {
+            self.flush_interval_secs = 30;
         }
     }
 }

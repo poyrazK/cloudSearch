@@ -186,6 +186,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "cloudsearch-api",
+ "cloudsearch-common",
  "cloudsearch-index",
  "reqwest",
  "serde_json",

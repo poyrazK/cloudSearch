@@ -201,6 +201,10 @@ Recommended steps:
 
 Refresh should avoid blocking ingestion longer than necessary.
 
+Current implementation notes:
+
+- open indexes are also refreshed automatically by the node on a fixed interval
+
 ## Flush Lifecycle
 
 Flush advances the durable checkpoint.
@@ -218,6 +222,10 @@ Flush can be triggered by:
 - WAL growth
 - memory pressure
 - administrative request later
+
+Current implementation notes:
+
+- open indexes are also flushed automatically by the node on a fixed interval
 
 ## Merge Lifecycle
 

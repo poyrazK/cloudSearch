@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 axum.workspace = true
 cloudsearch-api = { path = "../cloudsearch-api" }
+cloudsearch-common = { path = "../cloudsearch-common" }
 cloudsearch-index = { path = "../cloudsearch-index" }
 tokio.workspace = true
 
