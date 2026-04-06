@@ -32,6 +32,7 @@ pub struct IndexCatalog {
 pub struct IndexRegistry {
     catalog: Arc<IndexCatalog>,
     handles: Arc<Mutex<HashMap<String, Arc<Mutex<IndexHandle>>>>>,
+    lifecycle_lock: Arc<RwLock<()>>,
 }
 
 impl IndexCatalog {
@@ -169,6 +170,7 @@ impl IndexRegistry {
         Self {
             catalog,
             handles: Arc::new(Mutex::new(HashMap::new())),
+            lifecycle_lock: Arc::new(RwLock::new(())),
         }
     }
 
@@ -177,9 +179,12 @@ impl IndexRegistry {
         name: &str,
         request: CreateIndexRequest,
     ) -> Result<IndexMetadata> {
+        let _guard = self.lifecycle_lock.write().await;
         let metadata = self.catalog.create_index(name, request).await?;
+
         let handle = Arc::new(Mutex::new(self.catalog.open_index(name).await?));
         self.handles.lock().await.insert(name.to_string(), handle);
+
         Ok(metadata)
     }
 
@@ -188,21 +193,38 @@ impl IndexRegistry {
     }
 
     pub async fn delete_index(&self, name: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.write().await;
         self.catalog.delete_index(name).await?;
         self.handles.lock().await.remove(name);
         Ok(())
     }
 
     pub async fn index_handle(&self, name: &str) -> Result<Arc<Mutex<IndexHandle>>> {
-        let mut handles = self.handles.lock().await;
+        {
+            let handles = self.handles.lock().await;
+            if let Some(handle) = handles.get(name) {
+                return Ok(handle.clone());
+            }
+        }
 
+        let _guard = self.lifecycle_lock.read().await;
+
+        {
+            let handles = self.handles.lock().await;
+            if let Some(handle) = handles.get(name) {
+                return Ok(handle.clone());
+            }
+        }
+
+        let opened = Arc::new(Mutex::new(self.catalog.open_index(name).await?));
+
+        let mut handles = self.handles.lock().await;
         if let Some(handle) = handles.get(name) {
             return Ok(handle.clone());
         }
 
-        let handle = Arc::new(Mutex::new(self.catalog.open_index(name).await?));
-        handles.insert(name.to_string(), handle.clone());
-        Ok(handle)
+        handles.insert(name.to_string(), opened.clone());
+        Ok(opened)
     }
 }
 
@@ -921,6 +943,7 @@ mod tests {
         TermsAggregationRequest, TermsQuery,
     };
     use tempfile::TempDir;
+    use tokio::sync::Barrier;
 
     #[tokio::test]
     async fn creates_and_loads_index_metadata() {
@@ -1033,9 +1056,10 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir");
         let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
         catalog.initialize().await.expect("init catalog");
-        let registry = IndexRegistry::new(catalog);
+        let registry = Arc::new(IndexRegistry::new(catalog));
 
         registry
+            .catalog
             .create_index(
                 "logs",
                 CreateIndexRequest {
@@ -1045,13 +1069,32 @@ mod tests {
             .await
             .expect("create index");
 
-        let first = registry.index_handle("logs").await.expect("first handle");
-        let second = registry.index_handle("logs").await.expect("second handle");
+        let barrier = Arc::new(Barrier::new(2));
+        let first_task = {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                registry.index_handle("logs").await.expect("first handle")
+            })
+        };
+        let second_task = {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                registry.index_handle("logs").await.expect("second handle")
+            })
+        };
+
+        let first = first_task.await.expect("join first task");
+        let second = second_task.await.expect("join second task");
         assert!(Arc::ptr_eq(&first, &second));
 
         registry.delete_index("logs").await.expect("delete index");
 
         registry
+            .catalog
             .create_index(
                 "logs",
                 CreateIndexRequest {
@@ -1061,7 +1104,27 @@ mod tests {
             .await
             .expect("recreate index");
 
-        let third = registry.index_handle("logs").await.expect("third handle");
+        let barrier = Arc::new(Barrier::new(2));
+        let third_task = {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                registry.index_handle("logs").await.expect("third handle")
+            })
+        };
+        let fourth_task = {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                registry.index_handle("logs").await.expect("fourth handle")
+            })
+        };
+
+        let third = third_task.await.expect("join third task");
+        let fourth = fourth_task.await.expect("join fourth task");
+        assert!(Arc::ptr_eq(&third, &fourth));
         assert!(!Arc::ptr_eq(&first, &third));
     }
 
