@@ -12,13 +12,9 @@ use cloudsearch_common::{
     RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
     StatsAggregationResult, TermQuery, TermsAggregationResult, TermsQuery,
 };
-use cloudsearch_index::{IndexCatalog, IndexHandle};
+use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use serde_json::Value;
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
-use tokio::sync::Mutex;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(serde::Serialize)]
 struct CompatIndexDocumentResponse {
@@ -89,32 +85,20 @@ struct CompatDeleteIndexResponse {
 
 #[derive(Clone)]
 pub struct ApiState {
-    catalog: Arc<IndexCatalog>,
-    handles: Arc<Mutex<HashMap<String, Arc<Mutex<IndexHandle>>>>>,
+    registry: Arc<IndexRegistry>,
 }
 
 impl ApiState {
-    pub fn new(catalog: Arc<IndexCatalog>) -> Self {
-        Self {
-            catalog,
-            handles: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    async fn index_handle(&self, index: &str) -> Result<Arc<Mutex<IndexHandle>>, ApiError> {
-        let mut handles = self.handles.lock().await;
-
-        if let Some(handle) = handles.get(index) {
-            return Ok(handle.clone());
-        }
-
-        let handle = Arc::new(Mutex::new(self.catalog.open_index(index).await?));
-        handles.insert(index.to_string(), handle.clone());
-        Ok(handle)
+    pub fn new(registry: Arc<IndexRegistry>) -> Self {
+        Self { registry }
     }
 }
 
-pub fn router(catalog: Arc<IndexCatalog>) -> Router {
+pub fn router(registry: Arc<IndexCatalog>) -> Router {
+    router_with_registry(Arc::new(IndexRegistry::new(registry)))
+}
+
+pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
     Router::new()
         .route("/_health", get(health))
         .route(
@@ -127,7 +111,7 @@ pub fn router(catalog: Arc<IndexCatalog>) -> Router {
         .route("/{index}/_flush", put(flush_index).post(flush_index))
         .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
         .route("/{index}/_search", put(search_index).post(search_index))
-        .with_state(ApiState::new(catalog))
+        .with_state(ApiState::new(registry))
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -139,9 +123,7 @@ async fn create_index(
     Path(index): Path<String>,
     Json(request): Json<CreateIndexRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let metadata = state.catalog.create_index(&index, request).await?;
-    let handle = Arc::new(Mutex::new(state.catalog.open_index(&index).await?));
-    state.handles.lock().await.insert(index, handle);
+    let metadata = state.registry.create_index(&index, request).await?;
     Ok((StatusCode::CREATED, Json(metadata)))
 }
 
@@ -149,7 +131,7 @@ async fn get_index(
     State(state): State<ApiState>,
     Path(index): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let metadata = state.catalog.get_index(&index).await?;
+    let metadata = state.registry.get_index(&index).await?;
     Ok((StatusCode::OK, Json(metadata)))
 }
 
@@ -157,8 +139,7 @@ async fn delete_index(
     State(state): State<ApiState>,
     Path(index): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.catalog.delete_index(&index).await?;
-    state.handles.lock().await.remove(&index);
+    state.registry.delete_index(&index).await?;
 
     Ok((
         StatusCode::OK,
@@ -171,7 +152,7 @@ async fn index_document(
     Path(index): Path<String>,
     Json(request): Json<IndexDocumentRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let handle = state.index_handle(&index).await?;
+    let handle = state.registry.index_handle(&index).await?;
     let mut handle = handle.lock().await;
     let result = if handle.get_document(&request.id).is_some() {
         "updated"
@@ -199,7 +180,7 @@ async fn bulk_index(
     Path(index): Path<String>,
     Json(request): Json<BulkRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let handle = state.index_handle(&index).await?;
+    let handle = state.registry.index_handle(&index).await?;
     let mut handle = handle.lock().await;
     let response = handle.bulk_apply(request).await?;
     Ok((StatusCode::OK, Json(to_compat_bulk_response(response))))
@@ -209,7 +190,7 @@ async fn get_document(
     State(state): State<ApiState>,
     Path((index, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let handle = state.index_handle(&index).await?;
+    let handle = state.registry.index_handle(&index).await?;
     let handle = handle.lock().await;
     let document = handle
         .get_document(&id)
@@ -231,7 +212,7 @@ async fn search_index(
     Json(request): Json<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
     let request = parse_search_request(request)?;
-    let handle = state.index_handle(&index).await?;
+    let handle = state.registry.index_handle(&index).await?;
     let handle = handle.lock().await;
     handle.validate_search_request(&request)?;
     Ok((
@@ -633,7 +614,7 @@ async fn refresh_index(
     State(state): State<ApiState>,
     Path(index): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let handle = state.index_handle(&index).await?;
+    let handle = state.registry.index_handle(&index).await?;
     let mut handle = handle.lock().await;
     let refreshed_documents = handle.refresh().await?;
 
@@ -650,7 +631,7 @@ async fn flush_index(
     State(state): State<ApiState>,
     Path(index): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let handle = state.index_handle(&index).await?;
+    let handle = state.registry.index_handle(&index).await?;
     let mut handle = handle.lock().await;
     let response = handle.flush().await?;
 

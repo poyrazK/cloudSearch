@@ -15,7 +15,10 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{fs, sync::RwLock};
+use tokio::{
+    fs,
+    sync::{Mutex, RwLock},
+};
 
 const MAX_FIELDS_PER_INDEX: usize = 1000;
 
@@ -23,6 +26,12 @@ const MAX_FIELDS_PER_INDEX: usize = 1000;
 pub struct IndexCatalog {
     root_dir: PathBuf,
     lifecycle_lock: Arc<RwLock<()>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexRegistry {
+    catalog: Arc<IndexCatalog>,
+    handles: Arc<Mutex<HashMap<String, Arc<Mutex<IndexHandle>>>>>,
 }
 
 impl IndexCatalog {
@@ -152,6 +161,48 @@ impl IndexCatalog {
 
     fn metadata_path(&self, name: &str) -> PathBuf {
         self.index_dir(name).join("metadata.json")
+    }
+}
+
+impl IndexRegistry {
+    pub fn new(catalog: Arc<IndexCatalog>) -> Self {
+        Self {
+            catalog,
+            handles: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub async fn create_index(
+        &self,
+        name: &str,
+        request: CreateIndexRequest,
+    ) -> Result<IndexMetadata> {
+        let metadata = self.catalog.create_index(name, request).await?;
+        let handle = Arc::new(Mutex::new(self.catalog.open_index(name).await?));
+        self.handles.lock().await.insert(name.to_string(), handle);
+        Ok(metadata)
+    }
+
+    pub async fn get_index(&self, name: &str) -> Result<IndexMetadata> {
+        self.catalog.get_index(name).await
+    }
+
+    pub async fn delete_index(&self, name: &str) -> Result<()> {
+        self.catalog.delete_index(name).await?;
+        self.handles.lock().await.remove(name);
+        Ok(())
+    }
+
+    pub async fn index_handle(&self, name: &str) -> Result<Arc<Mutex<IndexHandle>>> {
+        let mut handles = self.handles.lock().await;
+
+        if let Some(handle) = handles.get(name) {
+            return Ok(handle.clone());
+        }
+
+        let handle = Arc::new(Mutex::new(self.catalog.open_index(name).await?));
+        handles.insert(name.to_string(), handle.clone());
+        Ok(handle)
     }
 }
 
@@ -975,6 +1026,43 @@ mod tests {
             .expect_err("missing index should fail");
 
         assert!(matches!(error, CloudSearchError::IndexNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn registry_reuses_and_evicted_handles_correctly() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let registry = IndexRegistry::new(catalog);
+
+        registry
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let first = registry.index_handle("logs").await.expect("first handle");
+        let second = registry.index_handle("logs").await.expect("second handle");
+        assert!(Arc::ptr_eq(&first, &second));
+
+        registry.delete_index("logs").await.expect("delete index");
+
+        registry
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("recreate index");
+
+        let third = registry.index_handle("logs").await.expect("third handle");
+        assert!(!Arc::ptr_eq(&first, &third));
     }
 
     #[tokio::test]
