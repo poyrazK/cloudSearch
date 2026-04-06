@@ -32,6 +32,7 @@ pub struct IndexCatalog {
 pub struct IndexRegistry {
     catalog: Arc<IndexCatalog>,
     handles: Arc<Mutex<HashMap<String, Arc<Mutex<IndexHandle>>>>>,
+    lifecycle_lock: Arc<RwLock<()>>,
 }
 
 impl IndexCatalog {
@@ -169,6 +170,7 @@ impl IndexRegistry {
         Self {
             catalog,
             handles: Arc::new(Mutex::new(HashMap::new())),
+            lifecycle_lock: Arc::new(RwLock::new(())),
         }
     }
 
@@ -177,8 +179,12 @@ impl IndexRegistry {
         name: &str,
         request: CreateIndexRequest,
     ) -> Result<IndexMetadata> {
+        let _guard = self.lifecycle_lock.write().await;
         let metadata = self.catalog.create_index(name, request).await?;
-        let _ = self.index_handle(name).await?;
+
+        let handle = Arc::new(Mutex::new(self.catalog.open_index(name).await?));
+        self.handles.lock().await.insert(name.to_string(), handle);
+
         Ok(metadata)
     }
 
@@ -187,12 +193,22 @@ impl IndexRegistry {
     }
 
     pub async fn delete_index(&self, name: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.write().await;
         self.catalog.delete_index(name).await?;
         self.handles.lock().await.remove(name);
         Ok(())
     }
 
     pub async fn index_handle(&self, name: &str) -> Result<Arc<Mutex<IndexHandle>>> {
+        {
+            let handles = self.handles.lock().await;
+            if let Some(handle) = handles.get(name) {
+                return Ok(handle.clone());
+            }
+        }
+
+        let _guard = self.lifecycle_lock.read().await;
+
         {
             let handles = self.handles.lock().await;
             if let Some(handle) = handles.get(name) {
@@ -1043,6 +1059,7 @@ mod tests {
         let registry = Arc::new(IndexRegistry::new(catalog));
 
         registry
+            .catalog
             .create_index(
                 "logs",
                 CreateIndexRequest {
@@ -1077,6 +1094,7 @@ mod tests {
         registry.delete_index("logs").await.expect("delete index");
 
         registry
+            .catalog
             .create_index(
                 "logs",
                 CreateIndexRequest {
