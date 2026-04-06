@@ -112,6 +112,12 @@ Responsibilities:
 - recovery on startup
 - metrics, tracing, and slow-operation visibility
 
+Current implementation notes:
+
+- the API layer now maintains an in-process metrics state and exposes it through `/metrics`
+- request counts and latency summaries are tracked at the API boundary
+- index registry size is surfaced as an operational gauge
+
 ## Storage Model
 
 cloudSearch uses a Lucene-style segment architecture.
