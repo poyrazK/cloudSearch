@@ -362,3 +362,15 @@ impl Default for AppConfig {
         }
     }
 }
+
+impl AppConfig {
+    pub fn normalize_intervals(&mut self) {
+        if self.refresh_interval_secs == 0 {
+            self.refresh_interval_secs = 1;
+        }
+
+        if self.flush_interval_secs == 0 {
+            self.flush_interval_secs = 30;
+        }
+    }
+}
