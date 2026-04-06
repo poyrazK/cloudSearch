@@ -58,6 +58,11 @@ Responsibilities:
 
 The registry is also the right place to introduce future ownership metadata for tenants or namespaces.
 
+Current implementation notes:
+
+- the in-process runtime now owns an `IndexRegistry` that caches opened `IndexHandle`s by name
+- the API layer delegates index handle lookup and lifecycle operations to that registry
+
 ## Background Workers
 
 The first version should keep worker types minimal and explicit.
@@ -187,6 +192,12 @@ Minimum visibility:
 - request throughput and latency
 - worker queue depth
 - error counters by subsystem
+
+Current implementation notes:
+
+- the API exposes `GET /metrics` with Prometheus-style text output
+- current counters include writes, bulk requests and operations, searches, refreshes, flushes, delete-index calls, request totals, and request duration sum/count
+- the metrics endpoint also reports the current number of cached open indexes
 
 ## Future Evolution Hooks
 

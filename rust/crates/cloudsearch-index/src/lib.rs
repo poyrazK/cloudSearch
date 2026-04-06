@@ -226,6 +226,10 @@ impl IndexRegistry {
         handles.insert(name.to_string(), opened.clone());
         Ok(opened)
     }
+
+    pub async fn cached_handle_count(&self) -> usize {
+        self.handles.lock().await.len()
+    }
 }
 
 #[derive(Debug)]

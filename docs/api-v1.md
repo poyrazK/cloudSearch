@@ -47,6 +47,17 @@ Current implementation notes:
 
 - `POST /{index}/_search`
 
+## Observability API
+
+- `GET /_health`
+- `GET /metrics`
+
+Current implementation notes:
+
+- `/metrics` exposes Prometheus-style counters and duration summaries for core API operations
+- request counters include route, method, and status labels
+- runtime gauges include the current number of open cached index handles
+
 ### Supported Query DSL In V1
 
 - `match`

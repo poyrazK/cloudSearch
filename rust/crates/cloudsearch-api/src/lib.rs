@@ -14,7 +14,11 @@ use cloudsearch_common::{
 };
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use serde_json::Value;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 #[derive(serde::Serialize)]
 struct CompatIndexDocumentResponse {
@@ -83,14 +87,111 @@ struct CompatDeleteIndexResponse {
     result: &'static str,
 }
 
+#[derive(Default)]
+struct MetricsState {
+    request_counts: BTreeMap<(String, String, u16), u64>,
+    request_duration_sum_secs: BTreeMap<(String, String), f64>,
+    request_duration_count: BTreeMap<(String, String), u64>,
+    index_writes_total: u64,
+    bulk_requests_total: u64,
+    bulk_operations_total: u64,
+    search_requests_total: u64,
+    refresh_total: u64,
+    flush_total: u64,
+    delete_index_total: u64,
+}
+
+impl MetricsState {
+    fn record_request(
+        &mut self,
+        route: &str,
+        method: &str,
+        status: StatusCode,
+        duration_secs: f64,
+    ) {
+        *self
+            .request_counts
+            .entry((route.to_string(), method.to_string(), status.as_u16()))
+            .or_default() += 1;
+        *self
+            .request_duration_sum_secs
+            .entry((route.to_string(), method.to_string()))
+            .or_default() += duration_secs;
+        *self
+            .request_duration_count
+            .entry((route.to_string(), method.to_string()))
+            .or_default() += 1;
+    }
+
+    fn render(&self, open_indexes: usize) -> String {
+        let mut lines = Vec::new();
+
+        for ((route, method, status), value) in &self.request_counts {
+            lines.push(format!(
+                "cloudsearch_requests_total{{route=\"{}\",method=\"{}\",status=\"{}\"}} {}",
+                route, method, status, value
+            ));
+        }
+
+        for ((route, method), value) in &self.request_duration_sum_secs {
+            lines.push(format!(
+                "cloudsearch_request_duration_seconds_sum{{route=\"{}\",method=\"{}\"}} {}",
+                route, method, value
+            ));
+        }
+
+        for ((route, method), value) in &self.request_duration_count {
+            lines.push(format!(
+                "cloudsearch_request_duration_seconds_count{{route=\"{}\",method=\"{}\"}} {}",
+                route, method, value
+            ));
+        }
+
+        lines.push(format!(
+            "cloudsearch_index_writes_total {}",
+            self.index_writes_total
+        ));
+        lines.push(format!(
+            "cloudsearch_bulk_requests_total {}",
+            self.bulk_requests_total
+        ));
+        lines.push(format!(
+            "cloudsearch_bulk_operations_total {}",
+            self.bulk_operations_total
+        ));
+        lines.push(format!(
+            "cloudsearch_search_requests_total {}",
+            self.search_requests_total
+        ));
+        lines.push(format!("cloudsearch_refresh_total {}", self.refresh_total));
+        lines.push(format!("cloudsearch_flush_total {}", self.flush_total));
+        lines.push(format!(
+            "cloudsearch_delete_index_total {}",
+            self.delete_index_total
+        ));
+        lines.push(format!("cloudsearch_open_indexes {}", open_indexes));
+
+        lines.sort();
+        lines.join("\n") + "\n"
+    }
+}
+
 #[derive(Clone)]
 pub struct ApiState {
     registry: Arc<IndexRegistry>,
+    metrics: Arc<Mutex<MetricsState>>,
 }
 
 impl ApiState {
     pub fn new(registry: Arc<IndexRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            metrics: Arc::new(Mutex::new(MetricsState::default())),
+        }
+    }
+
+    fn metrics(&self) -> std::sync::MutexGuard<'_, MetricsState> {
+        self.metrics.lock().expect("metrics mutex poisoned")
     }
 }
 
@@ -101,6 +202,7 @@ pub fn router(registry: Arc<IndexCatalog>) -> Router {
 pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
     Router::new()
         .route("/_health", get(health))
+        .route("/metrics", get(metrics))
         .route(
             "/{index}",
             put(create_index).get(get_index).delete(delete_index),
@@ -118,12 +220,24 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+async fn metrics(State(state): State<ApiState>) -> String {
+    let open_indexes = state.registry.cached_handle_count().await;
+    state.metrics().render(open_indexes)
+}
+
 async fn create_index(
     State(state): State<ApiState>,
     Path(index): Path<String>,
     Json(request): Json<CreateIndexRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
     let metadata = state.registry.create_index(&index, request).await?;
+    state.metrics().record_request(
+        "index_create",
+        "PUT",
+        StatusCode::CREATED,
+        started_at.elapsed().as_secs_f64(),
+    );
     Ok((StatusCode::CREATED, Json(metadata)))
 }
 
@@ -131,7 +245,14 @@ async fn get_index(
     State(state): State<ApiState>,
     Path(index): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
     let metadata = state.registry.get_index(&index).await?;
+    state.metrics().record_request(
+        "index_get",
+        "GET",
+        StatusCode::OK,
+        started_at.elapsed().as_secs_f64(),
+    );
     Ok((StatusCode::OK, Json(metadata)))
 }
 
@@ -139,7 +260,18 @@ async fn delete_index(
     State(state): State<ApiState>,
     Path(index): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
     state.registry.delete_index(&index).await?;
+    {
+        let mut metrics = state.metrics();
+        metrics.delete_index_total += 1;
+        metrics.record_request(
+            "index_delete",
+            "DELETE",
+            StatusCode::OK,
+            started_at.elapsed().as_secs_f64(),
+        );
+    }
 
     Ok((
         StatusCode::OK,
@@ -152,6 +284,7 @@ async fn index_document(
     Path(index): Path<String>,
     Json(request): Json<IndexDocumentRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
     let handle = state.registry.index_handle(&index).await?;
     let mut handle = handle.lock().await;
     let result = if handle.get_document(&request.id).is_some() {
@@ -165,6 +298,16 @@ async fn index_document(
             source: request.source,
         })
         .await?;
+    {
+        let mut metrics = state.metrics();
+        metrics.index_writes_total += 1;
+        metrics.record_request(
+            "document_index",
+            "PUT",
+            StatusCode::CREATED,
+            started_at.elapsed().as_secs_f64(),
+        );
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -180,9 +323,22 @@ async fn bulk_index(
     Path(index): Path<String>,
     Json(request): Json<BulkRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
     let handle = state.registry.index_handle(&index).await?;
     let mut handle = handle.lock().await;
+    let operation_count = request.operations.len() as u64;
     let response = handle.bulk_apply(request).await?;
+    {
+        let mut metrics = state.metrics();
+        metrics.bulk_requests_total += 1;
+        metrics.bulk_operations_total += operation_count;
+        metrics.record_request(
+            "bulk_index",
+            "POST",
+            StatusCode::OK,
+            started_at.elapsed().as_secs_f64(),
+        );
+    }
     Ok((StatusCode::OK, Json(to_compat_bulk_response(response))))
 }
 
@@ -190,11 +346,18 @@ async fn get_document(
     State(state): State<ApiState>,
     Path((index, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
     let handle = state.registry.index_handle(&index).await?;
     let handle = handle.lock().await;
     let document = handle
         .get_document(&id)
         .ok_or_else(|| ApiError(CloudSearchError::IndexNotFound(format!("document '{id}'"))))?;
+    state.metrics().record_request(
+        "document_get",
+        "GET",
+        StatusCode::OK,
+        started_at.elapsed().as_secs_f64(),
+    );
 
     Ok((
         StatusCode::OK,
@@ -211,10 +374,21 @@ async fn search_index(
     Path(index): Path<String>,
     Json(request): Json<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
     let request = parse_search_request(request)?;
     let handle = state.registry.index_handle(&index).await?;
     let handle = handle.lock().await;
     handle.validate_search_request(&request)?;
+    {
+        let mut metrics = state.metrics();
+        metrics.search_requests_total += 1;
+        metrics.record_request(
+            "search",
+            "POST",
+            StatusCode::OK,
+            started_at.elapsed().as_secs_f64(),
+        );
+    }
     Ok((
         StatusCode::OK,
         Json(to_compat_search_response(handle.search(&request))),
@@ -614,9 +788,20 @@ async fn refresh_index(
     State(state): State<ApiState>,
     Path(index): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
     let handle = state.registry.index_handle(&index).await?;
     let mut handle = handle.lock().await;
     let refreshed_documents = handle.refresh().await?;
+    {
+        let mut metrics = state.metrics();
+        metrics.refresh_total += 1;
+        metrics.record_request(
+            "refresh",
+            "POST",
+            StatusCode::OK,
+            started_at.elapsed().as_secs_f64(),
+        );
+    }
 
     Ok((
         StatusCode::OK,
@@ -631,9 +816,20 @@ async fn flush_index(
     State(state): State<ApiState>,
     Path(index): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
     let handle = state.registry.index_handle(&index).await?;
     let mut handle = handle.lock().await;
     let response = handle.flush().await?;
+    {
+        let mut metrics = state.metrics();
+        metrics.flush_total += 1;
+        metrics.record_request(
+            "flush",
+            "POST",
+            StatusCode::OK,
+            started_at.elapsed().as_secs_f64(),
+        );
+    }
 
     Ok((StatusCode::OK, Json::<FlushResponse>(response)))
 }
@@ -714,6 +910,124 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
 
         assert_eq!(value, serde_json::json!({"status": "ok"}));
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_exposes_request_and_operation_counters() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs/_doc")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&IndexDocumentRequest {
+                            id: "doc-1".to_string(),
+                            source: serde_json::json!({"service": "billing"}),
+                        })
+                        .expect("serialize index request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("index response");
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_bulk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&BulkRequest {
+                            operations: vec![BulkOperation::Index(BulkIndexOperation {
+                                id: "doc-2".to_string(),
+                                source: serde_json::json!({"service": "search"}),
+                            })],
+                        })
+                        .expect("serialize bulk request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("bulk response");
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::json!({}).to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("metrics response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let text = String::from_utf8(body.to_vec()).expect("utf8");
+
+        assert!(text.contains("cloudsearch_index_writes_total 1"));
+        assert!(text.contains("cloudsearch_bulk_requests_total 1"));
+        assert!(text.contains("cloudsearch_bulk_operations_total 1"));
+        assert!(text.contains("cloudsearch_search_requests_total 1"));
+        assert!(text.contains("cloudsearch_refresh_total 1"));
+        assert!(text.contains("cloudsearch_open_indexes 1"));
+        assert!(text.contains(
+            "cloudsearch_requests_total{route=\"index_create\",method=\"PUT\",status=\"201\"} 1"
+        ));
+        assert!(text.contains(
+            "cloudsearch_requests_total{route=\"search\",method=\"POST\",status=\"200\"} 1"
+        ));
     }
 
     #[tokio::test]
