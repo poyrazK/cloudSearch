@@ -499,7 +499,7 @@ impl IndexHandle {
 
         let snapshot = SegmentSnapshot {
             last_sequence_number: self.last_sequence_number,
-            documents: merged.into_iter().map(|(_, v)| v).collect(),
+            documents: merged.into_values().collect(),
         };
 
         write_segment_snapshot(&self.segments_dir, &snapshot).await?;
