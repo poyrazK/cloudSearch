@@ -44,6 +44,21 @@ pub struct SegmentSnapshot {
     pub documents: Vec<IndexDocument>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SegmentManifest {
+    pub last_sequence_number: u64,
+    pub document_count: u64,
+}
+
+impl From<&SegmentSnapshot> for SegmentManifest {
+    fn from(snapshot: &SegmentSnapshot) -> Self {
+        Self {
+            last_sequence_number: snapshot.last_sequence_number,
+            document_count: snapshot.documents.len() as u64,
+        }
+    }
+}
+
 impl WalManager {
     pub async fn open(wal_dir: impl Into<PathBuf>) -> Result<Self> {
         let wal_dir = wal_dir.into();
@@ -345,6 +360,28 @@ mod tests {
             .expect("snapshot exists");
 
         assert_eq!(loaded, snapshot);
+    }
+
+    #[test]
+    fn segment_manifest_is_derived_from_snapshot() {
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: 42,
+            documents: vec![
+                IndexDocument {
+                    id: "doc-1".to_string(),
+                    source: serde_json::json!({"message": "hello"}),
+                },
+                IndexDocument {
+                    id: "doc-2".to_string(),
+                    source: serde_json::json!({"message": "world"}),
+                },
+            ],
+        };
+
+        let manifest = SegmentManifest::from(&snapshot);
+
+        assert_eq!(manifest.last_sequence_number, 42);
+        assert_eq!(manifest.document_count, 2);
     }
 
     #[tokio::test]

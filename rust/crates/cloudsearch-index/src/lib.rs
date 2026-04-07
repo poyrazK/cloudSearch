@@ -8,7 +8,8 @@ use cloudsearch_common::{
     StatsAggregationResult, TermsAggregationResult, TermsBucket, TermsQuery,
 };
 use cloudsearch_storage::{
-    SegmentSnapshot, WalManager, WalRecord, read_segment_snapshot, write_segment_snapshot,
+    SegmentManifest, SegmentSnapshot, WalManager, WalRecord, read_segment_snapshot,
+    write_segment_snapshot,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -21,6 +22,22 @@ use tokio::{
 };
 
 const MAX_FIELDS_PER_INDEX: usize = 1000;
+const MERGE_TRIGGER_DOCUMENT_COUNT: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergePlan {
+    segments: Vec<SegmentManifest>,
+}
+
+impl MergePlan {
+    pub(crate) fn new(segments: Vec<SegmentManifest>) -> Self {
+        Self { segments }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct IndexCatalog {
@@ -254,6 +271,26 @@ enum PendingOperation {
 }
 
 impl IndexHandle {
+    pub(crate) fn plan_merge(&self, segment_snapshot: &SegmentSnapshot) -> Option<MergePlan> {
+        let manifest = SegmentManifest::from(segment_snapshot);
+
+        if manifest.document_count == 0
+            || manifest.document_count < MERGE_TRIGGER_DOCUMENT_COUNT as u64
+        {
+            return None;
+        }
+
+        Some(MergePlan::new(vec![manifest]))
+    }
+
+    pub(crate) async fn apply_merge_plan(&mut self, plan: &MergePlan) -> Result<()> {
+        if plan.is_empty() {
+            return Ok(());
+        }
+
+        Ok(())
+    }
+
     pub fn metadata(&self) -> &IndexMetadata {
         &self.metadata
     }
@@ -437,6 +474,10 @@ impl IndexHandle {
         write_segment_snapshot(&self.segments_dir, &snapshot).await?;
         self.wal.rollover().await?;
         self.wal.trim_through(snapshot.last_sequence_number).await?;
+
+        if let Some(plan) = self.plan_merge(&snapshot) {
+            self.apply_merge_plan(&plan).await?;
+        }
 
         Ok(FlushResponse {
             result: "flushed",
@@ -2696,5 +2737,85 @@ mod tests {
 
         let reopened = catalog.open_index("logs").await.expect("reopen index");
         assert_eq!(reopened.search(&SearchRequest::default()).hits.total, 1);
+    }
+
+    #[tokio::test]
+    async fn merge_plan_is_empty_for_small_indexes() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "hello"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: handle.last_sequence_number,
+            documents: handle.searchable_documents.values().cloned().collect(),
+        };
+
+        assert!(handle.plan_merge(&snapshot).is_none());
+    }
+
+    #[tokio::test]
+    async fn merge_plan_appears_once_threshold_is_met() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+
+        for i in 0..MERGE_TRIGGER_DOCUMENT_COUNT {
+            handle
+                .index_document(IndexDocument {
+                    id: format!("doc-{i}"),
+                    source: serde_json::json!({"message": format!("doc {i}")}),
+                })
+                .await
+                .expect("index doc");
+        }
+        handle.refresh().await.expect("refresh");
+
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: handle.last_sequence_number,
+            documents: handle.searchable_documents.values().cloned().collect(),
+        };
+
+        let plan = handle.plan_merge(&snapshot).expect("merge plan");
+        assert_eq!(plan.segments.len(), 1);
+        assert_eq!(
+            plan.segments[0].document_count,
+            MERGE_TRIGGER_DOCUMENT_COUNT as u64
+        );
+        assert_eq!(
+            plan.segments[0].last_sequence_number,
+            MERGE_TRIGGER_DOCUMENT_COUNT as u64
+        );
     }
 }
