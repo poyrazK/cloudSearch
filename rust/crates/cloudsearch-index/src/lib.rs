@@ -490,8 +490,13 @@ impl IndexHandle {
         let mut merged = self.searchable_documents.clone();
 
         for (id, op) in &self.pending_operations {
-            if let PendingOperation::Upsert(doc) = op {
-                merged.insert(id.clone(), doc.clone());
+            match op {
+                PendingOperation::Upsert(doc) => {
+                    merged.insert(id.clone(), doc.clone());
+                }
+                PendingOperation::Delete => {
+                    merged.remove(id);
+                }
             }
         }
 
@@ -3037,5 +3042,47 @@ mod tests {
             .expect("snapshot exists");
         assert_eq!(persisted.documents.len(), 1);
         assert_eq!(persisted.documents[0].source["message"], "v2");
+    }
+
+    #[tokio::test]
+    async fn merge_applies_pending_delete_without_refresh() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let segments_dir = temp_dir
+            .path()
+            .join("indexes")
+            .join("logs")
+            .join("segments");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "hello"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+        handle.delete_document("doc-1").await.expect("delete doc");
+
+        handle.merge().await.expect("merge");
+
+        let persisted = read_segment_snapshot(&segments_dir)
+            .await
+            .expect("read snapshot")
+            .expect("snapshot exists");
+        assert_eq!(persisted.documents.len(), 0);
     }
 }
