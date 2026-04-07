@@ -3,9 +3,9 @@ use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkOperation,
     BulkRequest, BulkResponse, CloudSearchError, CreateIndexRequest,
     DateHistogramAggregationResult, DateHistogramBucket, DateHistogramInterval, FieldMapping,
-    FieldType, FlushResponse, HitsMetadata, IndexDocument, IndexMetadata, MappingMode, RangeQuery,
-    Result, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec,
-    StatsAggregationResult, TermsAggregationResult, TermsBucket, TermsQuery,
+    FieldType, FlushResponse, HitsMetadata, IndexDocument, IndexMetadata, MappingMode,
+    MergeResponse, RangeQuery, Result, SearchHit, SearchQuery, SearchRequest, SearchResponse,
+    SortOrder, SortSpec, StatsAggregationResult, TermsAggregationResult, TermsBucket, TermsQuery,
 };
 use cloudsearch_storage::{
     SegmentManifest, SegmentSnapshot, WalManager, WalRecord, read_segment_snapshot,
@@ -483,6 +483,22 @@ impl IndexHandle {
             result: "flushed",
             flushed_documents: snapshot.documents.len(),
             sequence_number: snapshot.last_sequence_number,
+        })
+    }
+
+    pub async fn merge(&mut self) -> Result<MergeResponse> {
+        let merged_documents = self.searchable_documents.len();
+
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: self.last_sequence_number,
+            documents: self.searchable_documents.values().cloned().collect(),
+        };
+
+        write_segment_snapshot(&self.segments_dir, &snapshot).await?;
+
+        Ok(MergeResponse {
+            result: "merged",
+            merged_documents,
         })
     }
 
@@ -2817,5 +2833,112 @@ mod tests {
             plan.segments[0].last_sequence_number,
             MERGE_TRIGGER_DOCUMENT_COUNT as u64
         );
+    }
+
+    #[tokio::test]
+    async fn merge_removes_duplicate_overwrites() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "v1"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "v2"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+
+        let merged = handle.merge().await.expect("merge");
+        assert_eq!(merged.merged_documents, 1);
+
+        let result = handle.search(&SearchRequest::default());
+        assert_eq!(result.hits.total, 1);
+        assert_eq!(result.hits.hits[0].source["message"], "v2");
+    }
+
+    #[tokio::test]
+    async fn merge_removes_deleted_documents() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "hello"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+        handle.delete_document("doc-1").await.expect("delete doc");
+        handle.refresh().await.expect("refresh");
+
+        let merged = handle.merge().await.expect("merge");
+        assert_eq!(merged.merged_documents, 0);
+
+        let result = handle.search(&SearchRequest::default());
+        assert_eq!(result.hits.total, 0);
+    }
+
+    #[tokio::test]
+    async fn reopen_after_merge_is_stable() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "hello"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+        handle.merge().await.expect("merge");
+
+        let reopened = catalog.open_index("logs").await.expect("reopen index");
+        assert_eq!(reopened.search(&SearchRequest::default()).hits.total, 1);
     }
 }

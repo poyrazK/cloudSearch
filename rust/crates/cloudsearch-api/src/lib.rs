@@ -8,9 +8,10 @@ use axum::{
 use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkRequest,
     BulkResponse, CloudSearchError, CreateIndexRequest, DateHistogramAggregationResult,
-    ErrorResponse, FlushResponse, HealthResponse, IndexDocument, IndexDocumentRequest, RangeQuery,
-    RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
-    StatsAggregationResult, TermQuery, TermsAggregationResult, TermsQuery,
+    ErrorResponse, FlushResponse, HealthResponse, IndexDocument, IndexDocumentRequest,
+    MergeResponse, RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
+    SearchResponse, SortSpec, StatsAggregationResult, TermQuery, TermsAggregationResult,
+    TermsQuery,
 };
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use serde_json::Value;
@@ -98,6 +99,7 @@ struct MetricsState {
     search_requests_total: u64,
     refresh_total: u64,
     flush_total: u64,
+    merge_total: u64,
     delete_index_total: u64,
 }
 
@@ -165,6 +167,7 @@ impl MetricsState {
         ));
         lines.push(format!("cloudsearch_refresh_total {}", self.refresh_total));
         lines.push(format!("cloudsearch_flush_total {}", self.flush_total));
+        lines.push(format!("cloudsearch_merge_total {}", self.merge_total));
         lines.push(format!(
             "cloudsearch_delete_index_total {}",
             self.delete_index_total
@@ -211,6 +214,7 @@ pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
         .route("/{index}/_doc", put(index_document))
         .route("/{index}/_doc/{id}", get(get_document))
         .route("/{index}/_flush", put(flush_index).post(flush_index))
+        .route("/{index}/_merge", put(merge_index).post(merge_index))
         .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
         .route("/{index}/_search", put(search_index).post(search_index))
         .with_state(ApiState::new(registry))
@@ -832,6 +836,28 @@ async fn flush_index(
     }
 
     Ok((StatusCode::OK, Json::<FlushResponse>(response)))
+}
+
+async fn merge_index(
+    State(state): State<ApiState>,
+    Path(index): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
+    let handle = state.registry.index_handle(&index).await?;
+    let mut handle = handle.lock().await;
+    let response = handle.merge().await?;
+    {
+        let mut metrics = state.metrics();
+        metrics.merge_total += 1;
+        metrics.record_request(
+            "merge",
+            "POST",
+            StatusCode::OK,
+            started_at.elapsed().as_secs_f64(),
+        );
+    }
+
+    Ok((StatusCode::OK, Json::<MergeResponse>(response)))
 }
 
 #[derive(Debug)]

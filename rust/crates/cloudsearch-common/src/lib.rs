@@ -179,6 +179,12 @@ pub struct FlushResponse {
     pub sequence_number: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergeResponse {
+    pub result: &'static str,
+    pub merged_documents: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SearchRequest {
     pub query: Option<SearchQuery>,
