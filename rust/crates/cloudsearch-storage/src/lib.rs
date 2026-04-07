@@ -47,14 +47,14 @@ pub struct SegmentSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SegmentManifest {
     pub last_sequence_number: u64,
-    pub document_count: usize,
+    pub document_count: u64,
 }
 
 impl From<&SegmentSnapshot> for SegmentManifest {
     fn from(snapshot: &SegmentSnapshot) -> Self {
         Self {
             last_sequence_number: snapshot.last_sequence_number,
-            document_count: snapshot.documents.len(),
+            document_count: snapshot.documents.len() as u64,
         }
     }
 }

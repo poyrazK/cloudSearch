@@ -271,13 +271,12 @@ enum PendingOperation {
 }
 
 impl IndexHandle {
-    pub(crate) fn plan_merge(&self) -> Option<MergePlan> {
-        let manifest = SegmentManifest {
-            last_sequence_number: self.last_sequence_number,
-            document_count: self.searchable_documents.len(),
-        };
+    pub(crate) fn plan_merge(&self, segment_snapshot: &SegmentSnapshot) -> Option<MergePlan> {
+        let manifest = SegmentManifest::from(segment_snapshot);
 
-        if manifest.document_count == 0 || manifest.document_count < MERGE_TRIGGER_DOCUMENT_COUNT {
+        if manifest.document_count == 0
+            || manifest.document_count < MERGE_TRIGGER_DOCUMENT_COUNT as u64
+        {
             return None;
         }
 
@@ -476,7 +475,7 @@ impl IndexHandle {
         self.wal.rollover().await?;
         self.wal.trim_through(snapshot.last_sequence_number).await?;
 
-        if let Some(plan) = self.plan_merge() {
+        if let Some(plan) = self.plan_merge(&snapshot) {
             self.apply_merge_plan(&plan).await?;
         }
 
@@ -2766,7 +2765,12 @@ mod tests {
             .expect("index doc");
         handle.refresh().await.expect("refresh");
 
-        assert!(handle.plan_merge().is_none());
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: handle.last_sequence_number,
+            documents: handle.searchable_documents.values().cloned().collect(),
+        };
+
+        assert!(handle.plan_merge(&snapshot).is_none());
     }
 
     #[tokio::test]
@@ -2798,11 +2802,20 @@ mod tests {
         }
         handle.refresh().await.expect("refresh");
 
-        let plan = handle.plan_merge().expect("merge plan");
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: handle.last_sequence_number,
+            documents: handle.searchable_documents.values().cloned().collect(),
+        };
+
+        let plan = handle.plan_merge(&snapshot).expect("merge plan");
         assert_eq!(plan.segments.len(), 1);
         assert_eq!(
             plan.segments[0].document_count,
-            MERGE_TRIGGER_DOCUMENT_COUNT
+            MERGE_TRIGGER_DOCUMENT_COUNT as u64
+        );
+        assert_eq!(
+            plan.segments[0].last_sequence_number,
+            MERGE_TRIGGER_DOCUMENT_COUNT as u64
         );
     }
 }
