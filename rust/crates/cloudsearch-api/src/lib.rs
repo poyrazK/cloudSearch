@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkRequest,
@@ -214,7 +214,7 @@ pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
         .route("/{index}/_doc", put(index_document))
         .route("/{index}/_doc/{id}", get(get_document))
         .route("/{index}/_flush", put(flush_index).post(flush_index))
-        .route("/{index}/_merge", put(merge_index).post(merge_index))
+        .route("/{index}/_merge", post(merge_index))
         .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
         .route("/{index}/_search", put(search_index).post(search_index))
         .with_state(ApiState::new(registry))
