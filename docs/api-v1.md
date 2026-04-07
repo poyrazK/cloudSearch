@@ -17,6 +17,7 @@ Compatibility is intentionally pragmatic:
 - `DELETE /{index}`
 - `POST /{index}/_refresh`
 - `POST /{index}/_flush`
+- `POST /{index}/_merge`
 
 ### Expected V1 Semantics
 
@@ -25,6 +26,7 @@ Compatibility is intentionally pragmatic:
 - delete index and its local storage
 - refresh to make recent writes searchable
 - flush to persist the current searchable state to a durable segment snapshot
+- merge to compact the segment by deduplicating overwrites and removing deletes
 
 Current implementation notes:
 

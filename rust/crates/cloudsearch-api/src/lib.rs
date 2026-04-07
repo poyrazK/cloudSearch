@@ -3,14 +3,15 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkRequest,
     BulkResponse, CloudSearchError, CreateIndexRequest, DateHistogramAggregationResult,
-    ErrorResponse, FlushResponse, HealthResponse, IndexDocument, IndexDocumentRequest, RangeQuery,
-    RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
-    StatsAggregationResult, TermQuery, TermsAggregationResult, TermsQuery,
+    ErrorResponse, FlushResponse, HealthResponse, IndexDocument, IndexDocumentRequest,
+    MergeResponse, RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
+    SearchResponse, SortSpec, StatsAggregationResult, TermQuery, TermsAggregationResult,
+    TermsQuery,
 };
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use serde_json::Value;
@@ -98,6 +99,7 @@ struct MetricsState {
     search_requests_total: u64,
     refresh_total: u64,
     flush_total: u64,
+    merge_total: u64,
     delete_index_total: u64,
 }
 
@@ -165,6 +167,7 @@ impl MetricsState {
         ));
         lines.push(format!("cloudsearch_refresh_total {}", self.refresh_total));
         lines.push(format!("cloudsearch_flush_total {}", self.flush_total));
+        lines.push(format!("cloudsearch_merge_total {}", self.merge_total));
         lines.push(format!(
             "cloudsearch_delete_index_total {}",
             self.delete_index_total
@@ -211,6 +214,7 @@ pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
         .route("/{index}/_doc", put(index_document))
         .route("/{index}/_doc/{id}", get(get_document))
         .route("/{index}/_flush", put(flush_index).post(flush_index))
+        .route("/{index}/_merge", post(merge_index))
         .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
         .route("/{index}/_search", put(search_index).post(search_index))
         .with_state(ApiState::new(registry))
@@ -832,6 +836,28 @@ async fn flush_index(
     }
 
     Ok((StatusCode::OK, Json::<FlushResponse>(response)))
+}
+
+async fn merge_index(
+    State(state): State<ApiState>,
+    Path(index): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
+    let handle = state.registry.index_handle(&index).await?;
+    let mut handle = handle.lock().await;
+    let response = handle.merge().await?;
+    {
+        let mut metrics = state.metrics();
+        metrics.merge_total += 1;
+        metrics.record_request(
+            "merge",
+            "POST",
+            StatusCode::OK,
+            started_at.elapsed().as_secs_f64(),
+        );
+    }
+
+    Ok((StatusCode::OK, Json::<MergeResponse>(response)))
 }
 
 #[derive(Debug)]
@@ -3268,5 +3294,102 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn merge_endpoint_returns_merge_response_and_increments_metric() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs/_doc")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&IndexDocumentRequest {
+                            id: "doc-1".to_string(),
+                            source: serde_json::json!({"message": "hello"}),
+                        })
+                        .expect("serialize index request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("index response");
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+
+        let merge_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_merge")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("merge response");
+
+        assert_eq!(merge_response.status(), StatusCode::OK);
+        let merge_body = merge_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let merge_json: serde_json::Value =
+            serde_json::from_slice(&merge_body).expect("deserialize merge response");
+        assert_eq!(merge_json["result"], "merged");
+        assert_eq!(merge_json["merged_documents"], 1);
+
+        let metrics_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("metrics response");
+        let metrics_body = metrics_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let metrics_str = String::from_utf8(metrics_body.to_vec()).expect("metrics to string");
+        assert!(metrics_str.contains("cloudsearch_merge_total"));
     }
 }

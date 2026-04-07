@@ -188,6 +188,17 @@ Current implementation notes:
 - recovery loads the flushed segment snapshot first
 - WAL replay then starts after the flushed sequence boundary
 
+## Merge Lifecycle
+
+Merge is now available as an explicit operation via `POST /{index}/_merge`.
+
+Current implementation notes:
+
+- merge rewrites the current segment snapshot in place
+- deduplicating overwrites by keeping the latest document version
+- removing deleted documents from the searchable view
+- the merged segment preserves `last_sequence_number`
+
 Recovery correctness is more important than startup speed in the first version.
 
 ## Time-Aware Storage Hooks
