@@ -356,6 +356,7 @@ pub struct AppConfig {
     pub data_dir: PathBuf,
     pub refresh_interval_secs: u64,
     pub flush_interval_secs: u64,
+    pub merge_interval_secs: u64,
 }
 
 impl Default for AppConfig {
@@ -365,6 +366,7 @@ impl Default for AppConfig {
             data_dir: PathBuf::from("./data"),
             refresh_interval_secs: 1,
             flush_interval_secs: 30,
+            merge_interval_secs: 60,
         }
     }
 }
@@ -377,6 +379,10 @@ impl AppConfig {
 
         if self.flush_interval_secs == 0 {
             self.flush_interval_secs = 30;
+        }
+
+        if self.merge_interval_secs == 0 {
+            self.merge_interval_secs = 60;
         }
     }
 }

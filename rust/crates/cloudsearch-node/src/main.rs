@@ -2,7 +2,7 @@ use cloudsearch_api::router_with_registry;
 use cloudsearch_common::AppConfig;
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use std::{env, sync::Arc, time::Duration};
-use tokio::{net::TcpListener, task::JoinSet};
+use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,6 +19,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "CLOUDSEARCH_FLUSH_INTERVAL_SECS",
         config.flush_interval_secs,
     );
+    config.merge_interval_secs = parse_interval_env(
+        "CLOUDSEARCH_MERGE_INTERVAL_SECS",
+        config.merge_interval_secs,
+    );
     config.normalize_intervals();
 
     let catalog = Arc::new(IndexCatalog::new(config.data_dir.clone()));
@@ -32,6 +36,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_flush_loop(
         registry.clone(),
         Duration::from_secs(config.flush_interval_secs),
+    );
+    spawn_merge_loop(
+        registry.clone(),
+        Duration::from_secs(config.merge_interval_secs),
     );
 
     let app = router_with_registry(registry);
@@ -48,16 +56,20 @@ fn spawn_refresh_loop(registry: Arc<IndexRegistry>, interval: Duration) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            let mut tasks = JoinSet::new();
-            for handle in registry.cached_handles().await {
-                tasks.spawn(async move {
-                    if let Err(error) = handle.lock().await.refresh().await {
+            let handles = registry.cached_handles().await;
+            for handle in handles {
+                let handle = handle.clone();
+                tokio::spawn(async move {
+                    let result = async {
+                        let mut guard = handle.lock().await;
+                        guard.refresh().await
+                    }
+                    .await;
+                    if let Err(error) = result {
                         eprintln!("cloudSearch background refresh failed: {error}");
                     }
                 });
             }
-
-            while tasks.join_next().await.is_some() {}
         }
     });
 }
@@ -66,16 +78,42 @@ fn spawn_flush_loop(registry: Arc<IndexRegistry>, interval: Duration) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            let mut tasks = JoinSet::new();
-            for handle in registry.cached_handles().await {
-                tasks.spawn(async move {
-                    if let Err(error) = handle.lock().await.flush().await {
+            let handles = registry.cached_handles().await;
+            for handle in handles {
+                let handle = handle.clone();
+                tokio::spawn(async move {
+                    let result = async {
+                        let mut guard = handle.lock().await;
+                        guard.flush().await
+                    }
+                    .await;
+                    if let Err(error) = result {
                         eprintln!("cloudSearch background flush failed: {error}");
                     }
                 });
             }
+        }
+    });
+}
 
-            while tasks.join_next().await.is_some() {}
+fn spawn_merge_loop(registry: Arc<IndexRegistry>, interval: Duration) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let handles = registry.cached_handles().await;
+            for handle in handles {
+                let handle = handle.clone();
+                tokio::spawn(async move {
+                    let result = async {
+                        let mut guard = handle.lock().await;
+                        guard.merge().await
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        eprintln!("cloudSearch background merge failed: {error}");
+                    }
+                });
+            }
         }
     });
 }
