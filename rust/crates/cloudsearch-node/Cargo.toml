@@ -9,6 +9,8 @@ cloudsearch-api = { path = "../cloudsearch-api" }
 cloudsearch-common = { path = "../cloudsearch-common" }
 cloudsearch-index = { path = "../cloudsearch-index" }
 tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 reqwest.workspace = true
