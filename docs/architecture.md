@@ -233,4 +233,14 @@ Minimum requirements:
 - metrics for ingest, query latency, refresh, and merge activity
 - structured logs
 - tracing hooks
-- slow query and slow bulk visibility later in v1
+- slow query and slow bulk visibility
+
+Current implementation notes:
+
+- the API layer maintains an in-process metrics state and exposes it through `/metrics`
+- request counts and latency summaries are tracked at the API boundary
+- index registry size is surfaced as an operational gauge
+- structured logging is implemented using `tracing` with `tracing-subscriber`
+- the node initializes logging via `RUST_LOG` environment variable (default: `cloudsearch=info,warn`)
+- HTTP access logging is provided by `tower-http` TraceLayer
+- slow queries (>50ms) and slow bulk operations (>200ms) are logged as warnings

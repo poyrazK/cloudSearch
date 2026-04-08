@@ -126,6 +126,12 @@ Recommended v1 behavior:
 
 The runtime should prefer stability over aggressive background optimization.
 
+Current implementation notes:
+
+- the node now runs a simple background merge loop over cached/open indexes
+- the default merge interval is `60s`
+- explicit `POST /{index}/_merge` remains supported alongside background merge
+
 ## Caching
 
 V1 should introduce only a few caches.
@@ -210,6 +216,11 @@ Current implementation notes:
 - the API exposes `GET /metrics` with Prometheus-style text output
 - current counters include writes, bulk requests and operations, searches, refreshes, flushes, delete-index calls, request totals, and request duration sum/count
 - the metrics endpoint also reports the current number of cached open indexes
+- structured logging is implemented via `tracing` with `tracing-subscriber`
+- logging is configured via `RUST_LOG` environment variable
+- HTTP access logs are provided by `tower-http` TraceLayer
+- background worker failures (refresh, flush, merge) are logged with index name
+- slow query (>50ms) and slow bulk (>200ms) operations are logged as warnings
 
 ## Future Evolution Hooks
 
