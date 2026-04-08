@@ -138,7 +138,9 @@ impl IndexCatalog {
             .map(|snapshot| snapshot.last_sequence_number)
             .unwrap_or(0);
 
+        tracing::info!(index = %name, "recovering WAL");
         let entries = wal.replay_from(last_sequence_number).await?;
+        let recovered_count = entries.len();
 
         for entry in entries {
             last_sequence_number = entry.sequence_number;
@@ -153,6 +155,7 @@ impl IndexCatalog {
                 WalRecord::MappingUpdate { .. } => {}
             }
         }
+        tracing::info!(index = %name, recovered_docs = recovered_count, "WAL recovery complete");
 
         Ok(IndexHandle {
             metadata,
@@ -250,6 +253,14 @@ impl IndexRegistry {
 
     pub async fn cached_handles(&self) -> Vec<Arc<Mutex<IndexHandle>>> {
         self.handles.lock().await.values().cloned().collect()
+    }
+
+    pub async fn cached_handles_with_names(&self) -> Vec<(String, Arc<Mutex<IndexHandle>>)> {
+        let handles = self.handles.lock().await;
+        handles
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 }
 
@@ -462,6 +473,9 @@ impl IndexHandle {
 
         self.metadata.updated_at = Utc::now();
 
+        if refreshed_documents > 0 {
+            tracing::debug!(index = %self.metadata.name, docs = refreshed_documents, "refresh complete");
+        }
         Ok(refreshed_documents)
     }
 
@@ -472,6 +486,7 @@ impl IndexHandle {
         };
 
         write_segment_snapshot(&self.segments_dir, &snapshot).await?;
+        tracing::info!(index = %self.metadata.name, seq = self.last_sequence_number, "flushed segment to disk");
         self.wal.rollover().await?;
         self.wal.trim_through(snapshot.last_sequence_number).await?;
 
@@ -508,6 +523,7 @@ impl IndexHandle {
         };
 
         write_segment_snapshot(&self.segments_dir, &snapshot).await?;
+        tracing::info!(index = %self.metadata.name, docs = merged_documents, seq = self.last_sequence_number, "merge complete");
 
         Ok(MergeResponse {
             result: "merged",
