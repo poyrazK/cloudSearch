@@ -889,7 +889,8 @@ impl IntoResponse for ApiError {
             | CloudSearchError::MappingConflict(_)
             | CloudSearchError::UnknownFieldRejected(_)
             | CloudSearchError::UnsupportedArrayField(_)
-            | CloudSearchError::MappingLimitExceeded(_) => StatusCode::BAD_REQUEST,
+            | CloudSearchError::MappingLimitExceeded(_)
+            | CloudSearchError::InvalidNamespace(_) => StatusCode::BAD_REQUEST,
             CloudSearchError::InvalidWalRecord(_)
             | CloudSearchError::WalChecksumMismatch
             | CloudSearchError::Io(_)
@@ -1085,6 +1086,7 @@ mod tests {
                             settings: IndexSettings {
                                 mapping_mode: Default::default(),
                                 primary_time_field: Some("@timestamp".to_string()),
+                                namespace: None,
                             },
                         })
                         .expect("serialize create request"),
@@ -2680,6 +2682,7 @@ mod tests {
                             settings: IndexSettings {
                                 mapping_mode: cloudsearch_common::MappingMode::Strict,
                                 primary_time_field: None,
+                                namespace: None,
                             },
                         })
                         .expect("serialize create request"),
