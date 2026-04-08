@@ -20,6 +20,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
+use tower_http::trace::TraceLayer;
 
 #[derive(serde::Serialize)]
 struct CompatIndexDocumentResponse {
@@ -217,6 +218,7 @@ pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
         .route("/{index}/_merge", post(merge_index))
         .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
         .route("/{index}/_search", put(search_index).post(search_index))
+        .layer(TraceLayer::new_for_http())
         .with_state(ApiState::new(registry))
 }
 
@@ -343,6 +345,10 @@ async fn bulk_index(
             started_at.elapsed().as_secs_f64(),
         );
     }
+    let elapsed = started_at.elapsed();
+    if elapsed.as_millis() > 200 {
+        tracing::warn!(index = %index, operation_count, duration_ms = elapsed.as_millis(), "slow bulk");
+    }
     Ok((StatusCode::OK, Json(to_compat_bulk_response(response))))
 }
 
@@ -392,6 +398,10 @@ async fn search_index(
             StatusCode::OK,
             started_at.elapsed().as_secs_f64(),
         );
+    }
+    let elapsed = started_at.elapsed();
+    if elapsed.as_millis() > 50 {
+        tracing::warn!(index = %index, duration_ms = elapsed.as_millis(), "slow query");
     }
     Ok((
         StatusCode::OK,
