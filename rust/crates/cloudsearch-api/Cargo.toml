@@ -10,6 +10,9 @@ cloudsearch-index = { path = "../cloudsearch-index" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tower.workspace = true
+tower-http = { version = "0.6", features = ["trace"] }
+tracing.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
