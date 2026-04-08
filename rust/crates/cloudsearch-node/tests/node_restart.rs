@@ -314,6 +314,35 @@ fn spawn_node_with_intervals(
             "CLOUDSEARCH_FLUSH_INTERVAL_SECS",
             flush_interval_secs.to_string(),
         )
+        .env("CLOUDSEARCH_MERGE_INTERVAL_SECS", "60")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn node")
+}
+
+fn spawn_node_with_all_intervals(
+    data_dir: &Path,
+    port: u16,
+    refresh_interval_secs: u64,
+    flush_interval_secs: u64,
+    merge_interval_secs: u64,
+) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_cloudsearch-node"))
+        .env("CLOUDSEARCH_BIND", format!("127.0.0.1:{port}"))
+        .env("CLOUDSEARCH_DATA_DIR", data_dir)
+        .env(
+            "CLOUDSEARCH_REFRESH_INTERVAL_SECS",
+            refresh_interval_secs.to_string(),
+        )
+        .env(
+            "CLOUDSEARCH_FLUSH_INTERVAL_SECS",
+            flush_interval_secs.to_string(),
+        )
+        .env(
+            "CLOUDSEARCH_MERGE_INTERVAL_SECS",
+            merge_interval_secs.to_string(),
+        )
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -461,4 +490,61 @@ async fn automatic_flush_persists_searchable_state_without_manual_flush() {
     );
 
     stop_node(&mut second);
+}
+
+#[tokio::test]
+async fn automatic_merge_compacts_segments_without_manual_call() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node_with_all_intervals(temp_dir.path(), port, 1, 2, 2);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/logs"))
+        .json(&json!({
+            "settings": {
+                "mapping_mode": "controlled_dynamic",
+                "primary_time_field": null
+            }
+        }))
+        .send()
+        .await
+        .expect("create index request")
+        .error_for_status()
+        .expect("create index status");
+
+    for i in 0..5 {
+        client
+            .put(format!("{base_url}/logs/_doc"))
+            .json(&json!({
+                "id": format!("doc-{}", i),
+                "source": {"service": "billing", "index": i}
+            }))
+            .send()
+            .await
+            .expect("index request")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    sleep(Duration::from_secs(4)).await;
+
+    let response = client
+        .post(format!("{base_url}/logs/_search"))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status")
+        .json::<serde_json::Value>()
+        .await
+        .expect("search body");
+
+    assert_eq!(response["hits"]["total"]["value"], 5);
+
+    stop_node(&mut child);
 }

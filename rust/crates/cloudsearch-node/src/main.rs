@@ -19,6 +19,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "CLOUDSEARCH_FLUSH_INTERVAL_SECS",
         config.flush_interval_secs,
     );
+    config.merge_interval_secs = parse_interval_env(
+        "CLOUDSEARCH_MERGE_INTERVAL_SECS",
+        config.merge_interval_secs,
+    );
     config.normalize_intervals();
 
     let catalog = Arc::new(IndexCatalog::new(config.data_dir.clone()));
@@ -32,6 +36,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_flush_loop(
         registry.clone(),
         Duration::from_secs(config.flush_interval_secs),
+    );
+    spawn_merge_loop(
+        registry.clone(),
+        Duration::from_secs(config.merge_interval_secs),
     );
 
     let app = router_with_registry(registry);
@@ -71,6 +79,24 @@ fn spawn_flush_loop(registry: Arc<IndexRegistry>, interval: Duration) {
                 tasks.spawn(async move {
                     if let Err(error) = handle.lock().await.flush().await {
                         eprintln!("cloudSearch background flush failed: {error}");
+                    }
+                });
+            }
+
+            while tasks.join_next().await.is_some() {}
+        }
+    });
+}
+
+fn spawn_merge_loop(registry: Arc<IndexRegistry>, interval: Duration) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let mut tasks = JoinSet::new();
+            for handle in registry.cached_handles().await {
+                tasks.spawn(async move {
+                    if let Err(error) = handle.lock().await.merge().await {
+                        eprintln!("cloudSearch background merge failed: {error}");
                     }
                 });
             }
