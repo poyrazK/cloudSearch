@@ -73,6 +73,10 @@ impl IndexCatalog {
         let _guard = self.lifecycle_lock.write().await;
         validate_index_name(name)?;
 
+        if let Some(ref ns) = request.settings.namespace {
+            validate_namespace(ns)?;
+        }
+
         let index_dir = self.index_dir(name);
         let metadata_path = self.metadata_path(name);
 
@@ -1012,6 +1016,28 @@ fn compare_timestamp_bound(
     }
 }
 
+fn validate_namespace(namespace: &str) -> Result<()> {
+    if namespace.is_empty() {
+        return Err(CloudSearchError::InvalidNamespace(
+            "namespace cannot be empty".to_string(),
+        ));
+    }
+    if namespace.len() > 64 {
+        return Err(CloudSearchError::InvalidNamespace(
+            "namespace cannot exceed 64 characters".to_string(),
+        ));
+    }
+    if !namespace
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(CloudSearchError::InvalidNamespace(
+            "namespace must be alphanumeric, hyphens, or underscores".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_index_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 255
@@ -1052,6 +1078,7 @@ mod tests {
                     settings: IndexSettings {
                         mapping_mode: MappingMode::ControlledDynamic,
                         primary_time_field: Some("@timestamp".to_string()),
+                        namespace: None,
                     },
                 },
             )
@@ -1065,6 +1092,102 @@ mod tests {
             loaded.settings.primary_time_field.as_deref(),
             Some("@timestamp")
         );
+    }
+
+    #[tokio::test]
+    async fn creates_index_with_namespace() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        let metadata = catalog
+            .create_index(
+                "logs_v1",
+                CreateIndexRequest {
+                    settings: IndexSettings {
+                        mapping_mode: MappingMode::ControlledDynamic,
+                        primary_time_field: None,
+                        namespace: Some("tenant-abc".to_string()),
+                    },
+                },
+            )
+            .await
+            .expect("create index");
+
+        let loaded = catalog.get_index("logs_v1").await.expect("load index");
+
+        assert_eq!(loaded.name, metadata.name);
+        assert_eq!(loaded.settings.namespace.as_deref(), Some("tenant-abc"));
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_namespace_empty() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        let error = catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: IndexSettings {
+                        mapping_mode: MappingMode::ControlledDynamic,
+                        primary_time_field: None,
+                        namespace: Some("".to_string()),
+                    },
+                },
+            )
+            .await
+            .expect_err("empty namespace should fail");
+
+        assert!(matches!(error, CloudSearchError::InvalidNamespace(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_namespace_too_long() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        let long_namespace = "a".repeat(65);
+        let error = catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: IndexSettings {
+                        mapping_mode: MappingMode::ControlledDynamic,
+                        primary_time_field: None,
+                        namespace: Some(long_namespace),
+                    },
+                },
+            )
+            .await
+            .expect_err("too long namespace should fail");
+
+        assert!(matches!(error, CloudSearchError::InvalidNamespace(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_namespace_special_chars() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        let error = catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: IndexSettings {
+                        mapping_mode: MappingMode::ControlledDynamic,
+                        primary_time_field: None,
+                        namespace: Some("tenant@abc".to_string()),
+                    },
+                },
+            )
+            .await
+            .expect_err("special char namespace should fail");
+
+        assert!(matches!(error, CloudSearchError::InvalidNamespace(_)));
     }
 
     #[tokio::test]
@@ -1284,6 +1407,7 @@ mod tests {
                     settings: IndexSettings {
                         mapping_mode: MappingMode::Strict,
                         primary_time_field: None,
+                        namespace: None,
                     },
                 },
             )
