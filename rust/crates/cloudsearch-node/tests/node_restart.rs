@@ -490,3 +490,200 @@ async fn automatic_merge_compacts_segments_without_manual_call() {
 
     stop_node(&mut child);
 }
+
+#[tokio::test]
+async fn bulk_index_survives_restart() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut first = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/logs"))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    client
+        .post(format!("{base_url}/logs/_bulk"))
+        .json(&serde_json::json!({
+            "operations": [
+                {"index": {"id": "doc-1", "source": {"service": "billing", "msg": "one"}}},
+                {"index": {"id": "doc-2", "source": {"service": "search", "msg": "two"}}},
+                {"index": {"id": "doc-3", "source": {"service": "auth", "msg": "three"}}},
+                {"index": {"id": "doc-4", "source": {"service": "billing", "msg": "four"}}},
+                {"index": {"id": "doc-5", "source": {"service": "search", "msg": "five"}}}
+            ]
+        }))
+        .send()
+        .await
+        .expect("bulk request")
+        .error_for_status()
+        .expect("bulk status");
+
+    client
+        .post(format!("{base_url}/logs/_refresh"))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    stop_node(&mut first);
+
+    let mut second = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let search = client
+        .post(format!("{base_url}/logs/_search"))
+        .json(&serde_json::json!({"query": {"match_all": {}}}))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status")
+        .json::<serde_json::Value>()
+        .await
+        .expect("search body");
+
+    assert_eq!(search["hits"]["total"]["value"], 5);
+
+    stop_node(&mut second);
+}
+
+#[tokio::test]
+async fn sorted_search_order_preserved_after_restart() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut first = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/logs"))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    for (id, latency) in [("a", 10), ("b", 30), ("c", 20)] {
+        client
+            .put(format!("{base_url}/logs/_doc"))
+            .json(&serde_json::json!({"id": id, "source": {"latency": latency}}))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    client
+        .post(format!("{base_url}/logs/_refresh"))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    stop_node(&mut first);
+
+    let mut second = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let search = client
+        .post(format!("{base_url}/logs/_search"))
+        .json(&serde_json::json!({
+            "sort": {"field": "latency", "order": "desc"}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status")
+        .json::<serde_json::Value>()
+        .await
+        .expect("search body");
+
+    assert_eq!(search["hits"]["hits"][0]["_id"], "b");
+    assert_eq!(search["hits"]["hits"][1]["_id"], "c");
+    assert_eq!(search["hits"]["hits"][2]["_id"], "a");
+
+    stop_node(&mut second);
+}
+
+#[tokio::test]
+async fn multi_index_survives_restart() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut first = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    for idx in ["logs", "events"] {
+        client
+            .put(format!("{base_url}/{idx}"))
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("create index")
+            .error_for_status()
+            .expect("create status");
+
+        client
+            .put(format!("{base_url}/{idx}/_doc"))
+            .json(&serde_json::json!({"id": "doc-1", "source": {"x": 1}}))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    for idx in ["logs", "events"] {
+        client
+            .post(format!("{base_url}/{idx}/_refresh"))
+            .send()
+            .await
+            .expect("refresh")
+            .error_for_status()
+            .expect("refresh status");
+    }
+
+    stop_node(&mut first);
+
+    let mut second = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    for idx in ["logs", "events"] {
+        let search = client
+            .post(format!("{base_url}/{idx}/_search"))
+            .json(&serde_json::json!({"query": {"match_all": {}}}))
+            .send()
+            .await
+            .expect("search request")
+            .error_for_status()
+            .expect("search status")
+            .json::<serde_json::Value>()
+            .await
+            .expect("search body");
+
+        assert_eq!(
+            search["hits"]["total"]["value"], 1,
+            "index {idx} should have 1 doc"
+        );
+    }
+
+    stop_node(&mut second);
+}
