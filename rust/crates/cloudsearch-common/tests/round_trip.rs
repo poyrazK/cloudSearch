@@ -1,0 +1,870 @@
+use std::collections::BTreeMap;
+
+use cloudsearch_common::*;
+
+// Serialize to a serde_json::Value, then deserialize back to T.
+// This avoids the HRTB inference issues that arise with from_slice on types
+// containing &'static str fields.
+fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug>(original: &T) {
+    let value: serde_json::Value = serde_json::to_value(original).unwrap();
+    let decoded: T = serde_json::from_value(value.clone()).unwrap();
+    let value2: serde_json::Value = serde_json::to_value(&decoded).unwrap();
+    assert_eq!(value, value2, "JSON round-trip mismatch");
+}
+
+// Separate path for types with &'static str fields. These generate
+// `impl Deserialize<'static>` rather than `impl for<'de> Deserialize<'de>`,
+// so they can't be used with the generic round_trip helper. Instead,
+// we serialize to Value, deserialize the Value itself (always works),
+// then extract and compare fields manually.
+fn round_trip_static_str<T: serde::Serialize + std::fmt::Debug>(
+    original: &T,
+    check: impl Fn(&serde_json::Value),
+) {
+    let value: serde_json::Value = serde_json::to_value(original).unwrap();
+    // Re-serialize to confirm it's valid JSON (no data loss on serialize)
+    let json = serde_json::to_string(&value).unwrap();
+    let reparsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value, reparsed, "JSON re-serialize mismatch");
+    check(&value);
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+// MappingMode
+
+#[test]
+fn test_mapping_mode_strict() {
+    round_trip(&MappingMode::Strict);
+}
+
+#[test]
+fn test_mapping_mode_controlled_dynamic() {
+    round_trip(&MappingMode::ControlledDynamic);
+}
+
+// FieldType
+
+#[test]
+fn test_field_type_keyword() {
+    round_trip(&FieldType::Keyword);
+}
+
+#[test]
+fn test_field_type_boolean() {
+    round_trip(&FieldType::Boolean);
+}
+
+#[test]
+fn test_field_type_integer() {
+    round_trip(&FieldType::Integer);
+}
+
+#[test]
+fn test_field_type_long() {
+    round_trip(&FieldType::Long);
+}
+
+#[test]
+fn test_field_type_double() {
+    round_trip(&FieldType::Double);
+}
+
+#[test]
+fn test_field_type_timestamp() {
+    round_trip(&FieldType::Timestamp);
+}
+
+#[test]
+fn test_field_type_object() {
+    round_trip(&FieldType::Object);
+}
+
+// SortOrder
+
+#[test]
+fn test_sort_order_asc() {
+    round_trip(&SortOrder::Asc);
+}
+
+#[test]
+fn test_sort_order_desc() {
+    round_trip(&SortOrder::Desc);
+}
+
+// DateHistogramInterval
+
+#[test]
+fn test_date_histogram_interval_minute() {
+    round_trip(&DateHistogramInterval::Minute);
+}
+
+#[test]
+fn test_date_histogram_interval_hour() {
+    round_trip(&DateHistogramInterval::Hour);
+}
+
+#[test]
+fn test_date_histogram_interval_day() {
+    round_trip(&DateHistogramInterval::Day);
+}
+
+// SearchQuery
+
+#[test]
+fn test_search_query_match_all() {
+    round_trip(&SearchQuery::MatchAll);
+}
+
+#[test]
+fn test_search_query_term() {
+    round_trip(&SearchQuery::Term(TermQuery {
+        field: "status".to_string(),
+        value: serde_json::json!("active"),
+    }));
+}
+
+#[test]
+fn test_search_query_terms() {
+    round_trip(&SearchQuery::Terms(TermsQuery {
+        field: "status".to_string(),
+        values: vec![serde_json::json!("active"), serde_json::json!("pending")],
+    }));
+}
+
+#[test]
+fn test_search_query_range() {
+    round_trip(&SearchQuery::Range(RangeQuery {
+        field: "price".to_string(),
+        gte: Some(serde_json::json!(10)),
+        gt: None,
+        lte: Some(serde_json::json!(100)),
+        lt: None,
+    }));
+}
+
+#[test]
+fn test_search_query_bool() {
+    round_trip(&SearchQuery::Bool(BoolQuery {
+        must: vec![SearchQuery::Term(TermQuery {
+            field: "status".to_string(),
+            value: serde_json::json!("active"),
+        })],
+        should: vec![SearchQuery::Term(TermQuery {
+            field: "tag".to_string(),
+            value: serde_json::json!("featured"),
+        })],
+        filter: vec![],
+        must_not: vec![SearchQuery::Term(TermQuery {
+            field: "deleted".to_string(),
+            value: serde_json::json!(true),
+        })],
+    }));
+}
+
+// BulkOperation
+
+#[test]
+fn test_bulk_operation_index() {
+    round_trip(&BulkOperation::Index(BulkIndexOperation {
+        id: "doc1".to_string(),
+        source: serde_json::json!({"title": "Hello"}),
+    }));
+}
+
+#[test]
+fn test_bulk_operation_delete() {
+    round_trip(&BulkOperation::Delete(BulkDeleteOperation {
+        id: "doc1".to_string(),
+    }));
+}
+
+// BulkItem
+
+#[test]
+fn test_bulk_item_index() {
+    round_trip(&BulkItem::Index(BulkItemResult {
+        id: "doc1".to_string(),
+        result: "created".to_string(),
+        sequence_number: 1,
+    }));
+}
+
+#[test]
+fn test_bulk_item_delete() {
+    round_trip(&BulkItem::Delete(BulkItemResult {
+        id: "doc1".to_string(),
+        result: "deleted".to_string(),
+        sequence_number: 2,
+    }));
+}
+
+// AggregationRequest
+
+#[test]
+fn test_aggregation_request_terms() {
+    round_trip(&AggregationRequest::Terms(TermsAggregationRequest {
+        field: "status".to_string(),
+    }));
+}
+
+#[test]
+fn test_aggregation_request_stats() {
+    round_trip(&AggregationRequest::Stats(StatsAggregationRequest {
+        field: "price".to_string(),
+    }));
+}
+
+#[test]
+fn test_aggregation_request_date_histogram() {
+    round_trip(&AggregationRequest::DateHistogram(
+        DateHistogramAggregationRequest {
+            field: "created_at".to_string(),
+            interval: DateHistogramInterval::Day,
+        },
+    ));
+}
+
+// AggregationResult
+
+#[test]
+fn test_aggregation_result_terms() {
+    round_trip(&AggregationResult::Terms(TermsAggregationResult {
+        buckets: vec![
+            TermsBucket {
+                key: serde_json::json!("active"),
+                doc_count: 10,
+            },
+            TermsBucket {
+                key: serde_json::json!("pending"),
+                doc_count: 5,
+            },
+        ],
+    }));
+}
+
+#[test]
+fn test_aggregation_result_stats() {
+    round_trip(&AggregationResult::Stats(StatsAggregationResult {
+        count: 100,
+        min: Some(1.0),
+        max: Some(999.99),
+        avg: Some(50.0),
+        sum: 5000.0,
+    }));
+}
+
+#[test]
+fn test_aggregation_result_stats_with_nulls() {
+    round_trip(&AggregationResult::Stats(StatsAggregationResult {
+        count: 0,
+        min: None,
+        max: None,
+        avg: None,
+        sum: 0.0,
+    }));
+}
+
+#[test]
+fn test_aggregation_result_date_histogram() {
+    round_trip(&AggregationResult::DateHistogram(
+        DateHistogramAggregationResult {
+            buckets: vec![
+                DateHistogramBucket {
+                    key: "2024-01-01".to_string(),
+                    doc_count: 42,
+                },
+                DateHistogramBucket {
+                    key: "2024-01-02".to_string(),
+                    doc_count: 17,
+                },
+            ],
+        },
+    ));
+}
+
+// SortSpec
+
+#[test]
+fn test_sort_spec_asc() {
+    round_trip(&SortSpec {
+        field: "name".to_string(),
+        order: SortOrder::Asc,
+    });
+}
+
+#[test]
+fn test_sort_spec_desc() {
+    round_trip(&SortSpec {
+        field: "name".to_string(),
+        order: SortOrder::Desc,
+    });
+}
+
+// ─── Structs ─────────────────────────────────────────────────────────────────
+
+// IndexSettings
+
+#[test]
+fn test_index_settings_default() {
+    round_trip(&IndexSettings::default());
+}
+
+#[test]
+fn test_index_settings_with_namespace() {
+    round_trip(&IndexSettings {
+        mapping_mode: MappingMode::Strict,
+        primary_time_field: Some("created_at".to_string()),
+        namespace: Some("prod".to_string()),
+    });
+}
+
+#[test]
+fn test_index_settings_namespace_none() {
+    // namespace: None exercises skip_serializing_if
+    round_trip(&IndexSettings {
+        mapping_mode: MappingMode::ControlledDynamic,
+        primary_time_field: None,
+        namespace: None,
+    });
+}
+
+// IndexMetadata
+
+#[test]
+fn test_index_metadata() {
+    let now = chrono::Utc::now();
+    round_trip(&IndexMetadata {
+        id: uuid::Uuid::new_v4(),
+        name: "logs".to_string(),
+        created_at: now,
+        updated_at: now,
+        settings: IndexSettings::default(),
+        mappings: BTreeMap::from([
+            (
+                "message".to_string(),
+                FieldMapping {
+                    field_type: FieldType::Keyword,
+                },
+            ),
+            (
+                "count".to_string(),
+                FieldMapping {
+                    field_type: FieldType::Integer,
+                },
+            ),
+        ]),
+    });
+}
+
+// FieldMapping
+
+#[test]
+fn test_field_mapping() {
+    round_trip(&FieldMapping {
+        field_type: FieldType::Keyword,
+    });
+}
+
+// CreateIndexRequest
+
+#[test]
+fn test_create_index_request_default() {
+    round_trip(&CreateIndexRequest::default());
+}
+
+#[test]
+fn test_create_index_request_with_settings() {
+    round_trip(&CreateIndexRequest {
+        settings: IndexSettings {
+            mapping_mode: MappingMode::Strict,
+            primary_time_field: Some("ts".to_string()),
+            namespace: Some("test".to_string()),
+        },
+    });
+}
+
+// IndexDocument
+
+#[test]
+fn test_index_document() {
+    round_trip(&IndexDocument {
+        id: "doc1".to_string(),
+        source: serde_json::json!({"message": "hello world", "count": 42}),
+    });
+}
+
+// IndexDocumentRequest
+
+#[test]
+fn test_index_document_request() {
+    round_trip(&IndexDocumentRequest {
+        id: "doc1".to_string(),
+        source: serde_json::json!({"title": "Test"}),
+    });
+}
+
+// IndexDocumentResponse
+// &'static str fields prevent the generic round_trip helper. Verify the JSON
+// representation is stable and check field values from the JSON.
+#[test]
+fn test_index_document_response() {
+    let original = IndexDocumentResponse {
+        id: "doc1".to_string(),
+        result: "created",
+        sequence_number: 5,
+    };
+    round_trip_static_str(&original, |value| {
+        assert_eq!(value["id"], "doc1");
+        assert_eq!(value["result"], "created");
+        assert_eq!(value["sequence_number"], 5);
+    });
+}
+
+// GetDocumentResponse
+
+#[test]
+fn test_get_document_response_found() {
+    round_trip(&GetDocumentResponse {
+        id: "doc1".to_string(),
+        found: true,
+        source: serde_json::json!({"key": "value"}),
+    });
+}
+
+#[test]
+fn test_get_document_response_not_found() {
+    round_trip(&GetDocumentResponse {
+        id: "missing".to_string(),
+        found: false,
+        source: serde_json::Value::Null,
+    });
+}
+
+// BulkRequest
+
+#[test]
+fn test_bulk_request_empty() {
+    round_trip(&BulkRequest { operations: vec![] });
+}
+
+#[test]
+fn test_bulk_request_mixed_operations() {
+    round_trip(&BulkRequest {
+        operations: vec![
+            BulkOperation::Index(BulkIndexOperation {
+                id: "doc1".to_string(),
+                source: serde_json::json!({"x": 1}),
+            }),
+            BulkOperation::Delete(BulkDeleteOperation {
+                id: "doc2".to_string(),
+            }),
+            BulkOperation::Index(BulkIndexOperation {
+                id: "doc3".to_string(),
+                source: serde_json::json!({"x": 3}),
+            }),
+        ],
+    });
+}
+
+// BulkIndexOperation
+
+#[test]
+fn test_bulk_index_operation() {
+    round_trip(&BulkIndexOperation {
+        id: "doc1".to_string(),
+        source: serde_json::json!({"field": "value"}),
+    });
+}
+
+// BulkDeleteOperation
+
+#[test]
+fn test_bulk_delete_operation() {
+    round_trip(&BulkDeleteOperation {
+        id: "doc1".to_string(),
+    });
+}
+
+// BulkResponse
+
+#[test]
+fn test_bulk_response_no_errors() {
+    round_trip(&BulkResponse {
+        errors: false,
+        items: vec![
+            BulkItem::Index(BulkItemResult {
+                id: "doc1".to_string(),
+                result: "created".to_string(),
+                sequence_number: 1,
+            }),
+            BulkItem::Index(BulkItemResult {
+                id: "doc2".to_string(),
+                result: "created".to_string(),
+                sequence_number: 2,
+            }),
+        ],
+    });
+}
+
+#[test]
+fn test_bulk_response_with_errors() {
+    round_trip(&BulkResponse {
+        errors: true,
+        items: vec![
+            BulkItem::Index(BulkItemResult {
+                id: "doc1".to_string(),
+                result: "created".to_string(),
+                sequence_number: 1,
+            }),
+            BulkItem::Delete(BulkItemResult {
+                id: "doc2".to_string(),
+                result: "not_found".to_string(),
+                sequence_number: 0,
+            }),
+        ],
+    });
+}
+
+// BulkItemResult
+
+#[test]
+fn test_bulk_item_result() {
+    round_trip(&BulkItemResult {
+        id: "doc1".to_string(),
+        result: "updated".to_string(),
+        sequence_number: 7,
+    });
+}
+
+// RefreshResponse
+
+#[test]
+fn test_refresh_response() {
+    let original = RefreshResponse {
+        result: "refreshed",
+        refreshed_documents: 10,
+    };
+    round_trip_static_str(&original, |value| {
+        assert_eq!(value["result"], "refreshed");
+        assert_eq!(value["refreshed_documents"], 10);
+    });
+}
+
+// FlushResponse
+
+#[test]
+fn test_flush_response() {
+    let original = FlushResponse {
+        result: "flushed",
+        flushed_documents: 50,
+        sequence_number: 123,
+    };
+    round_trip_static_str(&original, |value| {
+        assert_eq!(value["result"], "flushed");
+        assert_eq!(value["flushed_documents"], 50);
+        assert_eq!(value["sequence_number"], 123);
+    });
+}
+
+// MergeResponse
+
+#[test]
+fn test_merge_response() {
+    let original = MergeResponse {
+        result: "merged",
+        merged_documents: 200,
+    };
+    round_trip_static_str(&original, |value| {
+        assert_eq!(value["result"], "merged");
+        assert_eq!(value["merged_documents"], 200);
+    });
+}
+
+// SearchRequest
+
+#[test]
+fn test_search_request_all_fields() {
+    round_trip(&SearchRequest {
+        query: Some(SearchQuery::Term(TermQuery {
+            field: "status".to_string(),
+            value: serde_json::json!("active"),
+        })),
+        from: Some(10),
+        size: Some(25),
+        sort: Some(SortSpec {
+            field: "created_at".to_string(),
+            order: SortOrder::Desc,
+        }),
+        aggs: Some(BTreeMap::from([(
+            "status_terms".to_string(),
+            AggregationRequest::Terms(TermsAggregationRequest {
+                field: "status".to_string(),
+            }),
+        )])),
+    });
+}
+
+#[test]
+fn test_search_request_all_none() {
+    round_trip(&SearchRequest::default());
+}
+
+// TermQuery
+
+#[test]
+fn test_term_query_string_value() {
+    round_trip(&TermQuery {
+        field: "name".to_string(),
+        value: serde_json::json!("alice"),
+    });
+}
+
+#[test]
+fn test_term_query_numeric_value() {
+    round_trip(&TermQuery {
+        field: "count".to_string(),
+        value: serde_json::json!(42),
+    });
+}
+
+#[test]
+fn test_term_query_bool_value() {
+    round_trip(&TermQuery {
+        field: "active".to_string(),
+        value: serde_json::json!(true),
+    });
+}
+
+// TermsQuery
+
+#[test]
+fn test_terms_query_multiple_values() {
+    round_trip(&TermsQuery {
+        field: "status".to_string(),
+        values: vec![
+            serde_json::json!("a"),
+            serde_json::json!("b"),
+            serde_json::json!("c"),
+        ],
+    });
+}
+
+// RangeQuery
+
+#[test]
+fn test_range_query_only_gte() {
+    round_trip(&RangeQuery {
+        field: "price".to_string(),
+        gte: Some(serde_json::json!(0)),
+        gt: None,
+        lte: None,
+        lt: None,
+    });
+}
+
+#[test]
+fn test_range_query_only_lt() {
+    round_trip(&RangeQuery {
+        field: "age".to_string(),
+        gte: None,
+        gt: None,
+        lte: None,
+        lt: Some(serde_json::json!(18)),
+    });
+}
+
+#[test]
+fn test_range_query_all_bounds() {
+    round_trip(&RangeQuery {
+        field: "price".to_string(),
+        gte: Some(serde_json::json!(10.0)),
+        gt: Some(serde_json::json!(5.0)),
+        lte: Some(serde_json::json!(100.0)),
+        lt: Some(serde_json::json!(200.0)),
+    });
+}
+
+// BoolQuery
+
+#[test]
+fn test_bool_query_empty_clauses() {
+    round_trip(&BoolQuery::default());
+}
+
+// SearchResponse
+
+#[test]
+fn test_search_response_with_hits_and_aggs() {
+    round_trip(&SearchResponse {
+        hits: HitsMetadata {
+            total: 2,
+            hits: vec![
+                SearchHit {
+                    id: "doc1".to_string(),
+                    source: serde_json::json!({"title": "First"}),
+                },
+                SearchHit {
+                    id: "doc2".to_string(),
+                    source: serde_json::json!({"title": "Second"}),
+                },
+            ],
+        },
+        aggregations: BTreeMap::from([(
+            "status_count".to_string(),
+            AggregationResult::Terms(TermsAggregationResult {
+                buckets: vec![TermsBucket {
+                    key: serde_json::json!("active"),
+                    doc_count: 42,
+                }],
+            }),
+        )]),
+    });
+}
+
+#[test]
+fn test_search_response_empty_hits() {
+    round_trip(&SearchResponse {
+        hits: HitsMetadata {
+            total: 0,
+            hits: vec![],
+        },
+        aggregations: BTreeMap::new(),
+    });
+}
+
+// HitsMetadata
+
+#[test]
+fn test_hits_metadata() {
+    round_trip(&HitsMetadata {
+        total: 5,
+        hits: vec![SearchHit {
+            id: "doc1".to_string(),
+            source: serde_json::json!({"x": 1}),
+        }],
+    });
+}
+
+// SearchHit
+
+#[test]
+fn test_search_hit() {
+    round_trip(&SearchHit {
+        id: "doc1".to_string(),
+        source: serde_json::json!({"nested": {"field": "value"}}),
+    });
+}
+
+// TermsAggregationRequest
+
+#[test]
+fn test_terms_aggregation_request() {
+    round_trip(&TermsAggregationRequest {
+        field: "category".to_string(),
+    });
+}
+
+// StatsAggregationRequest
+
+#[test]
+fn test_stats_aggregation_request() {
+    round_trip(&StatsAggregationRequest {
+        field: "price".to_string(),
+    });
+}
+
+// DateHistogramAggregationRequest
+
+#[test]
+fn test_date_histogram_aggregation_request_minute() {
+    round_trip(&DateHistogramAggregationRequest {
+        field: "timestamp".to_string(),
+        interval: DateHistogramInterval::Minute,
+    });
+}
+
+#[test]
+fn test_date_histogram_aggregation_request_hour() {
+    round_trip(&DateHistogramAggregationRequest {
+        field: "timestamp".to_string(),
+        interval: DateHistogramInterval::Hour,
+    });
+}
+
+#[test]
+fn test_date_histogram_aggregation_request_day() {
+    round_trip(&DateHistogramAggregationRequest {
+        field: "timestamp".to_string(),
+        interval: DateHistogramInterval::Day,
+    });
+}
+
+// TermsAggregationResult
+
+#[test]
+fn test_terms_aggregation_result_multiple_buckets() {
+    round_trip(&TermsAggregationResult {
+        buckets: vec![
+            TermsBucket {
+                key: serde_json::json!("a"),
+                doc_count: 1,
+            },
+            TermsBucket {
+                key: serde_json::json!("b"),
+                doc_count: 2,
+            },
+            TermsBucket {
+                key: serde_json::json!("c"),
+                doc_count: 3,
+            },
+        ],
+    });
+}
+
+// DateHistogramBucket
+
+#[test]
+fn test_date_histogram_bucket() {
+    round_trip(&DateHistogramBucket {
+        key: "2024-06-15T00:00:00Z".to_string(),
+        doc_count: 99,
+    });
+}
+
+// HealthResponse
+
+#[test]
+fn test_health_response() {
+    let original = HealthResponse { status: "green" };
+    round_trip_static_str(&original, |value| {
+        assert_eq!(value["status"], "green");
+    });
+}
+
+// ErrorResponse
+
+#[test]
+fn test_error_response() {
+    round_trip(&ErrorResponse {
+        error: "index not found".to_string(),
+    });
+}
+
+// AppConfig
+
+#[test]
+fn test_app_config_default() {
+    round_trip(&AppConfig::default());
+}
+
+#[test]
+fn test_app_config_custom() {
+    round_trip(&AppConfig {
+        bind_addr: "0.0.0.0:9000".to_string(),
+        data_dir: std::path::PathBuf::from("/var/data/cloudsearch"),
+        refresh_interval_secs: 5,
+        flush_interval_secs: 60,
+        merge_interval_secs: 120,
+    });
+}
