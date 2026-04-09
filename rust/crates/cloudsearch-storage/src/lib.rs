@@ -788,4 +788,142 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].sequence_number, 1);
     }
+
+    #[tokio::test]
+    async fn fails_on_unsupported_wal_version() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "hello"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        let log_path = manager.wal_dir().join("000001.log");
+        let mut bytes = fs::read(&log_path).await.expect("read wal");
+        bytes[0] = 99; // corrupt version byte
+        fs::write(log_path, bytes).await.expect("rewrite wal");
+
+        let error = manager
+            .replay()
+            .await
+            .expect_err("unsupported version should fail");
+        assert!(matches!(error, CloudSearchError::InvalidWalRecord(_)));
+        assert!(format!("{}", error).contains("unsupported WAL version"));
+    }
+
+    #[tokio::test]
+    async fn fails_on_partial_record_in_inactive_generation() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "hello"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        manager.rollover().await.expect("rollover");
+
+        manager
+            .append(
+                2,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-2".to_string(),
+                        source: serde_json::json!({"message": "world"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc to new gen");
+
+        // Corrupt a byte in the inactive generation (000001.log)
+        let log_path = manager.wal_dir().join("000001.log");
+        let mut bytes = fs::read(&log_path).await.expect("read wal");
+        bytes.truncate(bytes.len() - 1); // remove last byte → partial record
+        fs::write(log_path, bytes).await.expect("rewrite wal");
+
+        let error = manager
+            .replay()
+            .await
+            .expect_err("partial record in inactive gen should fail");
+        assert!(matches!(error, CloudSearchError::InvalidWalRecord(_)));
+    }
+
+    #[tokio::test]
+    async fn fails_on_malformed_generation_filename() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "hello"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        // Create a file with unparseable stem alongside valid ones
+        let malformed = manager.wal_dir().join("abc.log");
+        fs::write(&malformed, &[])
+            .await
+            .expect("create malformed file");
+
+        let error = manager
+            .replay()
+            .await
+            .expect_err("malformed filename should fail");
+        assert!(matches!(error, CloudSearchError::InvalidWalRecord(_)));
+    }
+
+    #[tokio::test]
+    async fn fails_on_corrupted_json_payload() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "hello"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        let log_path = manager.wal_dir().join("000001.log");
+        let mut bytes = fs::read(&log_path).await.expect("read wal");
+        bytes[HEADER_LEN] = 0xFF; // corrupt first byte of JSON payload → checksum mismatch
+        fs::write(log_path, bytes).await.expect("rewrite wal");
+
+        let error = manager
+            .replay()
+            .await
+            .expect_err("corrupted payload should fail");
+        assert!(matches!(error, CloudSearchError::WalChecksumMismatch));
+    }
 }
