@@ -1192,6 +1192,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_empty_namespace_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: IndexSettings {
+                                mapping_mode: Default::default(),
+                                primary_time_field: None,
+                                namespace: Some("".to_string()),
+                            },
+                        })
+                        .expect("serialize"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert!(response.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn rejects_too_long_namespace_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: IndexSettings {
+                                mapping_mode: Default::default(),
+                                primary_time_field: None,
+                                namespace: Some("a".repeat(65)),
+                            },
+                        })
+                        .expect("serialize"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert!(response.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn accepts_valid_namespace_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: IndexSettings {
+                                mapping_mode: Default::default(),
+                                primary_time_field: None,
+                                namespace: Some("tenant-abc".to_string()),
+                            },
+                        })
+                        .expect("serialize"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
     async fn deletes_index_over_http_and_allows_recreate() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));

@@ -1207,6 +1207,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepts_max_length_namespace() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        let ns_64 = "a".repeat(64);
+        let metadata = catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: IndexSettings {
+                        mapping_mode: MappingMode::ControlledDynamic,
+                        primary_time_field: None,
+                        namespace: Some(ns_64.clone()),
+                    },
+                },
+            )
+            .await
+            .expect("64-char namespace should succeed");
+
+        assert_eq!(metadata.settings.namespace.as_deref(), Some(ns_64.as_str()));
+    }
+
+    #[tokio::test]
     async fn rejects_duplicate_index_creation() {
         let temp_dir = TempDir::new().expect("temp dir");
         let catalog = IndexCatalog::new(temp_dir.path());
