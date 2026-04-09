@@ -1135,6 +1135,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_invalid_namespace_over_http() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: IndexSettings {
+                                mapping_mode: Default::default(),
+                                primary_time_field: None,
+                                namespace: Some("tenant@invalid".to_string()),
+                            },
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        assert_eq!(create_response.status(), StatusCode::BAD_REQUEST);
+
+        let body = create_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
+        let error_msg = value["error"].as_str().expect("error message string");
+        assert!(
+            error_msg.contains("invalid namespace"),
+            "expected error about invalid namespace, got: {}",
+            error_msg
+        );
+    }
+
+    #[tokio::test]
     async fn deletes_index_over_http_and_allows_recreate() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
