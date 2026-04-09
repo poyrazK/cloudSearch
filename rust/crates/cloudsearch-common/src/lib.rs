@@ -15,6 +15,8 @@ pub enum CloudSearchError {
     IndexNotFound(String),
     #[error("invalid index name '{0}'")]
     InvalidIndexName(String),
+    #[error("invalid namespace: {0}")]
+    InvalidNamespace(String),
     #[error("invalid search request: {0}")]
     InvalidSearchRequest(String),
     #[error("mapping conflict: {0}")]
@@ -47,6 +49,8 @@ pub enum MappingMode {
 pub struct IndexSettings {
     pub mapping_mode: MappingMode,
     pub primary_time_field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
