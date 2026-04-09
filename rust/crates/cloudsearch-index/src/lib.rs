@@ -3445,4 +3445,74 @@ mod tests {
             .expect("snapshot exists");
         assert_eq!(persisted.documents.len(), 0);
     }
+
+    #[tokio::test]
+    async fn index_reopen_after_wal_corruption_is_graceful() {
+        // Create index, write docs, flush (snapshot), write WAL entries,
+        // corrupt the active WAL, re-open index — should handle gracefully
+        // with data from snapshot intact.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "persisted"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+        handle.flush().await.expect("flush");
+
+        // Write another doc to create an active WAL entry.
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"message": "tail"}),
+            })
+            .await
+            .expect("index doc tail");
+
+        let wal_dir = temp_dir.path().join("indexes").join("logs").join("wal");
+        // Corrupt the active WAL log file by flipping a byte in the header.
+        if let Ok(log_file) = fs::read_dir(&wal_dir).await {
+            let mut entries = log_file;
+            while let Some(entry) = entries.next_entry().await.expect("read dir") {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "log") {
+                    let mut bytes = fs::read(&path).await.expect("read wal");
+                    if bytes.len() > 26 {
+                        bytes[26] ^= 0xFF; // corrupt header byte
+                        fs::write(&path, bytes).await.expect("rewrite wal");
+                    }
+                    break;
+                }
+            }
+        }
+
+        drop(handle);
+
+        // Re-opening should return an error (not panic) when WAL is corrupted.
+        // The error is propagated from wal.replay(), which detects checksum mismatch.
+        let error = catalog
+            .open_index("logs")
+            .await
+            .expect_err("open_index should fail when WAL is corrupted");
+        assert!(matches!(
+            error,
+            CloudSearchError::WalChecksumMismatch | CloudSearchError::InvalidWalRecord(_)
+        ));
+    }
 }

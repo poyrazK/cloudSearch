@@ -926,4 +926,190 @@ mod tests {
             .expect_err("corrupted payload should fail");
         assert!(matches!(error, CloudSearchError::WalChecksumMismatch));
     }
+
+    #[tokio::test]
+    async fn replay_handles_sequence_gaps_across_generations() {
+        // Simulates a crash where gen 1 has seq 1-2, then gen 2 has seq 5-6 (gap after crash).
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"seq": 1}),
+                    },
+                },
+            )
+            .await
+            .expect("append seq 1");
+        manager
+            .append(
+                2,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-2".to_string(),
+                        source: serde_json::json!({"seq": 2}),
+                    },
+                },
+            )
+            .await
+            .expect("append seq 2");
+
+        manager.rollover().await.expect("rollover");
+
+        manager
+            .append(
+                5,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-5".to_string(),
+                        source: serde_json::json!({"seq": 5}),
+                    },
+                },
+            )
+            .await
+            .expect("append seq 5");
+        manager
+            .append(
+                6,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-6".to_string(),
+                        source: serde_json::json!({"seq": 6}),
+                    },
+                },
+            )
+            .await
+            .expect("append seq 6");
+
+        let entries = manager.replay().await.expect("replay");
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].sequence_number, 1);
+        assert_eq!(entries[1].sequence_number, 2);
+        assert_eq!(entries[2].sequence_number, 5);
+        assert_eq!(entries[3].sequence_number, 6);
+    }
+
+    #[tokio::test]
+    async fn opens_fresh_wal_directory_without_error() {
+        // WalManager should open cleanly on an empty directory (no CURRENT, no .log files).
+        let temp_dir = TempDir::new().expect("temp dir");
+
+        let manager = WalManager::open(temp_dir.path())
+            .await
+            .expect("open wal on empty dir");
+
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"message": "first"}),
+                    },
+                },
+            )
+            .await
+            .expect("append doc");
+
+        let entries = manager.replay().await.expect("replay");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].sequence_number, 1);
+    }
+
+    #[tokio::test]
+    async fn fails_on_header_corruption_in_active_generation() {
+        // Corrupt the header (length/checksum fields) of a record in the active gen log.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        for i in 1..=3 {
+            manager
+                .append(
+                    i,
+                    WalRecord::IndexDocument {
+                        document: IndexDocument {
+                            id: format!("doc-{i}"),
+                            source: serde_json::json!({"seq": i}),
+                        },
+                    },
+                )
+                .await
+                .expect("append doc");
+        }
+
+        // Corrupt the checksum field (bytes 22-26) in the header of a middle record.
+        let log_path = manager.wal_dir().join("000001.log");
+        let mut bytes = fs::read(&log_path).await.expect("read wal");
+        bytes[22] ^= 0xFF; // corrupt first byte of checksum → checksum mismatch
+        fs::write(log_path, bytes).await.expect("rewrite wal");
+
+        let error = manager
+            .replay()
+            .await
+            .expect_err("header corruption should fail");
+        assert!(matches!(
+            error,
+            CloudSearchError::WalChecksumMismatch | CloudSearchError::InvalidWalRecord(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn replay_from_skips_gaps_and_resumes() {
+        // replay_from(N) skips sequences <= N and resumes from the next available.
+        // After a rollover, entries with higher sequences should still be replayed.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        for seq in 1..=3 {
+            manager
+                .append(
+                    seq,
+                    WalRecord::IndexDocument {
+                        document: IndexDocument {
+                            id: format!("doc-{seq}"),
+                            source: serde_json::json!({"seq": seq}),
+                        },
+                    },
+                )
+                .await
+                .expect("append doc");
+        }
+
+        manager.rollover().await.expect("rollover");
+
+        manager
+            .append(
+                6,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-6".to_string(),
+                        source: serde_json::json!({"seq": 6}),
+                    },
+                },
+            )
+            .await
+            .expect("append seq 6");
+        manager
+            .append(
+                7,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-7".to_string(),
+                        source: serde_json::json!({"seq": 7}),
+                    },
+                },
+            )
+            .await
+            .expect("append seq 7");
+
+        // Replay from seq 3 → should skip seq 1-3 (already covered), resume at seq 6, 7.
+        let entries = manager.replay_from(3).await.expect("replay from 3");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].sequence_number, 6);
+        assert_eq!(entries[1].sequence_number, 7);
+    }
 }
