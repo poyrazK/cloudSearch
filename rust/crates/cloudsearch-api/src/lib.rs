@@ -1970,6 +1970,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bulk_with_empty_operations_returns_empty_items() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_bulk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"operations":[]}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("bulk response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
+        assert_eq!(value["errors"], false);
+        assert!(value["items"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bulk_on_deleted_index_returns_not_found() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/logs")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("delete response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_bulk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"operations":[{"index":{"id":"doc-1","source":{"a":1}}}]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("bulk response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_of_nonexistent_document_succeeds() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/logs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs/_bulk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"operations":[{"delete":{"id":"doc-nonexistent"}}]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("bulk response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
+        assert_eq!(value["errors"], false);
+        let items = value["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["delete"]["result"], "deleted");
+    }
+
+    #[tokio::test]
     async fn put_doc_on_missing_index_returns_not_found() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
