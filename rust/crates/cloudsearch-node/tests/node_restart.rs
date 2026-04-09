@@ -9,7 +9,8 @@ pub mod helpers {
 }
 
 use helpers::{
-    reserve_port, spawn_node, spawn_node_with_all_intervals, spawn_node_with_intervals, stop_node,
+    TestNode, reserve_port, spawn_node, spawn_node_with_all_intervals, spawn_node_with_intervals,
+    stop_node,
 };
 
 async fn wait_for_health(client: &Client, base_url: &str) {
@@ -495,14 +496,10 @@ async fn automatic_merge_compacts_segments_without_manual_call() {
 async fn bulk_index_survives_restart() {
     let temp_dir = TempDir::new().expect("temp dir");
     let port = reserve_port();
-    let base_url = format!("http://127.0.0.1:{port}");
-    let client = Client::new();
+    let mut node = TestNode::spawn(temp_dir, port).await;
 
-    let mut first = spawn_node(temp_dir.path(), port);
-    wait_for_health(&client, &base_url).await;
-
-    client
-        .put(format!("{base_url}/logs"))
+    node.client
+        .put(format!("{}/logs", node.base_url))
         .json(&json!({}))
         .send()
         .await
@@ -510,8 +507,8 @@ async fn bulk_index_survives_restart() {
         .error_for_status()
         .expect("create status");
 
-    client
-        .post(format!("{base_url}/logs/_bulk"))
+    node.client
+        .post(format!("{}/logs/_bulk", node.base_url))
         .json(&serde_json::json!({
             "operations": [
                 {"index": {"id": "doc-1", "source": {"service": "billing", "msg": "one"}}},
@@ -527,21 +524,19 @@ async fn bulk_index_survives_restart() {
         .error_for_status()
         .expect("bulk status");
 
-    client
-        .post(format!("{base_url}/logs/_refresh"))
+    node.client
+        .post(format!("{}/logs/_refresh", node.base_url))
         .send()
         .await
         .expect("refresh")
         .error_for_status()
         .expect("refresh status");
 
-    stop_node(&mut first);
+    node.restart().await;
 
-    let mut second = spawn_node(temp_dir.path(), port);
-    wait_for_health(&client, &base_url).await;
-
-    let search = client
-        .post(format!("{base_url}/logs/_search"))
+    let search = node
+        .client
+        .post(format!("{}/logs/_search", node.base_url))
         .json(&serde_json::json!({"query": {"match_all": {}}}))
         .send()
         .await
@@ -554,21 +549,17 @@ async fn bulk_index_survives_restart() {
 
     assert_eq!(search["hits"]["total"]["value"], 5);
 
-    stop_node(&mut second);
+    node.stop();
 }
 
 #[tokio::test]
 async fn sorted_search_order_preserved_after_restart() {
     let temp_dir = TempDir::new().expect("temp dir");
     let port = reserve_port();
-    let base_url = format!("http://127.0.0.1:{port}");
-    let client = Client::new();
+    let mut node = TestNode::spawn(temp_dir, port).await;
 
-    let mut first = spawn_node(temp_dir.path(), port);
-    wait_for_health(&client, &base_url).await;
-
-    client
-        .put(format!("{base_url}/logs"))
+    node.client
+        .put(format!("{}/logs", node.base_url))
         .json(&json!({}))
         .send()
         .await
@@ -577,8 +568,8 @@ async fn sorted_search_order_preserved_after_restart() {
         .expect("create status");
 
     for (id, latency) in [("a", 10), ("b", 30), ("c", 20)] {
-        client
-            .put(format!("{base_url}/logs/_doc"))
+        node.client
+            .put(format!("{}/logs/_doc", node.base_url))
             .json(&serde_json::json!({"id": id, "source": {"latency": latency}}))
             .send()
             .await
@@ -587,21 +578,19 @@ async fn sorted_search_order_preserved_after_restart() {
             .expect("index status");
     }
 
-    client
-        .post(format!("{base_url}/logs/_refresh"))
+    node.client
+        .post(format!("{}/logs/_refresh", node.base_url))
         .send()
         .await
         .expect("refresh")
         .error_for_status()
         .expect("refresh status");
 
-    stop_node(&mut first);
+    node.restart().await;
 
-    let mut second = spawn_node(temp_dir.path(), port);
-    wait_for_health(&client, &base_url).await;
-
-    let search = client
-        .post(format!("{base_url}/logs/_search"))
+    let search = node
+        .client
+        .post(format!("{}/logs/_search", node.base_url))
         .json(&serde_json::json!({
             "sort": {"field": "latency", "order": "desc"}
         }))
@@ -618,22 +607,18 @@ async fn sorted_search_order_preserved_after_restart() {
     assert_eq!(search["hits"]["hits"][1]["_id"], "c");
     assert_eq!(search["hits"]["hits"][2]["_id"], "a");
 
-    stop_node(&mut second);
+    node.stop();
 }
 
 #[tokio::test]
 async fn multi_index_survives_restart() {
     let temp_dir = TempDir::new().expect("temp dir");
     let port = reserve_port();
-    let base_url = format!("http://127.0.0.1:{port}");
-    let client = Client::new();
-
-    let mut first = spawn_node(temp_dir.path(), port);
-    wait_for_health(&client, &base_url).await;
+    let mut node = TestNode::spawn(temp_dir, port).await;
 
     for idx in ["logs", "events"] {
-        client
-            .put(format!("{base_url}/{idx}"))
+        node.client
+            .put(format!("{}/{idx}", node.base_url))
             .json(&json!({}))
             .send()
             .await
@@ -641,8 +626,8 @@ async fn multi_index_survives_restart() {
             .error_for_status()
             .expect("create status");
 
-        client
-            .put(format!("{base_url}/{idx}/_doc"))
+        node.client
+            .put(format!("{}/{idx}/_doc", node.base_url))
             .json(&serde_json::json!({"id": "doc-1", "source": {"x": 1}}))
             .send()
             .await
@@ -652,8 +637,8 @@ async fn multi_index_survives_restart() {
     }
 
     for idx in ["logs", "events"] {
-        client
-            .post(format!("{base_url}/{idx}/_refresh"))
+        node.client
+            .post(format!("{}/{idx}/_refresh", node.base_url))
             .send()
             .await
             .expect("refresh")
@@ -661,14 +646,12 @@ async fn multi_index_survives_restart() {
             .expect("refresh status");
     }
 
-    stop_node(&mut first);
-
-    let mut second = spawn_node(temp_dir.path(), port);
-    wait_for_health(&client, &base_url).await;
+    node.restart().await;
 
     for idx in ["logs", "events"] {
-        let search = client
-            .post(format!("{base_url}/{idx}/_search"))
+        let search = node
+            .client
+            .post(format!("{}/{idx}/_search", node.base_url))
             .json(&serde_json::json!({"query": {"match_all": {}}}))
             .send()
             .await
@@ -685,5 +668,5 @@ async fn multi_index_survives_restart() {
         );
     }
 
-    stop_node(&mut second);
+    node.stop();
 }
