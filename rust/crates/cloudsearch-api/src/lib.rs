@@ -1834,6 +1834,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bulk_on_missing_index_returns_not_found() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/missing/_bulk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"operations":[{"index":{"id":"doc-1","source":{"a":1}}}]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("bulk response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
+        assert_eq!(value["error"], "index 'missing' not found");
+    }
+
+    #[tokio::test]
+    async fn put_doc_on_missing_index_returns_not_found() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/missing/_doc")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":"doc-1","source":{"a":1}}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("index response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
+        assert_eq!(value["error"], "index 'missing' not found");
+    }
+
+    #[tokio::test]
     async fn returns_client_error_for_malformed_payloads() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
@@ -2323,6 +2385,88 @@ mod tests {
             .expect("response");
 
         assert!(response.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn sort_on_object_field_returns_bad_request() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/test/_doc")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"id":"doc-1","source":{"metadata":{"key":"value"}}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("index doc response");
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/test/_refresh")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/test/_search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sort": {"field": "metadata", "order": "asc"}
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap()
+                .contains("cannot be used for sorting")
+        );
     }
 
     #[tokio::test]
@@ -2893,6 +3037,67 @@ mod tests {
                     }
                 ]
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn exceeding_max_fields_returns_bad_request() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateIndexRequest {
+                            settings: Default::default(),
+                        })
+                        .expect("serialize create request"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+
+        // Build bulk request with 1001 distinct fields to exceed MAX_FIELDS_PER_INDEX (1000)
+        let mut operations = Vec::with_capacity(1001);
+        for i in 0..=1000 {
+            operations.push(serde_json::json!({"index": {"id": format!("doc-{}", i), "source": {format!("field_{}", i): i}}}));
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/test/_bulk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({"operations": operations}))
+                            .unwrap(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("bulk response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap()
+                .contains("mapping limit exceeded")
         );
     }
 
