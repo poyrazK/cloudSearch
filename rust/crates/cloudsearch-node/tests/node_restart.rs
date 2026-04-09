@@ -1,13 +1,35 @@
 use reqwest::Client;
 use serde_json::json;
-use std::{
-    net::TcpListener,
-    path::Path,
-    process::{Child, Command, Stdio},
-    time::Duration,
-};
+use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::sleep;
+
+pub mod helpers {
+    include!("helpers.rs");
+}
+
+use helpers::{
+    reserve_port, spawn_node, spawn_node_with_all_intervals, spawn_node_with_intervals, stop_node,
+};
+
+async fn wait_for_health(client: &Client, base_url: &str) {
+    let mut last_err = String::new();
+    for _ in 0..50 {
+        let url = format!("{base_url}/_health");
+        match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => return,
+            Ok(response) => {
+                last_err = response.status().to_string();
+            }
+            Err(err) => {
+                last_err = format!("{:?}", err);
+            }
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!("node did not become healthy in time: {last_err}");
+}
 
 #[tokio::test]
 async fn preserves_documents_and_search_results_across_node_restart() {
@@ -286,77 +308,6 @@ async fn preserves_bulk_flushed_state_and_sorted_search_after_restart() {
     assert_eq!(search["hits"]["hits"][2]["_id"], "doc-1");
 
     stop_node(&mut second);
-}
-
-fn reserve_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind random port");
-    listener.local_addr().expect("local addr").port()
-}
-
-fn spawn_node(data_dir: &Path, port: u16) -> Child {
-    spawn_node_with_intervals(data_dir, port, 1, 30)
-}
-
-fn spawn_node_with_intervals(
-    data_dir: &Path,
-    port: u16,
-    refresh_interval_secs: u64,
-    flush_interval_secs: u64,
-) -> Child {
-    spawn_node_with_all_intervals(
-        data_dir,
-        port,
-        refresh_interval_secs,
-        flush_interval_secs,
-        None,
-    )
-}
-
-fn spawn_node_with_all_intervals(
-    data_dir: &Path,
-    port: u16,
-    refresh_interval_secs: u64,
-    flush_interval_secs: u64,
-    merge_interval_secs: Option<u64>,
-) -> Child {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cloudsearch-node"));
-    cmd.env("CLOUDSEARCH_BIND", format!("127.0.0.1:{port}"))
-        .env("CLOUDSEARCH_DATA_DIR", data_dir)
-        .env(
-            "CLOUDSEARCH_REFRESH_INTERVAL_SECS",
-            refresh_interval_secs.to_string(),
-        )
-        .env(
-            "CLOUDSEARCH_FLUSH_INTERVAL_SECS",
-            flush_interval_secs.to_string(),
-        )
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    if let Some(merge_secs) = merge_interval_secs {
-        cmd.env("CLOUDSEARCH_MERGE_INTERVAL_SECS", merge_secs.to_string());
-    }
-
-    cmd.spawn().expect("spawn node")
-}
-
-fn stop_node(child: &mut Child) {
-    child.kill().expect("kill node");
-    child.wait().expect("wait for node exit");
-}
-
-async fn wait_for_health(client: &Client, base_url: &str) {
-    for _ in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/_health")).send().await
-            && response.status().is_success()
-        {
-            return;
-        }
-
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    panic!("node did not become healthy in time");
 }
 
 #[tokio::test]
