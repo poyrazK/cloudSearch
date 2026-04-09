@@ -1220,6 +1220,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_uppercase_index_name() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        let error = catalog
+            .create_index(
+                "Logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect_err("uppercase should fail");
+
+        assert!(matches!(error, CloudSearchError::InvalidIndexName(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_index_name_too_long() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        let long_name = "a".repeat(256);
+        let error = catalog
+            .create_index(
+                &long_name,
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect_err("256 chars should fail");
+
+        assert!(matches!(error, CloudSearchError::InvalidIndexName(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_index_name_with_special_chars() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        for name in ["log s", "log.name", "log@name", "log/name"] {
+            let error = catalog
+                .create_index(
+                    name,
+                    CreateIndexRequest {
+                        settings: Default::default(),
+                    },
+                )
+                .await
+                .expect_err(name);
+            assert!(
+                matches!(error, CloudSearchError::InvalidIndexName(_)),
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn delete_index_removes_storage_and_allows_recreate() {
         let temp_dir = TempDir::new().expect("temp dir");
         let catalog = IndexCatalog::new(temp_dir.path());
@@ -2694,6 +2756,124 @@ mod tests {
             }
             other => panic!("unexpected aggregation result: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn terms_aggregation_rejects_object_field() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "test",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("test").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"metadata": {"key": "value"}}),
+            })
+            .await
+            .expect("index doc");
+
+        handle
+            .validate_search_request(&SearchRequest {
+                query: None,
+                aggs: Some(std::collections::BTreeMap::from([(
+                    "by_field".to_string(),
+                    AggregationRequest::Terms(TermsAggregationRequest {
+                        field: "metadata".to_string(),
+                    }),
+                )])),
+                ..Default::default()
+            })
+            .expect_err("terms on Object field should fail");
+    }
+
+    #[tokio::test]
+    async fn stats_aggregation_rejects_object_field() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "test",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("test").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"metadata": {"key": "value"}}),
+            })
+            .await
+            .expect("index doc");
+
+        handle
+            .validate_search_request(&SearchRequest {
+                query: None,
+                aggs: Some(std::collections::BTreeMap::from([(
+                    "field_stats".to_string(),
+                    AggregationRequest::Stats(StatsAggregationRequest {
+                        field: "metadata".to_string(),
+                    }),
+                )])),
+                ..Default::default()
+            })
+            .expect_err("stats on Object field should fail");
+    }
+
+    #[tokio::test]
+    async fn date_histogram_aggregation_rejects_non_timestamp_field() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "test",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("test").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"count": 42}),
+            })
+            .await
+            .expect("index doc");
+
+        handle
+            .validate_search_request(&SearchRequest {
+                query: None,
+                aggs: Some(std::collections::BTreeMap::from([(
+                    "over_time".to_string(),
+                    AggregationRequest::DateHistogram(DateHistogramAggregationRequest {
+                        field: "count".to_string(),
+                        interval: DateHistogramInterval::Day,
+                    }),
+                )])),
+                ..Default::default()
+            })
+            .expect_err("date_histogram on non-timestamp field should fail");
     }
 
     #[tokio::test]
