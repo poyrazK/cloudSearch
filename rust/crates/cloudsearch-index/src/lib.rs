@@ -1065,6 +1065,22 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::Barrier;
 
+    #[allow(dead_code)]
+    async fn test_catalog() -> (TempDir, IndexCatalog) {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+        (temp_dir, catalog)
+    }
+
+    #[allow(dead_code)]
+    fn doc(id: &str, source: serde_json::Value) -> IndexDocument {
+        IndexDocument {
+            id: id.to_string(),
+            source,
+        }
+    }
+
     #[tokio::test]
     async fn creates_and_loads_index_metadata() {
         let temp_dir = TempDir::new().expect("temp dir");

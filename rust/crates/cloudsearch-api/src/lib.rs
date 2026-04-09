@@ -918,7 +918,18 @@ mod tests {
         SortSpec, StatsAggregationRequest, TermQuery, TermsAggregationRequest, TermsQuery,
     };
     use http_body_util::BodyExt;
+    use std::sync::Arc;
+    use tempfile::TempDir;
     use tower::ServiceExt;
+
+    #[allow(dead_code)]
+    async fn test_api() -> (TempDir, Arc<IndexCatalog>, axum::Router) {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+        catalog.initialize().await.expect("init catalog");
+        let app = router(catalog.clone());
+        (temp_dir, catalog, app)
+    }
 
     #[tokio::test]
     async fn health_returns_exact_response_shape() {
