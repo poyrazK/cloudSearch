@@ -46,8 +46,16 @@ pub fn spawn_node_with_all_intervals(
             "CLOUDSEARCH_FLUSH_INTERVAL_SECS",
             flush_interval_secs.to_string(),
         )
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(if std::env::var("CLOUDSEARCH_TEST_DEBUG").is_ok() {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        })
+        .stderr(if std::env::var("CLOUDSEARCH_TEST_DEBUG").is_ok() {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        });
 
     if let Some(merge_secs) = merge_interval_secs {
         cmd.env("CLOUDSEARCH_MERGE_INTERVAL_SECS", merge_secs.to_string());
