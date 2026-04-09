@@ -407,3 +407,311 @@ async fn metrics_endpoint() {
 
     stop_node(&mut child);
 }
+
+#[tokio::test]
+async fn bulk_delete_removes_document() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    client
+        .post(format!("{base_url}/test/_bulk"))
+        .json(&serde_json::json!({
+            "operations": [
+                {"index": {"id": "doc-1", "source": {"msg": "one"}}},
+                {"index": {"id": "doc-2", "source": {"msg": "two"}}},
+                {"index": {"id": "doc-3", "source": {"msg": "three"}}}
+            ]
+        }))
+        .send()
+        .await
+        .expect("bulk request")
+        .error_for_status()
+        .expect("bulk status");
+
+    client
+        .post(format!("{base_url}/test/_bulk"))
+        .json(&serde_json::json!({
+            "operations": [{"delete": {"id": "doc-2"}}]
+        }))
+        .send()
+        .await
+        .expect("bulk delete")
+        .error_for_status()
+        .expect("bulk delete status");
+
+    client
+        .post(format!("{base_url}/test/_refresh"))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({"query": {"match_all": {}}}))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 2);
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn bulk_with_invalid_item_fails_request() {
+    // A bulk request with malformed JSON body returns 400.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    let resp = client
+        .post(format!("{base_url}/test/_bulk"))
+        .header("content-type", "application/json")
+        .body("not valid json{{{")
+        .send()
+        .await
+        .expect("bulk request");
+    assert_eq!(resp.status(), 400, "malformed JSON body should return 400");
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn bool_query_must_and_should_combined() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    for (id, svc, level) in [
+        ("doc-1", "billing", "error"),
+        ("doc-2", "search", "info"),
+        ("doc-3", "billing", "info"),
+    ] {
+        client
+            .put(format!("{base_url}/test/_doc"))
+            .json(&serde_json::json!({"id": id, "source": {"service": svc, "level": level}}))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    client
+        .post(format!("{base_url}/test/_refresh"))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {
+                "bool": {
+                    "must": [{"term": {"field": "service", "value": "billing"}}],
+                    "should": [{"term": {"field": "level", "value": "error"}}]
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+
+    // Both billing docs match must; doc-1 (error) scores higher due to should match.
+    assert_eq!(body["hits"]["total"]["value"], 2);
+    assert_eq!(body["hits"]["hits"][0]["_id"], "doc-1");
+    assert_eq!(body["hits"]["hits"][1]["_id"], "doc-3");
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn range_query_filters_by_numeric_field() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    for (id, latency) in [("a", 10), ("b", 30), ("c", 20)] {
+        client
+            .put(format!("{base_url}/test/_doc"))
+            .json(&serde_json::json!({"id": id, "source": {"latency": latency}}))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    client
+        .post(format!("{base_url}/test/_refresh"))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {
+                "range": {
+                    "field": "latency",
+                    "gte": 15,
+                    "lte": 25
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+
+    assert_eq!(body["hits"]["total"]["value"], 1);
+    assert_eq!(body["hits"]["hits"][0]["_id"], "c");
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn get_missing_document_returns_404() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    let resp = client
+        .get(format!("{base_url}/test/_doc/nonexistent"))
+        .send()
+        .await
+        .expect("get request");
+    assert_eq!(resp.status(), 404, "get non-existent doc should return 404");
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn range_on_string_field_returns_400() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    client
+        .put(format!("{base_url}/test/_doc"))
+        .json(&serde_json::json!({"id": "doc-1", "source": {"service": "billing"}}))
+        .send()
+        .await
+        .expect("index doc")
+        .error_for_status()
+        .expect("index status");
+
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {
+                "range": {
+                    "field": "service",
+                    "gte": "a",
+                    "lte": "z"
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("search request");
+    assert_eq!(
+        resp.status(),
+        400,
+        "range on string field should return 400"
+    );
+
+    stop_node(&mut child);
+}

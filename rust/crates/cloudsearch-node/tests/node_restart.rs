@@ -670,3 +670,67 @@ async fn multi_index_survives_restart() {
 
     node.stop();
 }
+
+#[tokio::test]
+async fn delete_document_survives_restart() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    node.client
+        .put(format!("{}/logs", node.base_url))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    for id in ["doc-1", "doc-2"] {
+        node.client
+            .put(format!("{}/logs/_doc", node.base_url))
+            .json(&serde_json::json!({"id": id, "source": {"x": 1}}))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    node.client
+        .post(format!("{}/logs/_bulk", node.base_url))
+        .json(&serde_json::json!({"operations": [{"delete": {"id": "doc-1"}}]}))
+        .send()
+        .await
+        .expect("delete doc")
+        .error_for_status()
+        .expect("delete status");
+
+    node.client
+        .post(format!("{}/logs/_refresh", node.base_url))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    node.restart().await;
+
+    let search = node
+        .client
+        .post(format!("{}/logs/_search", node.base_url))
+        .json(&serde_json::json!({"query": {"match_all": {}}}))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status")
+        .json::<serde_json::Value>()
+        .await
+        .expect("search body");
+
+    assert_eq!(search["hits"]["total"]["value"], 1);
+    assert_eq!(search["hits"]["hits"][0]["_id"], "doc-2");
+
+    node.stop();
+}
