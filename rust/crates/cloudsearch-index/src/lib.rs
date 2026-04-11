@@ -25,16 +25,16 @@ const MAX_FIELDS_PER_INDEX: usize = 1000;
 const MERGE_TRIGGER_DOCUMENT_COUNT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MergePlan {
+pub struct MergePlan {
     segments: Vec<SegmentManifest>,
 }
 
 impl MergePlan {
-    pub(crate) fn new(segments: Vec<SegmentManifest>) -> Self {
+    pub fn new(segments: Vec<SegmentManifest>) -> Self {
         Self { segments }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
 }
@@ -299,7 +299,7 @@ impl IndexHandle {
         Some(MergePlan::new(vec![manifest]))
     }
 
-    pub(crate) async fn apply_merge_plan(&mut self, plan: &MergePlan) -> Result<()> {
+    pub async fn apply_merge_plan(&mut self, plan: &MergePlan) -> Result<()> {
         if plan.is_empty() {
             return Ok(());
         }
