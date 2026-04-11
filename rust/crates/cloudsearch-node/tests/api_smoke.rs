@@ -972,3 +972,91 @@ async fn range_on_string_field_returns_400() {
 
     stop_node(&mut child);
 }
+
+#[tokio::test]
+async fn prefix_query_matches_string_prefixes() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    for (id, svc) in [
+        ("d1", "auth-service"),
+        ("d2", "auth-worker"),
+        ("d3", "billing-api"),
+    ] {
+        client
+            .put(format!("{base_url}/test/_doc"))
+            .json(&serde_json::json!({"id": id, "source": {"service": svc}}))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    client
+        .post(format!("{base_url}/test/_refresh"))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    // Prefix "auth-" matches d1 and d2
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"prefix": {"field": "service", "value": "auth-"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 2);
+
+    // Prefix "auth-worker" matches d2 only
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"prefix": {"field": "service", "value": "auth-worker"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 1);
+    assert_eq!(body["hits"]["hits"][0]["_id"], "d2");
+
+    // Prefix "xyz" matches nothing
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"prefix": {"field": "service", "value": "xyz"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 0);
+
+    stop_node(&mut child);
+}

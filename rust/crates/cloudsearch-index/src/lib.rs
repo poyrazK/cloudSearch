@@ -4,8 +4,9 @@ use cloudsearch_common::{
     BulkRequest, BulkResponse, CloudSearchError, CreateIndexRequest,
     DateHistogramAggregationResult, DateHistogramBucket, DateHistogramInterval, FieldMapping,
     FieldType, FlushResponse, HitsMetadata, IndexDocument, IndexMetadata, MappingMode,
-    MergeResponse, RangeQuery, Result, SearchHit, SearchQuery, SearchRequest, SearchResponse,
-    SortOrder, SortSpec, StatsAggregationResult, TermsAggregationResult, TermsBucket, TermsQuery,
+    MergeResponse, PrefixQuery, RangeQuery, Result, SearchHit, SearchQuery, SearchRequest,
+    SearchResponse, SortOrder, SortSpec, StatsAggregationResult, TermsAggregationResult,
+    TermsBucket, TermsQuery,
 };
 use cloudsearch_storage::{
     SegmentManifest, SegmentSnapshot, WalManager, WalRecord, read_segment_snapshot,
@@ -650,6 +651,7 @@ impl IndexHandle {
                 .chain(boolean.filter.iter())
                 .chain(boolean.must_not.iter())
                 .try_for_each(|query| self.validate_query(query)),
+            SearchQuery::Prefix(prefix) => self.ensure_scalar_field(&prefix.field, &prefix.field),
         }
     }
 
@@ -759,7 +761,14 @@ fn matches_query(document: &IndexDocument, query: &SearchQuery) -> bool {
         SearchQuery::Terms(terms) => matches_terms_query(document, terms),
         SearchQuery::Range(range) => matches_range_query(document, range),
         SearchQuery::Bool(bool_query) => matches_bool_query(document, bool_query),
+        SearchQuery::Prefix(prefix) => matches_prefix_query(document, prefix),
     }
+}
+
+fn matches_prefix_query(document: &IndexDocument, prefix: &PrefixQuery) -> bool {
+    document.source.get(&prefix.field).is_some_and(|value| {
+        value.as_str().is_some_and(|s| s.starts_with(&prefix.value))
+    })
 }
 
 fn matches_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> bool {
@@ -1100,8 +1109,8 @@ mod tests {
     use cloudsearch_common::{
         AggregationRequest, AggregationResult, BoolQuery, BulkDeleteOperation, BulkIndexOperation,
         BulkOperation, BulkRequest, CreateIndexRequest, DateHistogramAggregationRequest,
-        DateHistogramInterval, FieldType, IndexSettings, MappingMode, RangeQuery, SearchQuery,
-        SearchRequest, SortOrder, SortSpec, StatsAggregationRequest, TermQuery,
+        DateHistogramInterval, FieldType, IndexSettings, MappingMode, PrefixQuery, RangeQuery,
+        SearchQuery, SearchRequest, SortOrder, SortSpec, StatsAggregationRequest, TermQuery,
         TermsAggregationRequest, TermsQuery,
     };
     use tempfile::TempDir;
@@ -3486,6 +3495,97 @@ mod tests {
             .expect("read snapshot")
             .expect("snapshot exists");
         assert_eq!(persisted.documents.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn prefix_queries_match_string_prefixes() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "auth-service", "message": "hello"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"service": "auth-worker", "message": "world"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-3".to_string(),
+                source: serde_json::json!({"service": "billing-api", "message": "hi"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+
+        // Match prefix "auth-"
+        let auth_prefix = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Prefix(PrefixQuery {
+                field: "service".to_string(),
+                value: "auth-".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(auth_prefix.hits.total, 2);
+
+        // Match prefix "auth-worker"
+        let exact_match = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Prefix(PrefixQuery {
+                field: "service".to_string(),
+                value: "auth-worker".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(exact_match.hits.total, 1);
+
+        // No match for "xyz" prefix
+        let no_match = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Prefix(PrefixQuery {
+                field: "service".to_string(),
+                value: "xyz".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(no_match.hits.total, 0);
+
+        // Prefix on non-existent field
+        let missing_field = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Prefix(PrefixQuery {
+                field: "nonexistent".to_string(),
+                value: "test".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(missing_field.hits.total, 0);
+
+        // Empty prefix matches any string
+        let empty_prefix = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Prefix(PrefixQuery {
+                field: "service".to_string(),
+                value: "".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(empty_prefix.hits.total, 3);
     }
 
     #[tokio::test]

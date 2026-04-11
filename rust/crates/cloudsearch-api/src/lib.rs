@@ -9,7 +9,7 @@ use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkRequest,
     BulkResponse, CloudSearchError, CreateIndexRequest, DateHistogramAggregationResult,
     ErrorResponse, FlushResponse, HealthResponse, IndexDocument, IndexDocumentRequest,
-    MergeResponse, RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
+    MergeResponse, PrefixQuery, RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
     SearchResponse, SortSpec, StatsAggregationResult, TermQuery, TermsAggregationResult,
     TermsQuery,
 };
@@ -470,6 +470,7 @@ fn parse_query(value: &Value) -> Result<SearchQuery, ApiError> {
         "terms" => Ok(SearchQuery::Terms(parse_terms_query(body)?)),
         "range" => Ok(SearchQuery::Range(parse_range_query(body)?)),
         "bool" => Ok(SearchQuery::Bool(parse_bool_query(body)?)),
+        "prefix" => Ok(SearchQuery::Prefix(parse_prefix_query(body)?)),
         other => Err(ApiError(CloudSearchError::InvalidSearchRequest(format!(
             "unsupported query clause '{other}'"
         )))),
@@ -604,6 +605,48 @@ fn parse_range_query(value: &Value) -> Result<RangeQuery, ApiError> {
         gt: bounds.get("gt").filter(|value| !value.is_null()).cloned(),
         lte: bounds.get("lte").filter(|value| !value.is_null()).cloned(),
         lt: bounds.get("lt").filter(|value| !value.is_null()).cloned(),
+    })
+}
+
+fn parse_prefix_query(value: &Value) -> Result<PrefixQuery, ApiError> {
+    let object = value.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "prefix query must be a JSON object".to_string(),
+        ))
+    })?;
+
+    if object.contains_key("field") || object.contains_key("value") {
+        let field = object.get("field").and_then(Value::as_str).ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "prefix query requires string 'field'".to_string(),
+            ))
+        })?;
+        let value = object.get("value").and_then(Value::as_str).ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "prefix query requires string 'value'".to_string(),
+            ))
+        })?;
+        return Ok(PrefixQuery {
+            field: field.to_string(),
+            value: value.to_string(),
+        });
+    }
+
+    if object.len() != 1 {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "prefix query must contain exactly one field".to_string(),
+        )));
+    }
+
+    let (field, raw_value) = object.iter().next().expect("single prefix field");
+    let value = raw_value.as_str().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "prefix value must be a string".to_string(),
+        ))
+    })?;
+    Ok(PrefixQuery {
+        field: field.clone(),
+        value: value.to_string(),
     })
 }
 

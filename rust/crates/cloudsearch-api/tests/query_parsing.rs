@@ -193,3 +193,81 @@ async fn rejects_search_with_oversized_size_parameter() {
         .expect("response");
     assert_eq!(response.status(), 400, "oversized size should be rejected");
 }
+
+#[tokio::test]
+async fn accepts_prefix_query_explicit_form() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"query":{"prefix":{"field":"service","value":"auth"}}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
+async fn accepts_prefix_query_shorthand_form() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":{"prefix":{"service":"auth"}}}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
+async fn rejects_prefix_query_missing_field() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":{"prefix":{"value":"auth"}}}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn rejects_prefix_query_missing_value() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":{"prefix":{"field":"service"}}}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 400);
+}
