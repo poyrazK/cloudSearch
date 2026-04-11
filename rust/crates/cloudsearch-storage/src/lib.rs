@@ -867,6 +867,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_skips_empty_inactive_generation() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
+
+        // Write two records to gen 1
+        manager
+            .append(
+                1,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-1".to_string(),
+                        source: serde_json::json!({"x": 1}),
+                    },
+                },
+            )
+            .await
+            .expect("append to gen 1");
+
+        manager.rollover().await.expect("rollover to gen 2");
+
+        // Write one record to gen 2 (active generation)
+        manager
+            .append(
+                2,
+                WalRecord::IndexDocument {
+                    document: IndexDocument {
+                        id: "doc-2".to_string(),
+                        source: serde_json::json!({"x": 2}),
+                    },
+                },
+            )
+            .await
+            .expect("append to gen 2");
+
+        // After rollover to gen 3, manually create an empty generation file 000003.log
+        // to simulate a generation that was rolled over to but never had any records written.
+        let empty_gen_path = manager.wal_dir().join("000003.log");
+        fs::write(&empty_gen_path, Vec::new())
+            .await
+            .expect("create empty gen file");
+
+        // Replay should succeed — empty inactive generations are skipped, not errors
+        let entries = manager
+            .replay()
+            .await
+            .expect("replay with empty inactive gen");
+        assert_eq!(entries.len(), 2, "should recover all 2 records");
+        assert_eq!(entries[0].sequence_number, 1);
+        assert_eq!(entries[1].sequence_number, 2);
+    }
+
+    #[tokio::test]
     async fn fails_on_malformed_generation_filename() {
         let temp_dir = TempDir::new().expect("temp dir");
         let manager = WalManager::open(temp_dir.path()).await.expect("open wal");
