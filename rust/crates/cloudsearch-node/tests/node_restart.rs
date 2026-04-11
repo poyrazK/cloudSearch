@@ -10,27 +10,8 @@ pub mod helpers {
 
 use helpers::{
     TestNode, reserve_port, spawn_node, spawn_node_with_all_intervals, spawn_node_with_intervals,
-    stop_node,
+    stop_node, wait_for_health,
 };
-
-async fn wait_for_health(client: &Client, base_url: &str) {
-    let mut last_err = String::new();
-    for _ in 0..50 {
-        let url = format!("{base_url}/_health");
-        match client.get(&url).send().await {
-            Ok(response) if response.status().is_success() => return,
-            Ok(response) => {
-                last_err = response.status().to_string();
-            }
-            Err(err) => {
-                last_err = format!("{:?}", err);
-            }
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    panic!("node did not become healthy in time: {last_err}");
-}
 
 #[tokio::test]
 async fn preserves_documents_and_search_results_across_node_restart() {
@@ -773,6 +754,10 @@ async fn merge_triggered_after_enough_documents() {
         .expect("merge status");
     assert_eq!(resp.status(), 200);
 
+    let json: serde_json::Value = resp.json().await.expect("parse merge response");
+    assert_eq!(json["result"], "merged");
+    assert_eq!(json["merged_documents"], 10);
+
     node.stop();
 }
 
@@ -976,6 +961,95 @@ async fn compaction_removes_overwrites_across_restart() {
         .await
         .expect("search body");
     assert_eq!(search["hits"]["total"]["value"], 1);
+
+    node.stop();
+}
+
+#[tokio::test]
+async fn paginated_search_returns_correct_total_across_pages() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    node.client
+        .put(format!("{}/test", node.base_url))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    // Index 5 documents
+    for i in 0..5 {
+        node.client
+            .put(format!("{}/test/_doc", node.base_url))
+            .json(&serde_json::json!({
+                "id": format!("doc-{}", i),
+                "source": {"n": i}
+            }))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    // Refresh to make searchable
+    node.client
+        .post(format!("{}/test/_refresh", node.base_url))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    // Search with pagination — request 2 at a time, starting at 0
+    let page1 = node
+        .client
+        .post(format!("{}/test/_search", node.base_url))
+        .json(&json!({
+            "size": 2,
+            "from": 0,
+            "sort": [{"n": {"order": "asc"}}]
+        }))
+        .send()
+        .await
+        .expect("search page 1")
+        .error_for_status()
+        .expect("search status")
+        .json::<serde_json::Value>()
+        .await
+        .expect("parse page 1");
+
+    let page2 = node
+        .client
+        .post(format!("{}/test/_search", node.base_url))
+        .json(&serde_json::json!({
+            "size": 2,
+            "from": 2,
+            "sort": [{"n": {"order": "asc"}}]
+        }))
+        .send()
+        .await
+        .expect("search page 2")
+        .error_for_status()
+        .expect("search status")
+        .json::<serde_json::Value>()
+        .await
+        .expect("parse page 2");
+
+    // Total should be 5 across both pages, not 2
+    assert_eq!(
+        page1["hits"]["total"]["value"], 5,
+        "total should reflect all 5 docs"
+    );
+    assert_eq!(
+        page2["hits"]["total"]["value"], 5,
+        "total should be same on page 2"
+    );
+    assert_eq!(page1["hits"]["hits"].as_array().unwrap().len(), 2);
+    assert_eq!(page2["hits"]["hits"].as_array().unwrap().len(), 2);
 
     node.stop();
 }

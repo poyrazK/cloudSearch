@@ -7,7 +7,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::sleep;
 
-pub async fn wait_for_node_health(client: &Client, base_url: &str) {
+pub async fn wait_for_health(client: &Client, base_url: &str) {
     let mut last_err = String::new();
     for _ in 0..50 {
         let url = format!("{base_url}/_health");
@@ -42,7 +42,7 @@ impl TestNode {
         let base_url = format!("http://127.0.0.1:{port}");
         let client = Client::new();
         let child = spawn_node_process(temp_dir.path(), port);
-        wait_for_node_health(&client, &base_url).await;
+        wait_for_health(&client, &base_url).await;
         Self {
             temp_dir,
             port,
@@ -58,7 +58,7 @@ impl TestNode {
             stop_node(&mut child);
         }
         self.child = Some(spawn_node_process(self.temp_dir.path(), self.port));
-        wait_for_node_health(&self.client, &self.base_url).await;
+        wait_for_health(&self.client, &self.base_url).await;
     }
 
     /// Stops the managed node process.

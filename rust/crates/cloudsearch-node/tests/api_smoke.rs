@@ -1,32 +1,11 @@
 use reqwest::Client;
-use std::time::Duration;
 use tempfile::TempDir;
-use tokio::time::sleep;
 
 pub mod helpers {
     include!("helpers.rs");
 }
 
-use helpers::{reserve_port, spawn_node, stop_node};
-
-async fn wait_for_health(client: &Client, base_url: &str) {
-    let mut last_err = String::new();
-    for _ in 0..50 {
-        let url = format!("{base_url}/_health");
-        match client.get(&url).send().await {
-            Ok(response) if response.status().is_success() => return,
-            Ok(response) => {
-                last_err = response.status().to_string();
-            }
-            Err(err) => {
-                last_err = format!("{:?}", err);
-            }
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    panic!("node did not become healthy in time: {last_err}");
-}
+use helpers::{reserve_port, spawn_node, stop_node, wait_for_health};
 
 #[tokio::test]
 async fn health_endpoint_returns_200() {
