@@ -304,6 +304,47 @@ impl IndexHandle {
             return Ok(());
         }
 
+        // Read the current on-disk segment
+        let snapshot = match read_segment_snapshot(&self.segments_dir).await? {
+            Some(s) => s,
+            None => {
+                tracing::debug!(index = %self.metadata.name, "no on-disk segment found during merge");
+                return Ok(());
+            }
+        };
+
+        // Build merged document set starting from on-disk documents
+        let mut merged: BTreeMap<String, IndexDocument> = snapshot
+            .documents
+            .into_iter()
+            .map(|doc| (doc.id.clone(), doc))
+            .collect();
+
+        // Apply pending operations
+        for (id, op) in &self.pending_operations {
+            match op {
+                PendingOperation::Upsert(doc) => {
+                    merged.insert(id.clone(), doc.clone());
+                }
+                PendingOperation::Delete => {
+                    merged.remove(id);
+                }
+            }
+        }
+
+        let merged_documents = merged.len();
+
+        // Write new compacted segment
+        let new_snapshot = SegmentSnapshot {
+            last_sequence_number: self.last_sequence_number,
+            documents: merged.clone().into_values().collect(),
+        };
+        write_segment_snapshot(&self.segments_dir, &new_snapshot).await?;
+
+        // Update in-memory state
+        self.searchable_documents = merged;
+
+        tracing::info!(index = %self.metadata.name, docs = merged_documents, "apply_merge_plan complete");
         Ok(())
     }
 
