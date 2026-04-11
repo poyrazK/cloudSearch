@@ -120,6 +120,7 @@ impl IndexCatalog {
     }
 
     pub async fn open_index(&self, name: &str) -> Result<IndexHandle> {
+        let _guard = self.lifecycle_lock.write().await;
         let metadata = self.get_index(name).await?;
         let metadata_path = self.metadata_path(name);
         let segments_dir = self.index_dir(name).join("segments");
