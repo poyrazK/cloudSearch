@@ -173,3 +173,23 @@ async fn rejects_search_with_non_object_query() {
         .expect("response");
     assert_eq!(response.status(), 400);
 }
+
+#[tokio::test]
+async fn rejects_search_with_oversized_size_parameter() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    // size value exceeds usize::MAX
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"size": 99999999999999999999}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 400, "oversized size should be rejected");
+}
