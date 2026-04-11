@@ -734,3 +734,248 @@ async fn delete_document_survives_restart() {
 
     node.stop();
 }
+
+#[tokio::test]
+async fn merge_triggered_after_enough_documents() {
+    // Index more than MERGE_TRIGGER_DOCUMENT_COUNT (8) docs, then call merge.
+    // Merge endpoint should return 200 even without prior refresh.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    node.client
+        .put(format!("{}/logs", node.base_url))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    for i in 0..10 {
+        node.client
+            .put(format!("{}/logs/_doc", node.base_url))
+            .json(&serde_json::json!({"id": format!("doc-{}", i), "source": {"x": i}}))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    let resp = node
+        .client
+        .post(format!("{}/logs/_merge", node.base_url))
+        .send()
+        .await
+        .expect("merge request")
+        .error_for_status()
+        .expect("merge status");
+    assert_eq!(resp.status(), 200);
+
+    node.stop();
+}
+
+#[tokio::test]
+async fn merged_segments_survive_restart() {
+    // Index docs, flush (snapshots), index more, merge, restart → all docs found.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    node.client
+        .put(format!("{}/logs", node.base_url))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    for i in 0..5 {
+        node.client
+            .put(format!("{}/logs/_doc", node.base_url))
+            .json(&serde_json::json!({"id": format!("doc-{}", i), "source": {"x": i}}))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    node.client
+        .post(format!("{}/logs/_refresh", node.base_url))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    node.client
+        .post(format!("{}/logs/_flush", node.base_url))
+        .send()
+        .await
+        .expect("flush")
+        .error_for_status()
+        .expect("flush status");
+
+    for i in 5..8 {
+        node.client
+            .put(format!("{}/logs/_doc", node.base_url))
+            .json(&serde_json::json!({"id": format!("doc-{}", i), "source": {"x": i}}))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    node.client
+        .post(format!("{}/logs/_merge", node.base_url))
+        .send()
+        .await
+        .expect("merge request")
+        .error_for_status()
+        .expect("merge status");
+
+    node.restart().await;
+
+    let search = node
+        .client
+        .post(format!("{}/logs/_search", node.base_url))
+        .json(&serde_json::json!({"query": {"match_all": {}}}))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status")
+        .json::<serde_json::Value>()
+        .await
+        .expect("search body");
+
+    assert_eq!(search["hits"]["total"]["value"], 8);
+
+    node.stop();
+}
+
+#[tokio::test]
+async fn compaction_removes_overwrites_across_restart() {
+    // Overwrite same doc 3 times with different values, merge, restart.
+    // Latest value should survive, no duplicates.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    node.client
+        .put(format!("{}/logs", node.base_url))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    // v1
+    node.client
+        .put(format!("{}/logs/_doc", node.base_url))
+        .json(&serde_json::json!({"id": "doc-1", "source": {"version": "v1"}}))
+        .send()
+        .await
+        .expect("index doc")
+        .error_for_status()
+        .expect("index status");
+    node.client
+        .post(format!("{}/logs/_refresh", node.base_url))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+    node.client
+        .post(format!("{}/logs/_flush", node.base_url))
+        .send()
+        .await
+        .expect("flush")
+        .error_for_status()
+        .expect("flush status");
+
+    // v2
+    node.client
+        .put(format!("{}/logs/_doc", node.base_url))
+        .json(&serde_json::json!({"id": "doc-1", "source": {"version": "v2"}}))
+        .send()
+        .await
+        .expect("index doc")
+        .error_for_status()
+        .expect("index status");
+    node.client
+        .post(format!("{}/logs/_refresh", node.base_url))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+    node.client
+        .post(format!("{}/logs/_flush", node.base_url))
+        .send()
+        .await
+        .expect("flush")
+        .error_for_status()
+        .expect("flush status");
+
+    // v3 (no flush)
+    node.client
+        .put(format!("{}/logs/_doc", node.base_url))
+        .json(&serde_json::json!({"id": "doc-1", "source": {"version": "v3"}}))
+        .send()
+        .await
+        .expect("index doc")
+        .error_for_status()
+        .expect("index status");
+    node.client
+        .post(format!("{}/logs/_refresh", node.base_url))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    node.client
+        .post(format!("{}/logs/_merge", node.base_url))
+        .send()
+        .await
+        .expect("merge request")
+        .error_for_status()
+        .expect("merge status");
+
+    node.restart().await;
+
+    let doc = node
+        .client
+        .get(format!("{}/logs/_doc/doc-1", node.base_url))
+        .send()
+        .await
+        .expect("get doc")
+        .error_for_status()
+        .expect("get status")
+        .json::<serde_json::Value>()
+        .await
+        .expect("doc body");
+    assert_eq!(doc["_source"]["version"], "v3");
+
+    let search = node
+        .client
+        .post(format!("{}/logs/_search", node.base_url))
+        .json(&serde_json::json!({"query": {"match_all": {}}}))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status")
+        .json::<serde_json::Value>()
+        .await
+        .expect("search body");
+    assert_eq!(search["hits"]["total"]["value"], 1);
+
+    node.stop();
+}
