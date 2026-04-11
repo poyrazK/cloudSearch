@@ -476,6 +476,180 @@ async fn bulk_delete_removes_document() {
 }
 
 #[tokio::test]
+async fn put_index_returns_409_if_already_exists() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index request")
+        .error_for_status()
+        .expect("create index status");
+
+    let resp = client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("second create index request");
+
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert!(body.get("error").is_some());
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn get_index_returns_404_if_missing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let resp = client
+        .get(format!("{base_url}/missing"))
+        .send()
+        .await
+        .expect("get missing index request");
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert!(body.get("error").is_some());
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn delete_index_returns_404_if_missing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let resp = client
+        .delete(format!("{base_url}/missing"))
+        .send()
+        .await
+        .expect("delete missing index request");
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert!(body.get("error").is_some());
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn put_doc_returns_404_if_index_missing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let resp = client
+        .put(format!("{base_url}/missing/_doc"))
+        .json(&serde_json::json!({"id": "doc-1", "source": {"x": 1}}))
+        .send()
+        .await
+        .expect("put doc to missing index request");
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert!(body.get("error").is_some());
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn get_doc_returns_404_if_index_missing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let resp = client
+        .get(format!("{base_url}/missing/_doc/doc-1"))
+        .send()
+        .await
+        .expect("get doc from missing index request");
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert!(body.get("error").is_some());
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn search_returns_404_if_index_missing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let resp = client
+        .post(format!("{base_url}/missing/_search"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("search missing index request");
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert!(body.get("error").is_some());
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn bulk_returns_404_if_index_missing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let resp = client
+        .post(format!("{base_url}/missing/_bulk"))
+        .json(&serde_json::json!({"operations": [{"index": {"id": "doc-1", "source": {"x": 1}}}]}))
+        .send()
+        .await
+        .expect("bulk to missing index request");
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert!(body.get("error").is_some());
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
 async fn bulk_with_invalid_item_fails_request() {
     // A bulk request with malformed JSON body returns 400.
     let temp_dir = TempDir::new().expect("temp dir");
@@ -503,6 +677,75 @@ async fn bulk_with_invalid_item_fails_request() {
         .await
         .expect("bulk request");
     assert_eq!(resp.status(), 400, "malformed JSON body should return 400");
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn refresh_returns_404_if_index_missing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let resp = client
+        .post(format!("{base_url}/missing/_refresh"))
+        .send()
+        .await
+        .expect("refresh missing index request");
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert!(body.get("error").is_some());
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn flush_returns_404_if_index_missing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let resp = client
+        .post(format!("{base_url}/missing/_flush"))
+        .send()
+        .await
+        .expect("flush missing index request");
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert!(body.get("error").is_some());
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn merge_returns_404_if_index_missing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    let resp = client
+        .post(format!("{base_url}/missing/_merge"))
+        .send()
+        .await
+        .expect("merge missing index request");
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert!(body.get("error").is_some());
 
     stop_node(&mut child);
 }
@@ -570,6 +813,41 @@ async fn bool_query_must_and_should_combined() {
     assert_eq!(body["hits"]["total"]["value"], 2);
     assert_eq!(body["hits"]["hits"][0]["_id"], "doc-1");
     assert_eq!(body["hits"]["hits"][1]["_id"], "doc-3");
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn search_returns_400_for_unsupported_query_type() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index request")
+        .error_for_status()
+        .expect("create index status");
+
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"unsupported_clause": {"field": "x", "value": 1}}
+        }))
+        .send()
+        .await
+        .expect("search request");
+
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert!(body.get("error").is_some());
 
     stop_node(&mut child);
 }
