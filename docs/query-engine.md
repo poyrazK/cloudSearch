@@ -46,6 +46,7 @@ Suggested core nodes:
 - `TermsQuery`
 - `RangeQuery`
 - `BoolQuery`
+- `PrefixQuery`
 - `MatchAllQuery`
 
 Supporting wrappers:
@@ -89,6 +90,17 @@ Current implementation notes:
 - `must`, `filter`, and `must_not` are enforced as boolean inclusion/exclusion checks
 - `should` is required only when there are no `must` or `filter` clauses
 - scoring is still effectively neutral; bool is currently used for logical composition only
+
+### Prefix
+
+- matches string field values that start with a given prefix
+- useful for autocomplete and type-ahead patterns
+- operates on string values only; non-string fields return no matches
+
+Current implementation notes:
+
+- prefix matching is case-sensitive
+- empty prefix matches all documents with that field present
 
 ## Filter-First Bias
 
