@@ -207,10 +207,17 @@ pub enum SearchQuery {
     Range(RangeQuery),
     Bool(BoolQuery),
     Prefix(PrefixQuery),
+    Wildcard(WildcardQuery),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrefixQuery {
+    pub field: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WildcardQuery {
     pub field: String,
     pub value: String,
 }
