@@ -766,9 +766,10 @@ fn matches_query(document: &IndexDocument, query: &SearchQuery) -> bool {
 }
 
 fn matches_prefix_query(document: &IndexDocument, prefix: &PrefixQuery) -> bool {
-    document.source.get(&prefix.field).is_some_and(|value| {
-        value.as_str().is_some_and(|s| s.starts_with(&prefix.value))
-    })
+    document
+        .source
+        .get(&prefix.field)
+        .is_some_and(|value| value.as_str().is_some_and(|s| s.starts_with(&prefix.value)))
 }
 
 fn matches_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> bool {
@@ -3566,6 +3567,16 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(no_match.hits.total, 0);
+
+        // Prefix matching is case-sensitive
+        let case_sensitive = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Prefix(PrefixQuery {
+                field: "service".to_string(),
+                value: "Auth-".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(case_sensitive.hits.total, 0);
 
         // Prefix on non-existent field
         let missing_field = handle.search(&SearchRequest {

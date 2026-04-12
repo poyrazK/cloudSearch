@@ -1029,6 +1029,20 @@ async fn prefix_query_matches_string_prefixes() {
     let body: serde_json::Value = resp.json().await.expect("parse body");
     assert_eq!(body["hits"]["total"]["value"], 2);
 
+    // Shorthand form: prefix "auth-" matches d1 and d2
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"prefix": {"service": "auth-"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 2);
+
     // Prefix "auth-worker" matches d2 only
     let resp = client
         .post(format!("{base_url}/test/_search"))

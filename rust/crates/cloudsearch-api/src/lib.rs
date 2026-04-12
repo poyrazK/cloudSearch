@@ -615,7 +615,12 @@ fn parse_prefix_query(value: &Value) -> Result<PrefixQuery, ApiError> {
         ))
     })?;
 
-    if object.contains_key("field") || object.contains_key("value") {
+    if object.contains_key("field") && object.contains_key("value") {
+        if object.len() != 2 {
+            return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+                "prefix query explicit form must contain only 'field' and 'value'".to_string(),
+            )));
+        }
         let field = object.get("field").and_then(Value::as_str).ok_or_else(|| {
             ApiError(CloudSearchError::InvalidSearchRequest(
                 "prefix query requires string 'field'".to_string(),
@@ -630,6 +635,13 @@ fn parse_prefix_query(value: &Value) -> Result<PrefixQuery, ApiError> {
             field: field.to_string(),
             value: value.to_string(),
         });
+    }
+
+    // Malformed explicit form: has field OR value but not both
+    if object.contains_key("field") || object.contains_key("value") {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "prefix query explicit form requires both 'field' and 'value'".to_string(),
+        )));
     }
 
     if object.len() != 1 {

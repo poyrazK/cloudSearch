@@ -59,6 +59,7 @@ pub enum QueryExpr {
     Terms(TermsQuery),
     Range(RangeQuery),
     Bool(BoolQuery),
+    Prefix(PrefixQuery),
 }
 ```
 
@@ -127,6 +128,19 @@ Suggested fields:
 - `filter`
 - `must_not`
 - optional `minimum_should_match` later
+
+### `PrefixQuery`
+
+Purpose:
+
+- prefix matching for autocomplete-style queries over string fields
+
+Suggested fields:
+
+- `field`
+- `value` (the prefix string to match)
+
+Prefix matching is useful for type-ahead and autocomplete patterns where you want to find all documents whose field value starts with a given string. It matches on string values only.
 
 ## Scalar Value Model
 
