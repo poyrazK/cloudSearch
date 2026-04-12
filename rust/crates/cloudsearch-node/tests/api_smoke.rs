@@ -1174,5 +1174,33 @@ async fn wildcard_query_matches_string_patterns() {
     let body: serde_json::Value = resp.json().await.expect("parse body");
     assert_eq!(body["hits"]["total"]["value"], 0);
 
+    // Wildcard "?illing-api" matches billing-api (? = single char)
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"wildcard": {"field": "service", "value": "?illing-api"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 1);
+
+    // Wildcard "?xyz*" matches nothing (? must match exactly one char)
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"wildcard": {"field": "service", "value": "?xyz*"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 0);
+
     stop_node(&mut child);
 }

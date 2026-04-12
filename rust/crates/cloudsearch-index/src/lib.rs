@@ -776,14 +776,17 @@ fn matches_prefix_query(document: &IndexDocument, prefix: &PrefixQuery) -> bool 
 }
 
 fn matches_wildcard_query(document: &IndexDocument, wildcard: &WildcardQuery) -> bool {
-    document.source.get(&wildcard.field).is_some_and(|value| {
-        value
-            .as_str()
-            .is_some_and(|text| matches_wildcard(text, &wildcard.value))
-    })
+    let re = match build_wildcard_regex(&wildcard.value) {
+        Some(re) => re,
+        None => return false,
+    };
+    document
+        .source
+        .get(&wildcard.field)
+        .is_some_and(|value| value.as_str().is_some_and(|text| re.is_match(text)))
 }
 
-fn matches_wildcard(text: &str, pattern: &str) -> bool {
+fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
     let regex_pattern: String = pattern
         .chars()
         .map(|c| match c {
@@ -792,7 +795,7 @@ fn matches_wildcard(text: &str, pattern: &str) -> bool {
             other => regex::escape(&other.to_string()),
         })
         .collect();
-    Regex::new(&format!("^{regex_pattern}$")).is_ok_and(|re| re.is_match(text))
+    Regex::new(&format!("^{regex_pattern}$")).ok()
 }
 
 fn matches_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> bool {

@@ -15,7 +15,7 @@
 - in-memory indexing buffer
 - refresh into searchable segment views
 - document indexing and retrieval basics
-- query DSL subset: `match`, `term`, `range`, `bool`, `prefix`
+- query DSL subset: `match`, `term`, `range`, `bool`, `prefix`, `wildcard`
 
 Exit criteria:
 

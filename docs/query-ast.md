@@ -60,6 +60,7 @@ pub enum QueryExpr {
     Range(RangeQuery),
     Bool(BoolQuery),
     Prefix(PrefixQuery),
+    Wildcard(WildcardQuery),
 }
 ```
 
@@ -141,6 +142,19 @@ Suggested fields:
 - `value` (the prefix string to match)
 
 Prefix matching is useful for type-ahead and autocomplete patterns where you want to find all documents whose field value starts with a given string. It matches on string values only.
+
+### `WildcardQuery`
+
+Purpose:
+
+- glob-style pattern matching for string fields using `*` (matches any sequence) and `?` (matches any single character)
+
+Suggested fields:
+
+- `field`
+- `value` (the wildcard pattern)
+
+Wildcard matching is useful for flexible pattern queries where `*` represents zero or more characters and `?` represents exactly one character. Case-sensitive matching applies.
 
 ## Scalar Value Model
 

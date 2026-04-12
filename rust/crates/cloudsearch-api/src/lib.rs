@@ -692,8 +692,10 @@ fn parse_wildcard_query(value: &Value) -> Result<WildcardQuery, ApiError> {
         });
     }
 
-    // Malformed explicit form: has field OR value but not both
-    if object.contains_key("field") || object.contains_key("value") {
+    // Malformed explicit form: has field OR value but not both (XOR check)
+    let has_field = object.contains_key("field");
+    let has_value = object.contains_key("value");
+    if has_field != has_value {
         return Err(ApiError(CloudSearchError::InvalidSearchRequest(
             "wildcard query explicit form requires both 'field' and 'value'".to_string(),
         )));

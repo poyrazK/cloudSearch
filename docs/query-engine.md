@@ -47,6 +47,7 @@ Suggested core nodes:
 - `RangeQuery`
 - `BoolQuery`
 - `PrefixQuery`
+- `WildcardQuery`
 - `MatchAllQuery`
 
 Supporting wrappers:
@@ -101,6 +102,17 @@ Current implementation notes:
 
 - prefix matching is case-sensitive
 - empty prefix matches all documents with that field present
+
+### Wildcard
+
+- matches string field values against glob patterns with `*` (zero or more chars) and `?` (exactly one char)
+- useful for flexible pattern matching and partial word searches
+- operates on string values only; non-string fields return no matches
+
+Current implementation notes:
+
+- wildcard matching is case-sensitive
+- patterns are converted to regex for matching: `*` → `.*`, `?` → `.`, special chars are escaped
 
 ## Filter-First Bias
 
