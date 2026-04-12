@@ -311,3 +311,121 @@ async fn rejects_prefix_query_non_string_shorthand() {
         .expect("response");
     assert_eq!(response.status(), 400);
 }
+
+#[tokio::test]
+async fn accepts_wildcard_query_explicit_form() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"query":{"wildcard":{"field":"service","value":"auth-*"}}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
+async fn accepts_wildcard_query_shorthand_form() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":{"wildcard":{"service":"auth-*"}}}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
+async fn rejects_wildcard_query_missing_field() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":{"wildcard":{"value":"auth-*"}}}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn rejects_wildcard_query_missing_value() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":{"wildcard":{"field":"service"}}}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn rejects_wildcard_query_non_string_explicit() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"query":{"wildcard":{"field":"service","value":123}}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn rejects_wildcard_query_non_string_shorthand() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":{"wildcard":{"service":true}}}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 400);
+}
