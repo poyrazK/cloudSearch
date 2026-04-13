@@ -51,6 +51,9 @@ pub struct IndexSettings {
     pub primary_time_field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+    /// TTL in seconds. Documents are automatically evicted after this duration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,6 +102,11 @@ pub enum FieldType {
 pub struct CreateIndexRequest {
     #[serde(default)]
     pub settings: IndexSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateSettingsRequest {
+    pub retention_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -384,6 +392,7 @@ pub struct AppConfig {
     pub refresh_interval_secs: u64,
     pub flush_interval_secs: u64,
     pub merge_interval_secs: u64,
+    pub retention_interval_secs: u64,
 }
 
 impl Default for AppConfig {
@@ -394,6 +403,7 @@ impl Default for AppConfig {
             refresh_interval_secs: 1,
             flush_interval_secs: 30,
             merge_interval_secs: 60,
+            retention_interval_secs: 60,
         }
     }
 }
@@ -410,6 +420,10 @@ impl AppConfig {
 
         if self.merge_interval_secs == 0 {
             self.merge_interval_secs = 60;
+        }
+
+        if self.retention_interval_secs == 0 {
+            self.retention_interval_secs = 60;
         }
     }
 }

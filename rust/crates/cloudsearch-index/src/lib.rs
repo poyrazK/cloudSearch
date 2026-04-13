@@ -121,6 +121,30 @@ impl IndexCatalog {
         Ok(())
     }
 
+    pub async fn update_index_settings(
+        &self,
+        name: &str,
+        retention_secs: Option<u64>,
+    ) -> Result<IndexMetadata> {
+        let _guard = self.lifecycle_lock.write().await;
+        validate_index_name(name)?;
+
+        let metadata_path = self.metadata_path(name);
+        if !fs::try_exists(&metadata_path).await? {
+            return Err(CloudSearchError::IndexNotFound(name.to_string()));
+        }
+
+        let bytes = fs::read(&metadata_path).await?;
+        let mut metadata: IndexMetadata = serde_json::from_slice(&bytes)?;
+        metadata.settings.retention_secs = retention_secs;
+        metadata.updated_at = chrono::Utc::now();
+
+        let metadata_json = serde_json::to_string_pretty(&metadata)?;
+        fs::write(&metadata_path, metadata_json.as_bytes()).await?;
+
+        Ok(metadata)
+    }
+
     pub async fn open_index(&self, name: &str) -> Result<IndexHandle> {
         let _guard = self.lifecycle_lock.write().await;
         let metadata = self.get_index(name).await?;
@@ -149,15 +173,25 @@ impl IndexCatalog {
         let entries = wal.replay_from(last_sequence_number).await?;
         let recovered_count = entries.len();
 
+        let mut document_timestamps: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
+
         for entry in entries {
             last_sequence_number = entry.sequence_number;
 
             match entry.record {
                 WalRecord::IndexDocument { document } => {
-                    searchable_documents.insert(document.id.clone(), document);
+                    searchable_documents.insert(document.id.clone(), document.clone());
+                    // Reconstruct timestamp from document source
+                    if let Some(ts) = extract_document_timestamp_from_doc(&metadata, &document)
+                        && let Some(retention) = metadata.settings.retention_secs
+                    {
+                        let expiry = ts + chrono::Duration::seconds(retention as i64);
+                        document_timestamps.insert(document.id.clone(), expiry);
+                    }
                 }
                 WalRecord::DeleteDocument { document_id } => {
                     searchable_documents.remove(&document_id);
+                    document_timestamps.remove(&document_id);
                 }
                 WalRecord::MappingUpdate { .. } => {}
             }
@@ -172,6 +206,7 @@ impl IndexCatalog {
             searchable_documents,
             pending_operations: BTreeMap::new(),
             last_sequence_number,
+            document_timestamps,
         })
     }
 
@@ -224,6 +259,16 @@ impl IndexRegistry {
         self.catalog.delete_index(name).await?;
         self.handles.lock().await.remove(name);
         Ok(())
+    }
+
+    pub async fn update_index_settings(
+        &self,
+        name: &str,
+        request: cloudsearch_common::UpdateSettingsRequest,
+    ) -> Result<IndexMetadata> {
+        self.catalog
+            .update_index_settings(name, request.retention_secs)
+            .await
     }
 
     pub async fn index_handle(&self, name: &str) -> Result<Arc<Mutex<IndexHandle>>> {
@@ -280,6 +325,8 @@ pub struct IndexHandle {
     searchable_documents: BTreeMap<String, IndexDocument>,
     pending_operations: BTreeMap<String, PendingOperation>,
     last_sequence_number: u64,
+    /// Stores document_id -> expiration DateTime for retention policy.
+    document_timestamps: BTreeMap<String, DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -288,7 +335,81 @@ enum PendingOperation {
     Delete,
 }
 
+/// Extracts timestamp from a document using the index's primary time field.
+/// Supports RFC3339 strings and Unix integer timestamps.
+fn extract_document_timestamp_from_doc(
+    metadata: &IndexMetadata,
+    document: &IndexDocument,
+) -> Option<DateTime<Utc>> {
+    let field_name = metadata.settings.primary_time_field.as_deref()?;
+    let value = document.source.get(field_name)?;
+
+    // Try RFC3339 parsing first
+    if let Some(raw) = value.as_str()
+        && let Ok(parsed) = DateTime::parse_from_rfc3339(raw)
+    {
+        return Some(parsed.with_timezone(&Utc));
+    }
+
+    // Fallback: Unix integer timestamp (seconds)
+    if let Some(secs) = value.as_i64() {
+        return DateTime::from_timestamp(secs, 0);
+    }
+
+    None
+}
+
 impl IndexHandle {
+    /// Returns the retention duration in seconds, if configured.
+    pub fn retention_secs(&self) -> Option<u64> {
+        self.metadata.settings.retention_secs
+    }
+
+    /// Returns the primary time field name, if configured.
+    pub fn primary_time_field(&self) -> Option<&str> {
+        self.metadata.settings.primary_time_field.as_deref()
+    }
+
+    /// Returns true if this index has a retention policy configured.
+    pub fn has_retention_policy(&self) -> bool {
+        self.retention_secs().is_some() && self.primary_time_field().is_some()
+    }
+
+    /// Extracts the timestamp from a document's primary time field.
+    /// Supports RFC3339 strings and Unix integer timestamps.
+    fn extract_document_timestamp(&self, document: &IndexDocument) -> Option<DateTime<Utc>> {
+        let field_name = self.primary_time_field()?;
+        let value = document.source.get(field_name)?;
+
+        // Try RFC3339 parsing first
+        if let Some(raw) = value.as_str()
+            && let Ok(parsed) = DateTime::parse_from_rfc3339(raw)
+        {
+            return Some(parsed.with_timezone(&Utc));
+        }
+
+        // Fallback: Unix integer timestamp (seconds)
+        if let Some(secs) = value.as_i64() {
+            return DateTime::from_timestamp(secs, 0);
+        }
+
+        None
+    }
+
+    /// Returns true if the document has expired based on its timestamp.
+    fn is_expired(&self, document_id: &str, now: DateTime<Utc>) -> bool {
+        if !self.has_retention_policy() {
+            return false;
+        }
+
+        if let Some(expiry) = self.document_timestamps.get(document_id) {
+            return expiry <= &now;
+        }
+
+        // No timestamp means it cannot be expired
+        false
+    }
+
     pub(crate) fn plan_merge(&self, segment_snapshot: &SegmentSnapshot) -> Option<MergePlan> {
         let manifest = SegmentManifest::from(segment_snapshot);
 
@@ -368,10 +489,12 @@ impl IndexHandle {
 
     pub fn search(&self, request: &SearchRequest) -> SearchResponse {
         let query = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll);
+        let now = Utc::now();
 
         let mut scored: Vec<(f32, &IndexDocument)> = self
             .searchable_documents
             .values()
+            .filter(|doc| !self.is_expired(&doc.id, now))
             .filter_map(|doc| score_query(doc, query).map(|s| (s, doc)))
             .collect();
 
@@ -423,6 +546,46 @@ impl IndexHandle {
         }
     }
 
+    /// Evicts all expired documents by soft-deleting them via WAL.
+    /// Returns the number of documents evicted.
+    pub async fn evict_expired_documents(&mut self) -> Result<usize> {
+        if !self.has_retention_policy() {
+            return Ok(0);
+        }
+
+        let now = Utc::now();
+        let expired_ids: Vec<String> = self
+            .document_timestamps
+            .iter()
+            .filter(|(_, expiry)| *expiry <= &now)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut evicted = 0;
+        for id in expired_ids {
+            let sequence_number = self.last_sequence_number + 1;
+            self.wal
+                .append(
+                    sequence_number,
+                    WalRecord::DeleteDocument {
+                        document_id: id.clone(),
+                    },
+                )
+                .await?;
+            self.pending_operations
+                .insert(id.clone(), PendingOperation::Delete);
+            self.document_timestamps.remove(&id);
+            self.last_sequence_number = sequence_number;
+            evicted += 1;
+        }
+
+        if evicted > 0 {
+            tracing::info!(index = %self.metadata.name, evicted, "retention eviction complete");
+        }
+
+        Ok(evicted)
+    }
+
     pub fn validate_search_request(&self, request: &SearchRequest) -> Result<()> {
         if let Some(query) = &request.query {
             self.validate_query(query)?;
@@ -459,6 +622,12 @@ impl IndexHandle {
 
     pub async fn index_document(&mut self, document: IndexDocument) -> Result<u64> {
         self.validate_and_update_mappings(&document.source).await?;
+
+        // Extract and store timestamp for retention policy
+        if let Some(ts) = self.extract_document_timestamp(&document) {
+            let expiry = ts + chrono::Duration::seconds(self.retention_secs().unwrap_or(0) as i64);
+            self.document_timestamps.insert(document.id.clone(), expiry);
+        }
 
         let sequence_number = self.last_sequence_number + 1;
         self.wal
@@ -1268,6 +1437,7 @@ mod tests {
                         mapping_mode: MappingMode::ControlledDynamic,
                         primary_time_field: Some("@timestamp".to_string()),
                         namespace: None,
+                        retention_secs: None,
                     },
                 },
             )
@@ -1297,6 +1467,7 @@ mod tests {
                         mapping_mode: MappingMode::ControlledDynamic,
                         primary_time_field: None,
                         namespace: Some("tenant-abc".to_string()),
+                        retention_secs: None,
                     },
                 },
             )
@@ -1323,6 +1494,7 @@ mod tests {
                         mapping_mode: MappingMode::ControlledDynamic,
                         primary_time_field: None,
                         namespace: Some("".to_string()),
+                        retention_secs: None,
                     },
                 },
             )
@@ -1347,6 +1519,7 @@ mod tests {
                         mapping_mode: MappingMode::ControlledDynamic,
                         primary_time_field: None,
                         namespace: Some(long_namespace),
+                        retention_secs: None,
                     },
                 },
             )
@@ -1370,6 +1543,7 @@ mod tests {
                         mapping_mode: MappingMode::ControlledDynamic,
                         primary_time_field: None,
                         namespace: Some("tenant@abc".to_string()),
+                        retention_secs: None,
                     },
                 },
             )
@@ -1394,6 +1568,7 @@ mod tests {
                         mapping_mode: MappingMode::ControlledDynamic,
                         primary_time_field: None,
                         namespace: Some(ns_64.clone()),
+                        retention_secs: None,
                     },
                 },
             )
@@ -1683,6 +1858,7 @@ mod tests {
                         mapping_mode: MappingMode::Strict,
                         primary_time_field: None,
                         namespace: None,
+                        retention_secs: None,
                     },
                 },
             )
