@@ -208,6 +208,7 @@ pub enum SearchQuery {
     Bool(BoolQuery),
     Prefix(PrefixQuery),
     Wildcard(WildcardQuery),
+    Match(MatchQuery),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -218,6 +219,12 @@ pub struct PrefixQuery {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WildcardQuery {
+    pub field: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MatchQuery {
     pub field: String,
     pub value: String,
 }
@@ -275,16 +282,17 @@ pub struct SearchResponse {
     pub aggregations: BTreeMap<String, AggregationResult>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HitsMetadata {
     pub total: usize,
     pub hits: Vec<SearchHit>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchHit {
     pub id: String,
     pub source: serde_json::Value,
+    pub score: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

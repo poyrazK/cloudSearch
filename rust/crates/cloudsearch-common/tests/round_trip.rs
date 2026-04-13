@@ -703,10 +703,12 @@ fn test_search_response_with_hits_and_aggs() {
                 SearchHit {
                     id: "doc1".to_string(),
                     source: serde_json::json!({"title": "First"}),
+                    score: None,
                 },
                 SearchHit {
                     id: "doc2".to_string(),
                     source: serde_json::json!({"title": "Second"}),
+                    score: None,
                 },
             ],
         },
@@ -742,6 +744,7 @@ fn test_hits_metadata() {
         hits: vec![SearchHit {
             id: "doc1".to_string(),
             source: serde_json::json!({"x": 1}),
+            score: None,
         }],
     });
 }
@@ -753,6 +756,7 @@ fn test_search_hit() {
     round_trip(&SearchHit {
         id: "doc1".to_string(),
         source: serde_json::json!({"nested": {"field": "value"}}),
+        score: None,
     });
 }
 
