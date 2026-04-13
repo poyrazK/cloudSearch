@@ -75,9 +75,9 @@ Current implementation notes:
 
 Current implementation notes:
 
-- `term`, `terms`, `range`, `bool`, `prefix`, and `wildcard` are implemented
+- `term`, `terms`, `range`, `bool`, `prefix`, `wildcard`, and `match` are implemented
 - `from`, `size`, and single-field sort are implemented
-- the API now accepts both the internal request shape and a closer Elasticsearch-style shape for `term`, `terms`, `range`, `bool`, `prefix`, `wildcard`, and single-entry sort arrays
+- the API now accepts both the internal request shape and a closer Elasticsearch-style shape for `term`, `terms`, `range`, `bool`, `prefix`, `wildcard`, `match`, and single-entry sort arrays
 - search responses now use Elasticsearch-style `_id`, `_source`, and `hits.total.value` / `relation` wrappers
 - document GET responses use `_id` and `_source`, while bulk item responses use `_id` plus a `result` field
 - search currently supports top-level fields only
