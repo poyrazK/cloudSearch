@@ -874,5 +874,8 @@ fn test_app_config_custom() {
         flush_interval_secs: 60,
         merge_interval_secs: 120,
         retention_interval_secs: 30,
+        max_indexes: Some(10),
+        max_documents_per_index: Some(1_000_000),
+        max_concurrent_background_ops: Some(4),
     });
 }

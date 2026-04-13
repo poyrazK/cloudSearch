@@ -27,6 +27,8 @@ pub enum CloudSearchError {
     UnsupportedArrayField(String),
     #[error("mapping limit exceeded: {0}")]
     MappingLimitExceeded(String),
+    #[error("resource limit exceeded: {0}")]
+    ResourceLimitExceeded(String),
     #[error("invalid WAL record: {0}")]
     InvalidWalRecord(String),
     #[error("WAL checksum mismatch")]
@@ -393,6 +395,12 @@ pub struct AppConfig {
     pub flush_interval_secs: u64,
     pub merge_interval_secs: u64,
     pub retention_interval_secs: u64,
+    /// Maximum number of indexes allowed on this node. None = unlimited.
+    pub max_indexes: Option<usize>,
+    /// Maximum documents per index. None = unlimited.
+    pub max_documents_per_index: Option<u64>,
+    /// Maximum concurrent background operations across all indexes. None = unlimited.
+    pub max_concurrent_background_ops: Option<usize>,
 }
 
 impl Default for AppConfig {
@@ -404,6 +412,9 @@ impl Default for AppConfig {
             flush_interval_secs: 30,
             merge_interval_secs: 60,
             retention_interval_secs: 60,
+            max_indexes: None,
+            max_documents_per_index: None,
+            max_concurrent_background_ops: None,
         }
     }
 }
