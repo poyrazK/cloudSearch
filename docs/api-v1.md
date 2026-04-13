@@ -60,6 +60,7 @@ Current implementation notes:
 - `/metrics` exposes Prometheus-style counters and duration summaries for core API operations
 - request counters include route, method, and status labels
 - runtime gauges include the current number of open cached index handles
+- per-index metrics include document count, pending operations, and last sequence number per index
 
 ### Supported Query DSL In V1
 

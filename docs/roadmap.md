@@ -44,10 +44,10 @@ Exit criteria:
 
 ## Phase 3 - Multi-Index Node Runtime
 
-- multiple indexes per node
-- better resource accounting
-- namespace-ready metadata
-- retention hooks and time-aware management
+- multiple indexes per node ✓
+- better resource accounting ✓ (per-index metrics in /metrics endpoint)
+- namespace-ready metadata ✓
+- retention hooks and time-aware management ✓ (TTL-based document eviction)
 - snapshot interfaces and backup design
 
 Exit criteria:
