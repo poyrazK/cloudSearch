@@ -11,7 +11,7 @@ use cloudsearch_common::{
     ErrorResponse, FlushResponse, HealthResponse, IndexDocument, IndexDocumentRequest,
     MergeResponse, PrefixQuery, RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
     SearchResponse, SortSpec, StatsAggregationResult, TermQuery, TermsAggregationResult,
-    TermsQuery,
+    TermsQuery, WildcardQuery,
 };
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use serde_json::Value;
@@ -471,6 +471,7 @@ fn parse_query(value: &Value) -> Result<SearchQuery, ApiError> {
         "range" => Ok(SearchQuery::Range(parse_range_query(body)?)),
         "bool" => Ok(SearchQuery::Bool(parse_bool_query(body)?)),
         "prefix" => Ok(SearchQuery::Prefix(parse_prefix_query(body)?)),
+        "wildcard" => Ok(SearchQuery::Wildcard(parse_wildcard_query(body)?)),
         other => Err(ApiError(CloudSearchError::InvalidSearchRequest(format!(
             "unsupported query clause '{other}'"
         )))),
@@ -657,6 +658,62 @@ fn parse_prefix_query(value: &Value) -> Result<PrefixQuery, ApiError> {
         ))
     })?;
     Ok(PrefixQuery {
+        field: field.clone(),
+        value: value.to_string(),
+    })
+}
+
+fn parse_wildcard_query(value: &Value) -> Result<WildcardQuery, ApiError> {
+    let object = value.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "wildcard query must be a JSON object".to_string(),
+        ))
+    })?;
+
+    if object.contains_key("field") && object.contains_key("value") {
+        if object.len() != 2 {
+            return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+                "wildcard query explicit form must contain only 'field' and 'value'".to_string(),
+            )));
+        }
+        let field = object.get("field").and_then(Value::as_str).ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "wildcard query requires string 'field'".to_string(),
+            ))
+        })?;
+        let value = object.get("value").and_then(Value::as_str).ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "wildcard query requires string 'value'".to_string(),
+            ))
+        })?;
+        return Ok(WildcardQuery {
+            field: field.to_string(),
+            value: value.to_string(),
+        });
+    }
+
+    // Malformed explicit form: has field OR value but not both (XOR check)
+    let has_field = object.contains_key("field");
+    let has_value = object.contains_key("value");
+    if has_field != has_value {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "wildcard query explicit form requires both 'field' and 'value'".to_string(),
+        )));
+    }
+
+    if object.len() != 1 {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "wildcard query must contain exactly one field".to_string(),
+        )));
+    }
+
+    let (field, raw_value) = object.iter().next().expect("single wildcard field");
+    let value = raw_value.as_str().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "wildcard value must be a string".to_string(),
+        ))
+    })?;
+    Ok(WildcardQuery {
         field: field.clone(),
         value: value.to_string(),
     })

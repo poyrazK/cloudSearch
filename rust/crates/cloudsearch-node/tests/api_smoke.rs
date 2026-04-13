@@ -1074,3 +1074,133 @@ async fn prefix_query_matches_string_prefixes() {
 
     stop_node(&mut child);
 }
+
+#[tokio::test]
+async fn wildcard_query_matches_string_patterns() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    for (id, svc) in [
+        ("d1", "auth-service"),
+        ("d2", "auth-worker"),
+        ("d3", "billing-api"),
+        ("d4", "search-service"),
+    ] {
+        client
+            .put(format!("{base_url}/test/_doc"))
+            .json(&serde_json::json!({"id": id, "source": {"service": svc}}))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    client
+        .post(format!("{base_url}/test/_refresh"))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    // Wildcard "auth-*" matches d1 and d2
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"wildcard": {"field": "service", "value": "auth-*"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 2);
+
+    // Shorthand form: wildcard "*-service" matches d1 and d4
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"wildcard": {"service": "*-service"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 2);
+
+    // Wildcard "*-api" matches d3 only
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"wildcard": {"field": "service", "value": "*-api"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 1);
+
+    // Wildcard "xyz*" matches nothing
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"wildcard": {"field": "service", "value": "xyz*"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 0);
+
+    // Wildcard "?illing-api" matches billing-api (? = single char)
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"wildcard": {"field": "service", "value": "?illing-api"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 1);
+
+    // Wildcard "?xyz*" matches nothing (? must match exactly one char)
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"wildcard": {"field": "service", "value": "?xyz*"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 0);
+
+    stop_node(&mut child);
+}

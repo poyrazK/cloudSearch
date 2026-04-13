@@ -6,12 +6,13 @@ use cloudsearch_common::{
     FieldType, FlushResponse, HitsMetadata, IndexDocument, IndexMetadata, MappingMode,
     MergeResponse, PrefixQuery, RangeQuery, Result, SearchHit, SearchQuery, SearchRequest,
     SearchResponse, SortOrder, SortSpec, StatsAggregationResult, TermsAggregationResult,
-    TermsBucket, TermsQuery,
+    TermsBucket, TermsQuery, WildcardQuery,
 };
 use cloudsearch_storage::{
     SegmentManifest, SegmentSnapshot, WalManager, WalRecord, read_segment_snapshot,
     write_segment_snapshot,
 };
+use regex::Regex;
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
@@ -652,6 +653,7 @@ impl IndexHandle {
                 .chain(boolean.must_not.iter())
                 .try_for_each(|query| self.validate_query(query)),
             SearchQuery::Prefix(prefix) => self.ensure_scalar_field(&prefix.field, &prefix.field),
+            SearchQuery::Wildcard(wc) => self.ensure_scalar_field(&wc.field, &wc.field),
         }
     }
 
@@ -762,6 +764,7 @@ fn matches_query(document: &IndexDocument, query: &SearchQuery) -> bool {
         SearchQuery::Range(range) => matches_range_query(document, range),
         SearchQuery::Bool(bool_query) => matches_bool_query(document, bool_query),
         SearchQuery::Prefix(prefix) => matches_prefix_query(document, prefix),
+        SearchQuery::Wildcard(wc) => matches_wildcard_query(document, wc),
     }
 }
 
@@ -770,6 +773,29 @@ fn matches_prefix_query(document: &IndexDocument, prefix: &PrefixQuery) -> bool 
         .source
         .get(&prefix.field)
         .is_some_and(|value| value.as_str().is_some_and(|s| s.starts_with(&prefix.value)))
+}
+
+fn matches_wildcard_query(document: &IndexDocument, wildcard: &WildcardQuery) -> bool {
+    let re = match build_wildcard_regex(&wildcard.value) {
+        Some(re) => re,
+        None => return false,
+    };
+    document
+        .source
+        .get(&wildcard.field)
+        .is_some_and(|value| value.as_str().is_some_and(|text| re.is_match(text)))
+}
+
+fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
+    let regex_pattern: String = pattern
+        .chars()
+        .map(|c| match c {
+            '*' => ".*".to_string(),
+            '?' => ".".to_string(),
+            other => regex::escape(&other.to_string()),
+        })
+        .collect();
+    Regex::new(&format!("^{regex_pattern}$")).ok()
 }
 
 fn matches_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> bool {
@@ -1112,7 +1138,7 @@ mod tests {
         BulkOperation, BulkRequest, CreateIndexRequest, DateHistogramAggregationRequest,
         DateHistogramInterval, FieldType, IndexSettings, MappingMode, PrefixQuery, RangeQuery,
         SearchQuery, SearchRequest, SortOrder, SortSpec, StatsAggregationRequest, TermQuery,
-        TermsAggregationRequest, TermsQuery,
+        TermsAggregationRequest, TermsQuery, WildcardQuery,
     };
     use tempfile::TempDir;
     use tokio::sync::Barrier;
@@ -3597,6 +3623,124 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(empty_prefix.hits.total, 3);
+    }
+
+    #[tokio::test]
+    async fn wildcard_queries_match_string_patterns() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"service": "auth-service", "message": "hello"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"service": "auth-worker", "message": "world"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-3".to_string(),
+                source: serde_json::json!({"service": "billing-api", "message": "hi"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-4".to_string(),
+                source: serde_json::json!({"service": "search-service", "message": "test"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+
+        // Wildcard "auth-*" matches doc-1 and doc-2
+        let auth_star = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Wildcard(WildcardQuery {
+                field: "service".to_string(),
+                value: "auth-*".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(auth_star.hits.total, 2);
+
+        // Wildcard "*service" matches doc-1 and doc-4
+        let star_service = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Wildcard(WildcardQuery {
+                field: "service".to_string(),
+                value: "*service".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(star_service.hits.total, 2);
+
+        // Wildcard "*-api" matches doc-3 only
+        let dash_api = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Wildcard(WildcardQuery {
+                field: "service".to_string(),
+                value: "*-api".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(dash_api.hits.total, 1);
+
+        // Wildcard "*-api" with * matches doc-3 only (billing-api)
+        let dash_api_star = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Wildcard(WildcardQuery {
+                field: "service".to_string(),
+                value: "*-api".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(dash_api_star.hits.total, 1);
+
+        // Wildcard "*-service" matches doc-1 and doc-4 (ends with -service)
+        let end_service = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Wildcard(WildcardQuery {
+                field: "service".to_string(),
+                value: "*-service".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(end_service.hits.total, 2);
+
+        // No match for "xyz*"
+        let no_match = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Wildcard(WildcardQuery {
+                field: "service".to_string(),
+                value: "xyz*".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(no_match.hits.total, 0);
+
+        // Case-sensitive: "Auth-*" doesn't match "auth-service"
+        let case_sensitive = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Wildcard(WildcardQuery {
+                field: "service".to_string(),
+                value: "Auth-*".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(case_sensitive.hits.total, 0);
     }
 
     #[tokio::test]
