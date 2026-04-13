@@ -11,7 +11,7 @@ use cloudsearch_common::{
     ErrorResponse, FlushResponse, HealthResponse, IndexDocument, IndexDocumentRequest, MatchQuery,
     MergeResponse, PrefixQuery, RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
     SearchResponse, SortSpec, StatsAggregationResult, TermQuery, TermsAggregationResult,
-    TermsQuery, WildcardQuery,
+    TermsQuery, UpdateSettingsRequest, WildcardQuery,
 };
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use serde_json::Value;
@@ -220,6 +220,7 @@ pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
         .route("/{index}/_merge", post(merge_index))
         .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
         .route("/{index}/_search", put(search_index).post(search_index))
+        .route("/{index}/_settings", put(update_index_settings))
         .layer(TraceLayer::new_for_http())
         .with_state(ApiState::new(registry))
 }
@@ -285,6 +286,25 @@ async fn delete_index(
         StatusCode::OK,
         Json(CompatDeleteIndexResponse { result: "deleted" }),
     ))
+}
+
+async fn update_index_settings(
+    State(state): State<ApiState>,
+    Path(index): Path<String>,
+    Json(request): Json<UpdateSettingsRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
+    let metadata = state
+        .registry
+        .update_index_settings(&index, request)
+        .await?;
+    state.metrics().record_request(
+        "index_settings_update",
+        "PUT",
+        StatusCode::OK,
+        started_at.elapsed().as_secs_f64(),
+    );
+    Ok((StatusCode::OK, Json(metadata)))
 }
 
 async fn index_document(
@@ -1269,6 +1289,7 @@ mod tests {
                                 mapping_mode: Default::default(),
                                 primary_time_field: Some("@timestamp".to_string()),
                                 namespace: None,
+                                retention_secs: None,
                             },
                         })
                         .expect("serialize create request"),
@@ -1336,6 +1357,7 @@ mod tests {
                                 mapping_mode: Default::default(),
                                 primary_time_field: None,
                                 namespace: Some("tenant@invalid".to_string()),
+                                retention_secs: None,
                             },
                         })
                         .expect("serialize create request"),
@@ -1381,6 +1403,7 @@ mod tests {
                                 mapping_mode: Default::default(),
                                 primary_time_field: None,
                                 namespace: Some("".to_string()),
+                                retention_secs: None,
                             },
                         })
                         .expect("serialize"),
@@ -1412,6 +1435,7 @@ mod tests {
                                 mapping_mode: Default::default(),
                                 primary_time_field: None,
                                 namespace: Some("a".repeat(65)),
+                                retention_secs: None,
                             },
                         })
                         .expect("serialize"),
@@ -1443,6 +1467,7 @@ mod tests {
                                 mapping_mode: Default::default(),
                                 primary_time_field: None,
                                 namespace: Some("tenant-abc".to_string()),
+                                retention_secs: None,
                             },
                         })
                         .expect("serialize"),
@@ -3300,6 +3325,7 @@ mod tests {
                                 mapping_mode: cloudsearch_common::MappingMode::Strict,
                                 primary_time_field: None,
                                 namespace: None,
+                                retention_secs: None,
                             },
                         })
                         .expect("serialize create request"),

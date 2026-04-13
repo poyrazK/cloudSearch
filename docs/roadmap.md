@@ -34,6 +34,7 @@ Exit criteria:
 - merge policy and background workers
 - metrics and tracing
 - clearer mapping inference and conflict handling
+- retention / TTL
 
 Exit criteria:
 

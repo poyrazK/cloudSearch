@@ -37,6 +37,7 @@ Current implementation notes:
 
 - `POST /{index}/_doc`
 - `POST /{index}/_bulk`
+- `PUT /{index}/_settings`
 
 ### Expected V1 Semantics
 
@@ -101,7 +102,9 @@ Current implementation notes:
 
 - indexes may define a primary time field
 - time-range queries may prune segments using stored min and max timestamp metadata
-- future retention and rollover features build on the same metadata model
+- retention TTL: documents are automatically evicted after `retention_secs` seconds based on their `primary_time_field` timestamp
+- eviction runs as a background task on a configurable interval
+- documents without a timestamp field are never evicted
 
 ## Deferred Features
 

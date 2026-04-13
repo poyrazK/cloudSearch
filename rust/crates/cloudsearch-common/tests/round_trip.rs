@@ -316,6 +316,7 @@ fn test_index_settings_with_namespace() {
         mapping_mode: MappingMode::Strict,
         primary_time_field: Some("created_at".to_string()),
         namespace: Some("prod".to_string()),
+        retention_secs: None,
     });
 }
 
@@ -326,6 +327,7 @@ fn test_index_settings_namespace_none() {
         mapping_mode: MappingMode::ControlledDynamic,
         primary_time_field: None,
         namespace: None,
+        retention_secs: None,
     });
 }
 
@@ -380,6 +382,7 @@ fn test_create_index_request_with_settings() {
             mapping_mode: MappingMode::Strict,
             primary_time_field: Some("ts".to_string()),
             namespace: Some("test".to_string()),
+            retention_secs: Some(86400),
         },
     });
 }
@@ -870,5 +873,6 @@ fn test_app_config_custom() {
         refresh_interval_secs: 5,
         flush_interval_secs: 60,
         merge_interval_secs: 120,
+        retention_interval_secs: 30,
     });
 }

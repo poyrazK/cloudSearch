@@ -32,6 +32,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "CLOUDSEARCH_MERGE_INTERVAL_SECS",
         config.merge_interval_secs,
     );
+    config.retention_interval_secs = parse_interval_env(
+        "CLOUDSEARCH_RETENTION_INTERVAL_SECS",
+        config.retention_interval_secs,
+    );
     config.normalize_intervals();
 
     let catalog = Arc::new(IndexCatalog::new(config.data_dir.clone()));
@@ -49,6 +53,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_merge_loop(
         registry.clone(),
         Duration::from_secs(config.merge_interval_secs),
+    );
+    spawn_retention_loop(
+        registry.clone(),
+        Duration::from_secs(config.retention_interval_secs),
     );
 
     let app = router_with_registry(registry);
@@ -121,6 +129,28 @@ fn spawn_merge_loop(registry: Arc<IndexRegistry>, interval: Duration) {
                     .await;
                     if let Err(error) = result {
                         tracing::warn!(index = %index_name, "background merge failed: {}", error);
+                    }
+                });
+            }
+        }
+    });
+}
+
+fn spawn_retention_loop(registry: Arc<IndexRegistry>, interval: Duration) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let handles = registry.cached_handles_with_names().await;
+            for (index_name, handle) in handles {
+                let handle = handle.clone();
+                tokio::spawn(async move {
+                    let result = async {
+                        let mut guard = handle.lock().await;
+                        guard.evict_expired_documents().await
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        tracing::warn!(index = %index_name, "background retention eviction failed: {}", error);
                     }
                 });
             }
