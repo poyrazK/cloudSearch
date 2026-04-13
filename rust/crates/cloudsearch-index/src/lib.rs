@@ -904,13 +904,14 @@ fn score_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> Option<
     }
 
     // Score = average of must + matching should scores.
-    let (sum, count) = must_scores
-        .iter()
-        .chain(should_scores.iter())
-        .fold((0.0f32, 0usize), |(sum, count), s| match s {
-            Some(s) => (sum + s, count + 1),
-            None => (sum, count),
-        });
+    let (sum, count) =
+        must_scores
+            .iter()
+            .chain(should_scores.iter())
+            .fold((0.0f32, 0usize), |(sum, count), s| match s {
+                Some(s) => (sum + s, count + 1),
+                None => (sum, count),
+            });
 
     Some(if count > 0 { sum / count as f32 } else { 1.0 })
 }
