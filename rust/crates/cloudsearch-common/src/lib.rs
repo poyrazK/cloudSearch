@@ -292,6 +292,7 @@ pub struct HitsMetadata {
 pub struct SearchHit {
     pub id: String,
     pub source: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f32>,
 }
 

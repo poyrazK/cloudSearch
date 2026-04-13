@@ -862,38 +862,54 @@ fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
 }
 
 fn score_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> Option<f32> {
-    let must_ok = bool_query
+    // Evaluate each clause group once and store the scores.
+    let must_scores: Vec<Option<f32>> = bool_query
         .must
         .iter()
-        .all(|q| score_query(document, q).is_some());
-    let filter_ok = bool_query
+        .map(|q| score_query(document, q))
+        .collect();
+    let filter_scores: Vec<Option<f32>> = bool_query
         .filter
         .iter()
-        .all(|q| score_query(document, q).is_some());
-    let must_not_ok = bool_query
+        .map(|q| score_query(document, q))
+        .collect();
+    let must_not_scores: Vec<Option<f32>> = bool_query
         .must_not
         .iter()
-        .all(|q| score_query(document, q).is_none());
+        .map(|q| score_query(document, q))
+        .collect();
+    let should_scores: Vec<Option<f32>> = bool_query
+        .should
+        .iter()
+        .map(|q| score_query(document, q))
+        .collect();
 
+    // All must clauses must match.
+    if must_scores.iter().any(|s| s.is_none()) {
+        return None;
+    }
+    // All filter clauses must match (not scored).
+    if filter_scores.iter().any(|s| s.is_none()) {
+        return None;
+    }
+    // No must_not clause may match.
+    if must_not_scores.iter().any(|s| s.is_some()) {
+        return None;
+    }
+    // When there are no must/filter clauses, at least one should must match.
     let should_required =
         bool_query.must.is_empty() && bool_query.filter.is_empty() && !bool_query.should.is_empty();
-    let should_ok = !should_required
-        || bool_query
-            .should
-            .iter()
-            .any(|q| score_query(document, q).is_some());
-
-    if !(must_ok && filter_ok && must_not_ok && should_ok) {
+    if should_required && !should_scores.iter().any(|s| s.is_some()) {
         return None;
     }
 
-    let scoring_queries = bool_query.must.iter().chain(bool_query.should.iter());
-    let (sum, count) =
-        scoring_queries.fold((0.0f32, 0usize), |(sum, count), q| {
-            match score_query(document, q) {
-                Some(s) => (sum + s, count + 1),
-                None => (sum, count),
-            }
+    // Score = average of must + matching should scores.
+    let (sum, count) = must_scores
+        .iter()
+        .chain(should_scores.iter())
+        .fold((0.0f32, 0usize), |(sum, count), s| match s {
+            Some(s) => (sum + s, count + 1),
+            None => (sum, count),
         });
 
     Some(if count > 0 { sum / count as f32 } else { 1.0 })
@@ -3870,9 +3886,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(hello.hits.total, 2);
-        // doc-2 should score higher (more "hello" occurrences conceptually, but here doc-2 has 2 tokens matching)
-        // Actually "hello there world" tokenizes to ["hello", "there", "world"] and query "hello" has 1 token
-        // So both match 1/1 = 1.0. Score tie goes to doc-1 (lower id)
+        // query "hello" has 1 token; both docs match 1/1 = 1.0, so the tie-breaker (alphabetical id) applies
         assert_eq!(hello.hits.hits[0].id, "doc-1");
         assert_eq!(hello.hits.hits[0].score, Some(1.0));
 
