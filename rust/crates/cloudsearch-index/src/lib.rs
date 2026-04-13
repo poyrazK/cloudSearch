@@ -3,7 +3,7 @@ use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkOperation,
     BulkRequest, BulkResponse, CloudSearchError, CreateIndexRequest,
     DateHistogramAggregationResult, DateHistogramBucket, DateHistogramInterval, FieldMapping,
-    FieldType, FlushResponse, HitsMetadata, IndexDocument, IndexMetadata, MappingMode,
+    FieldType, FlushResponse, HitsMetadata, IndexDocument, IndexMetadata, MappingMode, MatchQuery,
     MergeResponse, PrefixQuery, RangeQuery, Result, SearchHit, SearchQuery, SearchRequest,
     SearchResponse, SortOrder, SortSpec, StatsAggregationResult, TermsAggregationResult,
     TermsBucket, TermsQuery, WildcardQuery,
@@ -368,31 +368,54 @@ impl IndexHandle {
 
     pub fn search(&self, request: &SearchRequest) -> SearchResponse {
         let query = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll);
-        let matching_documents = self
+
+        let mut scored: Vec<(f32, &IndexDocument)> = self
             .searchable_documents
             .values()
-            .filter(|document| matches_query(document, query))
-            .cloned()
-            .collect::<Vec<_>>();
+            .filter_map(|doc| score_query(doc, query).map(|s| (s, doc)))
+            .collect();
 
-        let mut hits = matching_documents
-            .iter()
-            .map(|document| SearchHit {
-                id: document.id.clone(),
-                source: document.source.clone(),
-            })
-            .collect::<Vec<_>>();
+        let total = scored.len();
 
-        let total = hits.len();
+        let matching_documents: Vec<IndexDocument> =
+            scored.iter().map(|(_, d)| (*d).clone()).collect();
         let aggregations = compute_aggregations(&matching_documents, request.aggs.as_ref());
 
         if let Some(sort) = &request.sort {
-            hits.sort_by(|left, right| compare_hits(left, right, sort));
+            scored.sort_by(|(_, l), (_, r)| {
+                let lh = SearchHit {
+                    id: l.id.clone(),
+                    source: l.source.clone(),
+                    score: None,
+                };
+                let rh = SearchHit {
+                    id: r.id.clone(),
+                    source: r.source.clone(),
+                    score: None,
+                };
+                compare_hits(&lh, &rh, sort)
+            });
+        } else {
+            scored.sort_by(|(s1, d1), (s2, d2)| {
+                s2.partial_cmp(s1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| d1.id.cmp(&d2.id))
+            });
         }
 
         let from = request.from.unwrap_or(0);
         let size = request.size.unwrap_or(total);
-        let hits = hits.into_iter().skip(from).take(size).collect::<Vec<_>>();
+
+        let hits = scored
+            .into_iter()
+            .skip(from)
+            .take(size)
+            .map(|(score, doc)| SearchHit {
+                id: doc.id.clone(),
+                source: doc.source.clone(),
+                score: Some(score),
+            })
+            .collect::<Vec<_>>();
 
         SearchResponse {
             hits: HitsMetadata { total, hits },
@@ -654,6 +677,7 @@ impl IndexHandle {
                 .try_for_each(|query| self.validate_query(query)),
             SearchQuery::Prefix(prefix) => self.ensure_scalar_field(&prefix.field, &prefix.field),
             SearchQuery::Wildcard(wc) => self.ensure_scalar_field(&wc.field, &wc.field),
+            SearchQuery::Match(mq) => self.ensure_text_field(&mq.field, &mq.field),
         }
     }
 
@@ -668,6 +692,20 @@ impl IndexHandle {
         }
 
         Ok(())
+    }
+
+    fn ensure_text_field(&self, field: &str, context: &str) -> Result<()> {
+        if let Some(mapping) = self.metadata.mappings.get(field) {
+            match mapping.field_type {
+                FieldType::Keyword => Ok(()),
+                _ => Err(CloudSearchError::InvalidSearchRequest(format!(
+                    "field '{}' does not support match queries in '{}'",
+                    field, context
+                ))),
+            }
+        } else {
+            Ok(())
+        }
     }
 
     fn ensure_numeric_field(&self, field: &str, context: &str) -> Result<()> {
@@ -753,19 +791,44 @@ fn infer_field_type(field: &str, value: &serde_json::Value) -> Result<Option<Fie
     })
 }
 
-fn matches_query(document: &IndexDocument, query: &SearchQuery) -> bool {
+fn score_query(document: &IndexDocument, query: &SearchQuery) -> Option<f32> {
     match query {
-        SearchQuery::MatchAll => true,
+        SearchQuery::MatchAll => Some(1.0),
         SearchQuery::Term(term) => document
             .source
             .get(&term.field)
-            .is_some_and(|value| value == &term.value),
-        SearchQuery::Terms(terms) => matches_terms_query(document, terms),
-        SearchQuery::Range(range) => matches_range_query(document, range),
-        SearchQuery::Bool(bool_query) => matches_bool_query(document, bool_query),
-        SearchQuery::Prefix(prefix) => matches_prefix_query(document, prefix),
-        SearchQuery::Wildcard(wc) => matches_wildcard_query(document, wc),
+            .filter(|value| **value == term.value)
+            .map(|_| 1.0),
+        SearchQuery::Terms(terms) => matches_terms_query(document, terms).then_some(1.0),
+        SearchQuery::Range(range) => matches_range_query(document, range).then_some(1.0),
+        SearchQuery::Bool(bool_query) => score_bool_query(document, bool_query),
+        SearchQuery::Prefix(prefix) => matches_prefix_query(document, prefix).then_some(1.0),
+        SearchQuery::Wildcard(wc) => matches_wildcard_query(document, wc).then_some(1.0),
+        SearchQuery::Match(mq) => score_match_query(document, mq),
     }
+}
+
+fn score_match_query(document: &IndexDocument, query: &MatchQuery) -> Option<f32> {
+    let field_str = document.source.get(&query.field)?.as_str()?;
+    let field_tokens = tokenize(field_str);
+    let query_tokens = tokenize(&query.value);
+    if query_tokens.is_empty() {
+        return None;
+    }
+    let field_set: std::collections::HashSet<&String> = field_tokens.iter().collect();
+    let matched = query_tokens
+        .iter()
+        .filter(|t| field_set.contains(t))
+        .count();
+    if matched > 0 {
+        Some(matched as f32 / query_tokens.len() as f32)
+    } else {
+        None
+    }
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    text.split_whitespace().map(|t| t.to_lowercase()).collect()
 }
 
 fn matches_prefix_query(document: &IndexDocument, prefix: &PrefixQuery) -> bool {
@@ -798,27 +861,59 @@ fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
     Regex::new(&format!("^{regex_pattern}$")).ok()
 }
 
-fn matches_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> bool {
-    let must_matches = bool_query
+fn score_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> Option<f32> {
+    // Evaluate each clause group once and store the scores.
+    let must_scores: Vec<Option<f32>> = bool_query
         .must
         .iter()
-        .all(|query| matches_query(document, query));
-    let filter_matches = bool_query
+        .map(|q| score_query(document, q))
+        .collect();
+    let filter_scores: Vec<Option<f32>> = bool_query
         .filter
         .iter()
-        .all(|query| matches_query(document, query));
-    let must_not_matches = bool_query
+        .map(|q| score_query(document, q))
+        .collect();
+    let must_not_scores: Vec<Option<f32>> = bool_query
         .must_not
         .iter()
-        .all(|query| !matches_query(document, query));
-    let should_matches = bool_query
+        .map(|q| score_query(document, q))
+        .collect();
+    let should_scores: Vec<Option<f32>> = bool_query
         .should
         .iter()
-        .any(|query| matches_query(document, query));
+        .map(|q| score_query(document, q))
+        .collect();
+
+    // All must clauses must match.
+    if must_scores.iter().any(|s| s.is_none()) {
+        return None;
+    }
+    // All filter clauses must match (not scored).
+    if filter_scores.iter().any(|s| s.is_none()) {
+        return None;
+    }
+    // No must_not clause may match.
+    if must_not_scores.iter().any(|s| s.is_some()) {
+        return None;
+    }
+    // When there are no must/filter clauses, at least one should must match.
     let should_required =
         bool_query.must.is_empty() && bool_query.filter.is_empty() && !bool_query.should.is_empty();
+    if should_required && !should_scores.iter().any(|s| s.is_some()) {
+        return None;
+    }
 
-    must_matches && filter_matches && must_not_matches && (!should_required || should_matches)
+    // Score = average of must + matching should scores.
+    let (sum, count) =
+        must_scores
+            .iter()
+            .chain(should_scores.iter())
+            .fold((0.0f32, 0usize), |(sum, count), s| match s {
+                Some(s) => (sum + s, count + 1),
+                None => (sum, count),
+            });
+
+    Some(if count > 0 { sum / count as f32 } else { 1.0 })
 }
 
 fn matches_terms_query(document: &IndexDocument, terms: &TermsQuery) -> bool {
@@ -1136,9 +1231,9 @@ mod tests {
     use cloudsearch_common::{
         AggregationRequest, AggregationResult, BoolQuery, BulkDeleteOperation, BulkIndexOperation,
         BulkOperation, BulkRequest, CreateIndexRequest, DateHistogramAggregationRequest,
-        DateHistogramInterval, FieldType, IndexSettings, MappingMode, PrefixQuery, RangeQuery,
-        SearchQuery, SearchRequest, SortOrder, SortSpec, StatsAggregationRequest, TermQuery,
-        TermsAggregationRequest, TermsQuery, WildcardQuery,
+        DateHistogramInterval, FieldType, IndexSettings, MappingMode, MatchQuery, PrefixQuery,
+        RangeQuery, SearchQuery, SearchRequest, SortOrder, SortSpec, StatsAggregationRequest,
+        TermQuery, TermsAggregationRequest, TermsQuery, WildcardQuery,
     };
     use tempfile::TempDir;
     use tokio::sync::Barrier;
@@ -3741,6 +3836,95 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(case_sensitive.hits.total, 0);
+    }
+
+    #[tokio::test]
+    async fn match_queries_find_tokens_in_text_fields() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: Default::default(),
+                },
+            )
+            .await
+            .expect("create index");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"message": "hello world"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"message": "hello there world"}),
+            })
+            .await
+            .expect("index doc");
+        handle
+            .index_document(IndexDocument {
+                id: "doc-3".to_string(),
+                source: serde_json::json!({"message": "foo bar"}),
+            })
+            .await
+            .expect("index doc");
+        handle.refresh().await.expect("refresh");
+
+        // Match "hello" finds doc-1 and doc-2
+        let hello = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Match(MatchQuery {
+                field: "message".to_string(),
+                value: "hello".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(hello.hits.total, 2);
+        // query "hello" has 1 token; both docs match 1/1 = 1.0, so the tie-breaker (alphabetical id) applies
+        assert_eq!(hello.hits.hits[0].id, "doc-1");
+        assert_eq!(hello.hits.hits[0].score, Some(1.0));
+
+        // Match "hello world" - both docs match 2/2 tokens = 1.0 (tie goes to lower doc id)
+        let both = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Match(MatchQuery {
+                field: "message".to_string(),
+                value: "hello world".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(both.hits.total, 2);
+        // Both match 2/2 = 1.0, tie-breaker is alphabetical: doc-1 < doc-2
+        assert_eq!(both.hits.hits[0].id, "doc-1");
+        assert_eq!(both.hits.hits[0].score, Some(1.0));
+        assert_eq!(both.hits.hits[1].id, "doc-2");
+        assert_eq!(both.hits.hits[1].score, Some(1.0));
+
+        // Match "xyz" finds nothing
+        let no_match = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Match(MatchQuery {
+                field: "message".to_string(),
+                value: "xyz".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(no_match.hits.total, 0);
+
+        // Match is case-insensitive
+        let case_insensitive = handle.search(&SearchRequest {
+            query: Some(SearchQuery::Match(MatchQuery {
+                field: "message".to_string(),
+                value: "HELLO".to_string(),
+            })),
+            ..Default::default()
+        });
+        assert_eq!(case_insensitive.hits.total, 2);
     }
 
     #[tokio::test]

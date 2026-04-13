@@ -429,3 +429,83 @@ async fn rejects_wildcard_query_non_string_shorthand() {
         .expect("response");
     assert_eq!(response.status(), 400);
 }
+
+#[tokio::test]
+async fn accepts_match_query_explicit_form() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"query":{"match":{"field":"message","value":"hello world"}}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
+async fn accepts_match_query_shorthand_form() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"query":{"match":{"message":"hello world"}}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
+async fn rejects_match_query_non_string_value() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":{"match":{"message":42}}}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn rejects_match_query_missing_value_in_explicit_form() {
+    let app = make_app().await;
+    setup_index(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":{"match":{"field":"message"}}}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), 400);
+}

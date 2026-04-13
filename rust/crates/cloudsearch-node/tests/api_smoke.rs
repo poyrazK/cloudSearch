@@ -1204,3 +1204,93 @@ async fn wildcard_query_matches_string_patterns() {
 
     stop_node(&mut child);
 }
+
+#[tokio::test]
+async fn match_query_finds_text_in_documents() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    for (id, msg) in [
+        ("d1", "hello world"),
+        ("d2", "hello there world"),
+        ("d3", "foo bar"),
+    ] {
+        client
+            .put(format!("{base_url}/test/_doc"))
+            .json(&serde_json::json!({"id": id, "source": {"message": msg}}))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    client
+        .post(format!("{base_url}/test/_refresh"))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    // Match "hello" finds d1 and d2
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"match": {"field": "message", "value": "hello"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 2);
+
+    // Shorthand form: match "world"
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"match": {"message": "world"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 2);
+
+    // Scores are exposed
+    assert!(body["hits"]["hits"][0]["_score"].is_number());
+
+    // Match "xyz" finds nothing
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": {"match": {"field": "message", "value": "xyz"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["hits"]["total"]["value"], 0);
+
+    stop_node(&mut child);
+}

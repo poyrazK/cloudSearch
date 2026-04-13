@@ -79,7 +79,14 @@ Suggested fields:
 - target field
 - raw query text
 - operator mode later if needed
-- analyzer override later if allowed
+- analyzer override later if needed
+
+Current implementation:
+
+- `MatchQuery` uses whitespace tokenization with case-insensitive matching
+- scoring is based on term recall: `matched_tokens / query_tokens`
+- empty query returns no matches
+- works on string fields; non-string fields return no matches
 
 ### `TermQuery`
 

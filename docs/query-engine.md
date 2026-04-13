@@ -65,7 +65,14 @@ The AST should be independent from HTTP and JSON details.
 
 - full-text query over analyzed text fields
 - uses field analyzer rules from mapping metadata
-- scoring can start simple, likely BM25-like
+
+Current implementation notes:
+
+- tokenizes query and field values using whitespace splitting with lowercase normalization
+- scoring uses term recall ratio: `matched_query_tokens / total_query_tokens`
+- match requires at least one query token to be present in the field tokens
+- case-insensitive matching via lowercase normalization
+- operates on string values only; non-string fields return no matches
 
 ### Term And Terms
 

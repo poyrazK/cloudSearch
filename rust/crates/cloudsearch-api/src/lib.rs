@@ -8,7 +8,7 @@ use axum::{
 use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkRequest,
     BulkResponse, CloudSearchError, CreateIndexRequest, DateHistogramAggregationResult,
-    ErrorResponse, FlushResponse, HealthResponse, IndexDocument, IndexDocumentRequest,
+    ErrorResponse, FlushResponse, HealthResponse, IndexDocument, IndexDocumentRequest, MatchQuery,
     MergeResponse, PrefixQuery, RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
     SearchResponse, SortSpec, StatsAggregationResult, TermQuery, TermsAggregationResult,
     TermsQuery, WildcardQuery,
@@ -60,6 +60,8 @@ struct CompatTotalHits {
 struct CompatSearchHit {
     #[serde(rename = "_id")]
     id: String,
+    #[serde(rename = "_score", skip_serializing_if = "Option::is_none")]
+    score: Option<f32>,
     #[serde(rename = "_source")]
     source: Value,
 }
@@ -472,6 +474,7 @@ fn parse_query(value: &Value) -> Result<SearchQuery, ApiError> {
         "bool" => Ok(SearchQuery::Bool(parse_bool_query(body)?)),
         "prefix" => Ok(SearchQuery::Prefix(parse_prefix_query(body)?)),
         "wildcard" => Ok(SearchQuery::Wildcard(parse_wildcard_query(body)?)),
+        "match" => Ok(SearchQuery::Match(parse_match_query(body)?)),
         other => Err(ApiError(CloudSearchError::InvalidSearchRequest(format!(
             "unsupported query clause '{other}'"
         )))),
@@ -719,6 +722,61 @@ fn parse_wildcard_query(value: &Value) -> Result<WildcardQuery, ApiError> {
     })
 }
 
+fn parse_match_query(value: &Value) -> Result<MatchQuery, ApiError> {
+    let object = value.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "match query must be a JSON object".to_string(),
+        ))
+    })?;
+
+    if object.contains_key("field") && object.contains_key("value") {
+        if object.len() != 2 {
+            return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+                "match query explicit form must contain only 'field' and 'value'".to_string(),
+            )));
+        }
+        let field = object.get("field").and_then(Value::as_str).ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "match query requires string 'field'".to_string(),
+            ))
+        })?;
+        let value = object.get("value").and_then(Value::as_str).ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "match query requires string 'value'".to_string(),
+            ))
+        })?;
+        return Ok(MatchQuery {
+            field: field.to_string(),
+            value: value.to_string(),
+        });
+    }
+
+    let has_field = object.contains_key("field");
+    let has_value = object.contains_key("value");
+    if has_field != has_value {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "match query explicit form requires both 'field' and 'value'".to_string(),
+        )));
+    }
+
+    if object.len() != 1 {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "match query must contain exactly one field".to_string(),
+        )));
+    }
+
+    let (field, raw_value) = object.iter().next().expect("single match field");
+    let value = raw_value.as_str().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "match query value must be a string".to_string(),
+        ))
+    })?;
+    Ok(MatchQuery {
+        field: field.clone(),
+        value: value.to_string(),
+    })
+}
+
 fn parse_bool_query(value: &Value) -> Result<BoolQuery, ApiError> {
     let object = value.as_object().ok_or_else(|| {
         ApiError(CloudSearchError::InvalidSearchRequest(
@@ -851,6 +909,7 @@ fn to_compat_search_response(response: SearchResponse) -> CompatSearchResponse {
 fn to_compat_search_hit(hit: SearchHit) -> CompatSearchHit {
     CompatSearchHit {
         id: hit.id,
+        score: hit.score,
         source: hit.source,
     }
 }
@@ -3577,6 +3636,7 @@ mod tests {
                     "hits": [
                         {
                             "_id": "doc-3",
+                            "_score": 1.0,
                             "_source": {
                                 "service": "auth",
                                 "latency": 20
