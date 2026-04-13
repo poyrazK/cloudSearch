@@ -314,6 +314,25 @@ impl IndexRegistry {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
+
+    /// Returns per-index metrics for all cached indexes.
+    pub async fn index_metrics(&self) -> Vec<(String, IndexMetrics)> {
+        let handles = self.handles.lock().await;
+        let mut result = Vec::new();
+        for (name, handle) in handles.iter() {
+            let metrics = handle.lock().await.metrics();
+            result.push((name.clone(), metrics));
+        }
+        result
+    }
+}
+
+/// Per-index resource metrics.
+#[derive(Debug, Clone)]
+pub struct IndexMetrics {
+    pub document_count: usize,
+    pub pending_operations: usize,
+    pub last_sequence_number: u64,
 }
 
 #[derive(Debug)]
@@ -373,6 +392,15 @@ impl IndexHandle {
     /// Returns true if this index has a retention policy configured.
     pub fn has_retention_policy(&self) -> bool {
         self.retention_secs().is_some() && self.primary_time_field().is_some()
+    }
+
+    /// Returns per-index resource metrics.
+    pub fn metrics(&self) -> IndexMetrics {
+        IndexMetrics {
+            document_count: self.searchable_documents.len(),
+            pending_operations: self.pending_operations.len(),
+            last_sequence_number: self.last_sequence_number,
+        }
     }
 
     /// Extracts the timestamp from a document's primary time field.

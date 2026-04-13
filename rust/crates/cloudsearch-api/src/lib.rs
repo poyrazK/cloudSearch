@@ -128,7 +128,11 @@ impl MetricsState {
             .or_default() += 1;
     }
 
-    fn render(&self, open_indexes: usize) -> String {
+    fn render(
+        &self,
+        open_indexes: usize,
+        index_metrics: &[(String, cloudsearch_index::IndexMetrics)],
+    ) -> String {
         let mut lines = Vec::new();
 
         for ((route, method, status), value) in &self.request_counts {
@@ -176,6 +180,21 @@ impl MetricsState {
             self.delete_index_total
         ));
         lines.push(format!("cloudsearch_open_indexes {}", open_indexes));
+
+        for (index_name, metrics) in index_metrics {
+            lines.push(format!(
+                "cloudsearch_index_documents_total{{index=\"{}\"}} {}",
+                index_name, metrics.document_count
+            ));
+            lines.push(format!(
+                "cloudsearch_index_pending_ops{{index=\"{}\"}} {}",
+                index_name, metrics.pending_operations
+            ));
+            lines.push(format!(
+                "cloudsearch_index_last_sequence_number{{index=\"{}\"}} {}",
+                index_name, metrics.last_sequence_number
+            ));
+        }
 
         lines.sort();
         lines.join("\n") + "\n"
@@ -231,7 +250,8 @@ async fn health() -> Json<HealthResponse> {
 
 async fn metrics(State(state): State<ApiState>) -> String {
     let open_indexes = state.registry.cached_handle_count().await;
-    state.metrics().render(open_indexes)
+    let index_metrics = state.registry.index_metrics().await;
+    state.metrics().render(open_indexes, &index_metrics)
 }
 
 async fn create_index(
@@ -1081,7 +1101,8 @@ impl IntoResponse for ApiError {
             | CloudSearchError::UnknownFieldRejected(_)
             | CloudSearchError::UnsupportedArrayField(_)
             | CloudSearchError::MappingLimitExceeded(_)
-            | CloudSearchError::InvalidNamespace(_) => StatusCode::BAD_REQUEST,
+            | CloudSearchError::InvalidNamespace(_)
+            | CloudSearchError::ResourceLimitExceeded(_) => StatusCode::BAD_REQUEST,
             CloudSearchError::InvalidWalRecord(_)
             | CloudSearchError::WalChecksumMismatch
             | CloudSearchError::Io(_)
