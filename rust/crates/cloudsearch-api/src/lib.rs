@@ -10,9 +10,9 @@ use cloudsearch_common::{
     BulkResponse, CloudSearchError, CreateIndexRequest, CreateSnapshotResponse,
     DateHistogramAggregationResult, ErrorResponse, FlushResponse, HealthResponse, IndexDocument,
     IndexDocumentRequest, ListSnapshotsResponse, MatchQuery, MergeResponse, PrefixQuery,
-    RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
-    SearchResponse, SortSpec, StatsAggregationResult, TermQuery,
-    TermsAggregationResult, TermsQuery, UpdateSettingsRequest, WildcardQuery,
+    RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
+    StatsAggregationResult, TermQuery, TermsAggregationResult, TermsQuery, UpdateSettingsRequest,
+    WildcardQuery,
 };
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use serde_json::Value;
@@ -1195,7 +1195,10 @@ async fn restore_snapshot(
         StatusCode::OK,
         started_at.elapsed().as_secs_f64(),
     );
-    Ok((StatusCode::OK, Json::<cloudsearch_common::RestoreResponse>(response)))
+    Ok((
+        StatusCode::OK,
+        Json::<cloudsearch_common::RestoreResponse>(response),
+    ))
 }
 
 #[derive(Debug)]

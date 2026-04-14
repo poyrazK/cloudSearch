@@ -806,8 +806,7 @@ impl IndexHandle {
         name: &str,
     ) -> Result<cloudsearch_common::CreateSnapshotResponse> {
         // Apply pending operations to get the true current state
-        let mut snapshot_docs: BTreeMap<String, IndexDocument> =
-            self.searchable_documents.clone();
+        let mut snapshot_docs: BTreeMap<String, IndexDocument> = self.searchable_documents.clone();
         for (id, op) in &self.pending_operations {
             match op {
                 PendingOperation::Upsert(doc) => {
@@ -862,7 +861,10 @@ impl IndexHandle {
     /// List all named snapshots for this index.
     pub async fn list_snapshots(&self) -> Result<Vec<cloudsearch_common::SnapshotMetadata>> {
         let snapshots = list_snapshots(&self.segments_dir).await?;
-        Ok(snapshots.into_iter().map(Self::map_to_common_snapshot_meta).collect())
+        Ok(snapshots
+            .into_iter()
+            .map(Self::map_to_common_snapshot_meta)
+            .collect())
     }
 
     /// Get metadata for a specific named snapshot.
@@ -882,18 +884,17 @@ impl IndexHandle {
     }
 
     /// Restore the index from a named snapshot.
-    pub async fn restore_snapshot(&mut self, name: &str) -> Result<cloudsearch_common::RestoreResponse> {
+    pub async fn restore_snapshot(
+        &mut self,
+        name: &str,
+    ) -> Result<cloudsearch_common::RestoreResponse> {
         let snapshot = read_named_snapshot(&self.segments_dir, name)
             .await?
-            .ok_or_else(|| {
-                CloudSearchError::SnapshotNotFound(name.to_string())
-            })?;
+            .ok_or_else(|| CloudSearchError::SnapshotNotFound(name.to_string()))?;
 
         let metadata = read_snapshot_metadata(&self.segments_dir, name)
             .await?
-            .ok_or_else(|| {
-                CloudSearchError::SnapshotNotFound(name.to_string())
-            })?;
+            .ok_or_else(|| CloudSearchError::SnapshotNotFound(name.to_string()))?;
 
         // Validate checksum
         let data_bytes = serde_json::to_vec(&snapshot)?;
