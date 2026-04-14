@@ -805,9 +805,23 @@ impl IndexHandle {
         &self,
         name: &str,
     ) -> Result<cloudsearch_common::CreateSnapshotResponse> {
+        // Apply pending operations to get the true current state
+        let mut snapshot_docs: BTreeMap<String, IndexDocument> =
+            self.searchable_documents.clone();
+        for (id, op) in &self.pending_operations {
+            match op {
+                PendingOperation::Upsert(doc) => {
+                    snapshot_docs.insert(id.clone(), doc.clone());
+                }
+                PendingOperation::Delete => {
+                    snapshot_docs.remove(id);
+                }
+            }
+        }
+
         let snapshot = SegmentSnapshot {
             last_sequence_number: self.last_sequence_number,
-            documents: self.searchable_documents.values().cloned().collect(),
+            documents: snapshot_docs.into_values().collect(),
         };
 
         let data_bytes = serde_json::to_vec(&snapshot)?;
@@ -833,19 +847,22 @@ impl IndexHandle {
         })
     }
 
+    fn map_to_common_snapshot_meta(
+        s: cloudsearch_storage::SnapshotMetadata,
+    ) -> cloudsearch_common::SnapshotMetadata {
+        cloudsearch_common::SnapshotMetadata {
+            name: s.name,
+            created_at: s.created_at,
+            last_sequence_number: s.last_sequence_number,
+            document_count: s.document_count,
+            checksum: s.checksum,
+        }
+    }
+
     /// List all named snapshots for this index.
     pub async fn list_snapshots(&self) -> Result<Vec<cloudsearch_common::SnapshotMetadata>> {
         let snapshots = list_snapshots(&self.segments_dir).await?;
-        Ok(snapshots
-            .into_iter()
-            .map(|s| cloudsearch_common::SnapshotMetadata {
-                name: s.name,
-                created_at: s.created_at,
-                last_sequence_number: s.last_sequence_number,
-                document_count: s.document_count,
-                checksum: s.checksum,
-            })
-            .collect())
+        Ok(snapshots.into_iter().map(Self::map_to_common_snapshot_meta).collect())
     }
 
     /// Get metadata for a specific named snapshot.
@@ -854,13 +871,7 @@ impl IndexHandle {
         name: &str,
     ) -> Result<Option<cloudsearch_common::SnapshotMetadata>> {
         let meta = read_snapshot_metadata(&self.segments_dir, name).await?;
-        Ok(meta.map(|s| cloudsearch_common::SnapshotMetadata {
-            name: s.name,
-            created_at: s.created_at,
-            last_sequence_number: s.last_sequence_number,
-            document_count: s.document_count,
-            checksum: s.checksum,
-        }))
+        Ok(meta.map(Self::map_to_common_snapshot_meta))
     }
 
     /// Delete a named snapshot.
@@ -871,20 +882,17 @@ impl IndexHandle {
     }
 
     /// Restore the index from a named snapshot.
-    pub async fn restore_snapshot(&mut self, name: &str) -> Result<FlushResponse> {
+    pub async fn restore_snapshot(&mut self, name: &str) -> Result<cloudsearch_common::RestoreResponse> {
         let snapshot = read_named_snapshot(&self.segments_dir, name)
             .await?
             .ok_or_else(|| {
-                CloudSearchError::InvalidWalRecord(format!("snapshot '{}' not found", name))
+                CloudSearchError::SnapshotNotFound(name.to_string())
             })?;
 
         let metadata = read_snapshot_metadata(&self.segments_dir, name)
             .await?
             .ok_or_else(|| {
-                CloudSearchError::InvalidWalRecord(format!(
-                    "snapshot metadata '{}' not found",
-                    name
-                ))
+                CloudSearchError::SnapshotNotFound(name.to_string())
             })?;
 
         // Validate checksum
@@ -894,13 +902,25 @@ impl IndexHandle {
             return Err(CloudSearchError::WalChecksumMismatch);
         }
 
-        // Restore searchable documents
+        // Restore searchable documents and clear pending operations
         self.searchable_documents = snapshot
             .documents
             .iter()
             .map(|doc| (doc.id.clone(), doc.clone()))
             .collect();
+        self.pending_operations.clear();
         self.last_sequence_number = metadata.last_sequence_number;
+
+        // Rebuild document_timestamps from restored documents
+        self.document_timestamps.clear();
+        if let Some(retention) = self.retention_secs() {
+            for doc in snapshot.documents.iter() {
+                if let Some(ts) = self.extract_document_timestamp(doc) {
+                    let expiry = ts + chrono::Duration::seconds(retention as i64);
+                    self.document_timestamps.insert(doc.id.clone(), expiry);
+                }
+            }
+        }
 
         // Write as the new current segment
         write_segment_snapshot(&self.segments_dir, &snapshot).await?;
@@ -915,9 +935,9 @@ impl IndexHandle {
             "snapshot restored"
         );
 
-        Ok(FlushResponse {
-            result: "restored",
-            flushed_documents: snapshot.documents.len(),
+        Ok(cloudsearch_common::RestoreResponse {
+            result: "restored".to_string(),
+            restored_documents: snapshot.documents.len(),
             sequence_number: snapshot.last_sequence_number,
         })
     }
