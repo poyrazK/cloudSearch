@@ -27,6 +27,7 @@ async fn create_index(app: &axum::Router) {
                 .body(Body::from(
                     serde_json::to_vec(&CreateIndexRequest {
                         settings: Default::default(),
+                        ..Default::default()
                     })
                     .expect("serialize"),
                 ))

@@ -106,6 +106,8 @@ pub enum FieldType {
 pub struct CreateIndexRequest {
     #[serde(default)]
     pub settings: IndexSettings,
+    #[serde(default)]
+    pub mappings: Option<BTreeMap<String, FieldMapping>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -28,6 +28,7 @@ async fn get_document_returns_none_for_pending_delete() {
             "test",
             CreateIndexRequest {
                 settings: Default::default(),
+                ..Default::default()
             },
         )
         .await
@@ -55,6 +56,7 @@ async fn apply_merge_plan_skips_when_no_on_disk_segment() {
             "test",
             CreateIndexRequest {
                 settings: Default::default(),
+                ..Default::default()
             },
         )
         .await
@@ -86,6 +88,7 @@ async fn validate_search_request_rejects_nested_bool_with_object_field() {
             "test",
             CreateIndexRequest {
                 settings: Default::default(),
+                ..Default::default()
             },
         )
         .await

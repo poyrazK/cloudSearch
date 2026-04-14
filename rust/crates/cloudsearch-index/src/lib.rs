@@ -90,7 +90,12 @@ impl IndexCatalog {
         fs::create_dir_all(index_dir.join("wal")).await?;
         fs::create_dir_all(index_dir.join("segments")).await?;
 
-        let metadata = IndexMetadata::new(name, request.settings);
+        let mut metadata = IndexMetadata::new(name, request.settings);
+        if let Some(mappings) = request.mappings {
+            for (field, mapping) in mappings {
+                metadata.mappings.insert(field, mapping);
+            }
+        }
         let json = serde_json::to_vec_pretty(&metadata)?;
         fs::write(metadata_path, json).await?;
 
@@ -1614,6 +1619,7 @@ mod tests {
                         namespace: None,
                         retention_secs: None,
                     },
+                    ..Default::default()
                 },
             )
             .await
@@ -1644,6 +1650,7 @@ mod tests {
                         namespace: Some("tenant-abc".to_string()),
                         retention_secs: None,
                     },
+                    ..Default::default()
                 },
             )
             .await
@@ -1671,6 +1678,7 @@ mod tests {
                         namespace: Some("".to_string()),
                         retention_secs: None,
                     },
+                    ..Default::default()
                 },
             )
             .await
@@ -1696,6 +1704,7 @@ mod tests {
                         namespace: Some(long_namespace),
                         retention_secs: None,
                     },
+                    ..Default::default()
                 },
             )
             .await
@@ -1720,6 +1729,7 @@ mod tests {
                         namespace: Some("tenant@abc".to_string()),
                         retention_secs: None,
                     },
+                    ..Default::default()
                 },
             )
             .await
@@ -1745,6 +1755,7 @@ mod tests {
                         namespace: Some(ns_64.clone()),
                         retention_secs: None,
                     },
+                    ..Default::default()
                 },
             )
             .await
@@ -1764,6 +1775,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -1774,6 +1786,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -1793,6 +1806,7 @@ mod tests {
                 "Logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -1813,6 +1827,7 @@ mod tests {
                 &long_name,
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -1833,6 +1848,7 @@ mod tests {
                     name,
                     CreateIndexRequest {
                         settings: Default::default(),
+                        ..Default::default()
                     },
                 )
                 .await
@@ -1855,6 +1871,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -1871,6 +1888,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -1906,6 +1924,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -1941,6 +1960,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -1981,6 +2001,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2035,6 +2056,7 @@ mod tests {
                         namespace: None,
                         retention_secs: None,
                     },
+                    ..Default::default()
                 },
             )
             .await
@@ -2062,6 +2084,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_mappings_are_respected_and_conflicts_are_rejected() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let catalog = IndexCatalog::new(temp_dir.path());
+        catalog.initialize().await.expect("init catalog");
+
+        let mut mappings = BTreeMap::new();
+        mappings.insert(
+            "status".to_string(),
+            FieldMapping {
+                field_type: FieldType::Keyword,
+            },
+        );
+        mappings.insert(
+            "count".to_string(),
+            FieldMapping {
+                field_type: FieldType::Integer,
+            },
+        );
+
+        catalog
+            .create_index(
+                "logs",
+                CreateIndexRequest {
+                    settings: IndexSettings {
+                        mapping_mode: MappingMode::ControlledDynamic,
+                        primary_time_field: None,
+                        namespace: None,
+                        retention_secs: None,
+                    },
+                    mappings: Some(mappings),
+                },
+            )
+            .await
+            .expect("create index with explicit mappings");
+
+        let mut handle = catalog.open_index("logs").await.expect("open index");
+
+        // doc matching declared types succeeds
+        handle
+            .index_document(IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"status": "active", "count": 42}),
+            })
+            .await
+            .expect("index doc with matching declared types");
+
+        // type conflict on declared field is rejected
+        let conflict = handle
+            .index_document(IndexDocument {
+                id: "doc-2".to_string(),
+                source: serde_json::json!({"status": 123, "count": 1}),
+            })
+            .await
+            .expect_err("keyword field receiving integer should fail");
+        assert!(matches!(conflict, CloudSearchError::MappingConflict(_)));
+
+        // new fields are inferred normally in ControlledDynamic mode
+        handle
+            .index_document(IndexDocument {
+                id: "doc-3".to_string(),
+                source: serde_json::json!({"status": "ok", "count": 10, "message": "hello"}),
+            })
+            .await
+            .expect("new fields inferred normally");
+
+        // check mappings were persisted
+        let loaded = catalog.get_index("logs").await.expect("get index");
+        assert_eq!(
+            loaded.mappings.get("status").unwrap().field_type,
+            FieldType::Keyword
+        );
+        assert_eq!(
+            loaded.mappings.get("count").unwrap().field_type,
+            FieldType::Integer
+        );
+        assert_eq!(
+            loaded.mappings.get("message").unwrap().field_type,
+            FieldType::Keyword
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_mapping_conflicts_and_invalid_query_usage() {
         let temp_dir = TempDir::new().expect("temp dir");
         let catalog = IndexCatalog::new(temp_dir.path());
@@ -2072,6 +2176,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2122,6 +2227,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2162,6 +2268,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2195,6 +2302,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2228,6 +2336,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2261,6 +2370,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2308,6 +2418,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2341,6 +2452,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2382,6 +2494,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2442,6 +2555,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2480,6 +2594,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2547,6 +2662,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2598,6 +2714,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2626,6 +2743,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2681,6 +2799,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2759,6 +2878,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2799,6 +2919,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2843,6 +2964,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2932,6 +3054,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -2990,6 +3113,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3036,6 +3160,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3077,6 +3202,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3154,6 +3280,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3238,6 +3365,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3333,6 +3461,7 @@ mod tests {
                 "test",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3372,6 +3501,7 @@ mod tests {
                 "test",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3411,6 +3541,7 @@ mod tests {
                 "test",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3451,6 +3582,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3517,6 +3649,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3576,6 +3709,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3627,6 +3761,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3663,6 +3798,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3697,6 +3833,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3743,6 +3880,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3784,6 +3922,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3819,6 +3958,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3850,6 +3990,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3891,6 +4032,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3939,6 +4081,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -3981,6 +4124,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -4082,6 +4226,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -4200,6 +4345,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
@@ -4292,6 +4438,7 @@ mod tests {
                 "logs",
                 CreateIndexRequest {
                     settings: Default::default(),
+                    ..Default::default()
                 },
             )
             .await
