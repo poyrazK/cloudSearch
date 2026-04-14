@@ -327,6 +327,30 @@ fn snapshots_dir(segments_dir: &Path) -> PathBuf {
     segments_dir.join("snapshots")
 }
 
+fn validate_snapshot_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(CloudSearchError::InvalidWalRecord(
+            "snapshot name cannot be empty".to_string(),
+        ));
+    }
+    if name == "." || name == ".." {
+        return Err(CloudSearchError::InvalidWalRecord(
+            "snapshot name cannot be '.' or '..'".to_string(),
+        ));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(CloudSearchError::InvalidWalRecord(
+            "snapshot name cannot contain path separators".to_string(),
+        ));
+    }
+    if Path::new(name).components().any(|c| c.as_os_str() == ".") {
+        return Err(CloudSearchError::InvalidWalRecord(
+            "snapshot name cannot contain path components".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn snapshot_data_path(segments_dir: &Path, name: &str) -> PathBuf {
     snapshots_dir(segments_dir).join(format!("{name}.json"))
 }
@@ -343,6 +367,7 @@ pub async fn write_named_snapshot(
     metadata: &SnapshotMetadata,
 ) -> Result<()> {
     let segments_dir = segments_dir.as_ref();
+    validate_snapshot_name(name)?;
     let dir = snapshots_dir(segments_dir);
     fs::create_dir_all(&dir).await?;
 
@@ -376,6 +401,7 @@ pub async fn read_named_snapshot(
     segments_dir: impl AsRef<Path>,
     name: &str,
 ) -> Result<Option<SegmentSnapshot>> {
+    validate_snapshot_name(name)?;
     let path = snapshot_data_path(segments_dir.as_ref(), name);
     if !fs::try_exists(&path).await? {
         return Ok(None);
@@ -389,6 +415,7 @@ pub async fn read_snapshot_metadata(
     segments_dir: impl AsRef<Path>,
     name: &str,
 ) -> Result<Option<SnapshotMetadata>> {
+    validate_snapshot_name(name)?;
     let path = snapshot_meta_path(segments_dir.as_ref(), name);
     if !fs::try_exists(&path).await? {
         return Ok(None);
@@ -399,7 +426,8 @@ pub async fn read_snapshot_metadata(
 
 /// List all named snapshots for an index.
 pub async fn list_snapshots(segments_dir: impl AsRef<Path>) -> Result<Vec<SnapshotMetadata>> {
-    let dir = snapshots_dir(segments_dir.as_ref());
+    let segments_dir = segments_dir.as_ref();
+    let dir = snapshots_dir(segments_dir);
     if !fs::try_exists(&dir).await? {
         return Ok(Vec::new());
     }
@@ -408,14 +436,28 @@ pub async fn list_snapshots(segments_dir: impl AsRef<Path>) -> Result<Vec<Snapsh
     let mut snapshots = Vec::new();
 
     while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if let Some(name) = path.file_name().and_then(|s| s.to_str())
-            && name.ends_with(".meta.json")
-            && let Ok(bytes) = fs::read(&path).await
-            && let Ok(meta) = serde_json::from_slice::<SnapshotMetadata>(&bytes)
-        {
-            snapshots.push(meta);
+        let meta_path = entry.path();
+        let meta_name = meta_path.file_name().and_then(|s| s.to_str());
+        let Some(meta_name) = meta_name else { continue };
+
+        if !meta_name.ends_with(".meta.json") {
+            continue;
         }
+
+        let bytes = fs::read(&meta_path).await?;
+        let meta: SnapshotMetadata = serde_json::from_slice(&bytes)?;
+
+        // Check that the sibling data file exists
+        let snapshot_name = &meta.name;
+        let data_path = snapshot_data_path(segments_dir, snapshot_name);
+        if !fs::try_exists(&data_path).await? {
+            return Err(CloudSearchError::InvalidWalRecord(format!(
+                "missing snapshot data file for '{}'",
+                snapshot_name
+            )));
+        }
+
+        snapshots.push(meta);
     }
 
     snapshots.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -424,6 +466,7 @@ pub async fn list_snapshots(segments_dir: impl AsRef<Path>) -> Result<Vec<Snapsh
 
 /// Delete a named snapshot.
 pub async fn delete_snapshot(segments_dir: impl AsRef<Path>, name: &str) -> Result<()> {
+    validate_snapshot_name(name)?;
     let segments_dir = segments_dir.as_ref();
     let data_path = snapshot_data_path(segments_dir, name);
     let meta_path = snapshot_meta_path(segments_dir, name);
