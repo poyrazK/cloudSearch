@@ -62,6 +62,51 @@ Current implementation notes:
 - runtime gauges include the current number of open cached index handles
 - per-index metrics include document count, pending operations, and last sequence number per index
 
+## Snapshot API
+
+- `POST /{index}/_snapshot/{name}` — create a named snapshot
+- `GET /{index}/_snapshot/{name}` — get snapshot metadata
+- `GET /{index}/_snapshot` — list all snapshots for an index
+- `DELETE /{index}/_snapshot/{name}` — delete a named snapshot
+- `POST /{index}/_snapshot/{name}/_restore` — restore from a named snapshot
+
+### Snapshot Response Shape
+
+```json
+{
+  "name": "weekly-backup",
+  "created_at": "2024-04-13T10:00:00Z",
+  "last_sequence_number": 1500,
+  "document_count": 50000,
+  "checksum": 3735928559
+}
+```
+
+### List Snapshots Response Shape
+
+```json
+{
+  "snapshots": [
+    {
+      "name": "backup-1",
+      "created_at": "2024-04-10T10:00:00Z",
+      "last_sequence_number": 1000,
+      "document_count": 40000,
+      "checksum": 1234567890
+    }
+  ]
+}
+```
+
+Current implementation notes:
+
+- snapshots store the current flush state (searchable documents at time of snapshot)
+- snapshots are stored in `indexes/{index}/segments/snapshots/`
+- each snapshot consists of a data file (`{name}.json`) and a metadata file (`{name}.meta.json`)
+- checksum is CRC32C of the snapshot data for integrity verification
+- restoring a snapshot overwrites the current searchable state
+- pending operations (not yet flushed) are lost when restoring from snapshot
+
 ### Supported Query DSL In V1
 
 - `match`

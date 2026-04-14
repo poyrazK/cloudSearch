@@ -186,6 +186,7 @@ dependencies = [
  "chrono",
  "cloudsearch-common",
  "cloudsearch-storage",
+ "crc32c",
  "regex",
  "serde",
  "serde_json",
