@@ -130,9 +130,12 @@ Recommended v1 responsibilities:
 
 Current implementation notes:
 
+- flush forces a WAL generation rollover before writing the segment snapshot
+- this ordering prevents restart replay inconsistencies (WAL already rolled over so snapshot sequence is valid)
 - flush writes a simple searchable segment snapshot to `segments/current.json`
-- flush forces a WAL generation rollover
-- inactive WAL generations fully covered by the flushed sequence are trimmed
+- flush then trims WAL generations covered by the flushed sequence
+- segment snapshot writes call `fsync` on the parent directory to guarantee the rename entry is durable
+- named snapshot writes also call `fsync` on the parent directory after renames
 
 Flush should run less frequently than refresh.
 

@@ -189,8 +189,12 @@ Recommended sequence:
 3. encode header and payload
 4. compute checksum
 5. append bytes atomically to active generation
-6. update in-memory append position
-7. acknowledge write
+6. `flush()` to sync userspace buffers to OS page cache
+7. `sync_all()` to commit to durable storage
+8. update in-memory append position
+9. acknowledge write
+
+The `sync_all()` call (step 7) is required — it is the only way to guarantee WAL entries survive power loss.
 
 Stronger sync behavior can be added later, but ordering should remain the same.
 
