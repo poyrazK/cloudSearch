@@ -10,9 +10,9 @@ use cloudsearch_common::{
     BulkResponse, CloudSearchError, CreateIndexRequest, CreateSnapshotResponse,
     DateHistogramAggregationResult, ErrorResponse, FlushResponse, HealthResponse, IndexDocument,
     IndexDocumentRequest, ListSnapshotsResponse, MatchQuery, MergeResponse, PrefixQuery,
-    RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
-    StatsAggregationResult, TermQuery, TermsAggregationResult, TermsQuery, UpdateSettingsRequest,
-    WildcardQuery,
+    RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
+    SearchResponse, SortSpec, StatsAggregationResult, TermQuery,
+    TermsAggregationResult, TermsQuery, UpdateSettingsRequest, WildcardQuery,
 };
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use serde_json::Value;
@@ -1156,10 +1156,7 @@ async fn get_snapshot(
                 StatusCode::NOT_FOUND,
                 started_at.elapsed().as_secs_f64(),
             );
-            Err(ApiError(CloudSearchError::IndexNotFound(format!(
-                "snapshot '{}'",
-                name
-            ))))
+            Err(ApiError(CloudSearchError::SnapshotNotFound(name.clone())))
         }
     }
 }
@@ -1198,7 +1195,7 @@ async fn restore_snapshot(
         StatusCode::OK,
         started_at.elapsed().as_secs_f64(),
     );
-    Ok((StatusCode::OK, Json::<FlushResponse>(response)))
+    Ok((StatusCode::OK, Json::<cloudsearch_common::RestoreResponse>(response)))
 }
 
 #[derive(Debug)]
@@ -1227,6 +1224,7 @@ impl IntoResponse for ApiError {
             | CloudSearchError::WalChecksumMismatch
             | CloudSearchError::Io(_)
             | CloudSearchError::Serde(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            CloudSearchError::SnapshotNotFound(_) => StatusCode::NOT_FOUND,
         };
 
         (
