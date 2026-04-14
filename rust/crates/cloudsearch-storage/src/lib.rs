@@ -59,6 +59,16 @@ impl From<&SegmentSnapshot> for SegmentManifest {
     }
 }
 
+/// Metadata for a named snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotMetadata {
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_sequence_number: u64,
+    pub document_count: usize,
+    pub checksum: u32,
+}
+
 impl WalManager {
     pub async fn open(wal_dir: impl Into<PathBuf>) -> Result<Self> {
         let wal_dir = wal_dir.into();
@@ -310,6 +320,120 @@ pub async fn write_segment_snapshot(
 
     fs::write(&temp_path, bytes).await?;
     fs::rename(temp_path, path).await?;
+    Ok(())
+}
+
+fn snapshots_dir(segments_dir: &Path) -> PathBuf {
+    segments_dir.join("snapshots")
+}
+
+fn snapshot_data_path(segments_dir: &Path, name: &str) -> PathBuf {
+    snapshots_dir(segments_dir).join(format!("{name}.json"))
+}
+
+fn snapshot_meta_path(segments_dir: &Path, name: &str) -> PathBuf {
+    snapshots_dir(segments_dir).join(format!("{name}.meta.json"))
+}
+
+/// Write a named snapshot and its metadata to disk.
+pub async fn write_named_snapshot(
+    segments_dir: impl AsRef<Path>,
+    name: &str,
+    snapshot: &SegmentSnapshot,
+    metadata: &SnapshotMetadata,
+) -> Result<()> {
+    let segments_dir = segments_dir.as_ref();
+    let dir = snapshots_dir(segments_dir);
+    fs::create_dir_all(&dir).await?;
+
+    let data_bytes = serde_json::to_vec(snapshot)?;
+    let data_checksum = crc32c::crc32c(&data_bytes);
+    if data_checksum != metadata.checksum {
+        return Err(CloudSearchError::InvalidWalRecord(
+            "snapshot checksum mismatch".to_string(),
+        ));
+    }
+
+    let data_pretty = serde_json::to_vec_pretty(snapshot)?;
+    let data_temp = dir.join(format!("{name}.tmp"));
+    fs::write(&data_temp, data_pretty).await?;
+    fs::rename(data_temp, snapshot_data_path(segments_dir, name)).await?;
+
+    let meta_bytes = serde_json::to_vec(metadata)?;
+    let meta_pretty = serde_json::to_vec_pretty(metadata)?;
+    let meta_temp = dir.join(format!("{name}.meta.tmp"));
+    fs::write(&meta_temp, meta_pretty).await?;
+    fs::rename(meta_temp, snapshot_meta_path(segments_dir, name)).await?;
+
+    // Silence unused variable warning for meta_bytes
+    let _ = meta_bytes;
+
+    Ok(())
+}
+
+/// Read a named snapshot from disk.
+pub async fn read_named_snapshot(
+    segments_dir: impl AsRef<Path>,
+    name: &str,
+) -> Result<Option<SegmentSnapshot>> {
+    let path = snapshot_data_path(segments_dir.as_ref(), name);
+    if !fs::try_exists(&path).await? {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).await?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+/// Read metadata for a named snapshot.
+pub async fn read_snapshot_metadata(
+    segments_dir: impl AsRef<Path>,
+    name: &str,
+) -> Result<Option<SnapshotMetadata>> {
+    let path = snapshot_meta_path(segments_dir.as_ref(), name);
+    if !fs::try_exists(&path).await? {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).await?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+/// List all named snapshots for an index.
+pub async fn list_snapshots(segments_dir: impl AsRef<Path>) -> Result<Vec<SnapshotMetadata>> {
+    let dir = snapshots_dir(segments_dir.as_ref());
+    if !fs::try_exists(&dir).await? {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = fs::read_dir(&dir).await?;
+    let mut snapshots = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if let Some(name) = path.file_name().and_then(|s| s.to_str())
+            && name.ends_with(".meta.json")
+            && let Ok(bytes) = fs::read(&path).await
+            && let Ok(meta) = serde_json::from_slice::<SnapshotMetadata>(&bytes)
+        {
+            snapshots.push(meta);
+        }
+    }
+
+    snapshots.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(snapshots)
+}
+
+/// Delete a named snapshot.
+pub async fn delete_snapshot(segments_dir: impl AsRef<Path>, name: &str) -> Result<()> {
+    let segments_dir = segments_dir.as_ref();
+    let data_path = snapshot_data_path(segments_dir, name);
+    let meta_path = snapshot_meta_path(segments_dir, name);
+
+    if fs::try_exists(&data_path).await? {
+        fs::remove_file(data_path).await?;
+    }
+    if fs::try_exists(&meta_path).await? {
+        fs::remove_file(meta_path).await?;
+    }
     Ok(())
 }
 
@@ -1163,5 +1287,174 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].sequence_number, 6);
         assert_eq!(entries[1].sequence_number, 7);
+    }
+
+    // Named snapshot tests
+
+    #[tokio::test]
+    async fn write_and_read_named_snapshot() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: 7,
+            documents: vec![
+                IndexDocument {
+                    id: "doc-1".to_string(),
+                    source: serde_json::json!({"message": "hello"}),
+                },
+                IndexDocument {
+                    id: "doc-2".to_string(),
+                    source: serde_json::json!({"message": "world"}),
+                },
+            ],
+        };
+
+        let data_bytes = serde_json::to_vec(&snapshot).unwrap();
+        let checksum = crc32c::crc32c(&data_bytes);
+
+        let metadata = SnapshotMetadata {
+            name: "backup-1".to_string(),
+            created_at: chrono::Utc::now(),
+            last_sequence_number: 7,
+            document_count: 2,
+            checksum,
+        };
+
+        write_named_snapshot(temp_dir.path(), "backup-1", &snapshot, &metadata)
+            .await
+            .expect("write named snapshot");
+
+        let loaded = read_named_snapshot(temp_dir.path(), "backup-1")
+            .await
+            .expect("read named snapshot")
+            .expect("snapshot exists");
+
+        assert_eq!(loaded, snapshot);
+    }
+
+    #[tokio::test]
+    async fn list_named_snapshots() {
+        let temp_dir = TempDir::new().expect("temp dir");
+
+        for i in 1..=3 {
+            let snapshot = SegmentSnapshot {
+                last_sequence_number: i,
+                documents: vec![IndexDocument {
+                    id: format!("doc-{i}"),
+                    source: serde_json::json!({"n": i}),
+                }],
+            };
+            let data_bytes = serde_json::to_vec(&snapshot).unwrap();
+            let checksum = crc32c::crc32c(&data_bytes);
+
+            let metadata = SnapshotMetadata {
+                name: format!("backup-{i}"),
+                created_at: chrono::Utc::now(),
+                last_sequence_number: i,
+                document_count: 1,
+                checksum,
+            };
+
+            write_named_snapshot(
+                temp_dir.path(),
+                &format!("backup-{i}"),
+                &snapshot,
+                &metadata,
+            )
+            .await
+            .expect("write snapshot");
+        }
+
+        let snapshots = list_snapshots(temp_dir.path())
+            .await
+            .expect("list snapshots");
+
+        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots[0].name, "backup-1");
+        assert_eq!(snapshots[1].name, "backup-2");
+        assert_eq!(snapshots[2].name, "backup-3");
+    }
+
+    #[tokio::test]
+    async fn delete_named_snapshot() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: 5,
+            documents: vec![IndexDocument {
+                id: "doc-1".to_string(),
+                source: serde_json::json!({"x": 1}),
+            }],
+        };
+
+        let data_bytes = serde_json::to_vec(&snapshot).unwrap();
+        let checksum = crc32c::crc32c(&data_bytes);
+
+        let metadata = SnapshotMetadata {
+            name: "to-delete".to_string(),
+            created_at: chrono::Utc::now(),
+            last_sequence_number: 5,
+            document_count: 1,
+            checksum,
+        };
+
+        write_named_snapshot(temp_dir.path(), "to-delete", &snapshot, &metadata)
+            .await
+            .expect("write snapshot");
+
+        delete_snapshot(temp_dir.path(), "to-delete")
+            .await
+            .expect("delete snapshot");
+
+        let loaded = read_named_snapshot(temp_dir.path(), "to-delete")
+            .await
+            .expect("read after delete");
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn named_snapshot_metadata_round_trip() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: 10,
+            documents: vec![],
+        };
+
+        let data_bytes = serde_json::to_vec(&snapshot).unwrap();
+        let checksum = crc32c::crc32c(&data_bytes);
+
+        let metadata = SnapshotMetadata {
+            name: "meta-test".to_string(),
+            created_at: chrono::Utc::now(),
+            last_sequence_number: 10,
+            document_count: 0,
+            checksum,
+        };
+
+        write_named_snapshot(temp_dir.path(), "meta-test", &snapshot, &metadata)
+            .await
+            .expect("write snapshot");
+
+        let loaded = read_snapshot_metadata(temp_dir.path(), "meta-test")
+            .await
+            .expect("read metadata")
+            .expect("metadata exists");
+
+        assert_eq!(loaded.name, "meta-test");
+        assert_eq!(loaded.last_sequence_number, 10);
+        assert_eq!(loaded.document_count, 0);
+    }
+
+    #[tokio::test]
+    async fn missing_named_snapshot_returns_none() {
+        let temp_dir = TempDir::new().expect("temp dir");
+
+        let loaded = read_named_snapshot(temp_dir.path(), "nonexistent")
+            .await
+            .expect("read nonexistent");
+        assert!(loaded.is_none());
+
+        let meta = read_snapshot_metadata(temp_dir.path(), "nonexistent")
+            .await
+            .expect("read nonexistent meta");
+        assert!(meta.is_none());
     }
 }
