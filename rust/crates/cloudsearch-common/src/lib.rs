@@ -33,6 +33,8 @@ pub enum CloudSearchError {
     InvalidWalRecord(String),
     #[error("WAL checksum mismatch")]
     WalChecksumMismatch,
+    #[error("snapshot '{0}' not found")]
+    SnapshotNotFound(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
@@ -220,6 +222,13 @@ pub struct SnapshotMetadata {
     pub last_sequence_number: u64,
     pub document_count: usize,
     pub checksum: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreResponse {
+    pub result: String,
+    pub restored_documents: usize,
+    pub sequence_number: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
