@@ -3,15 +3,16 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkRequest,
-    BulkResponse, CloudSearchError, CreateIndexRequest, DateHistogramAggregationResult,
-    ErrorResponse, FlushResponse, HealthResponse, IndexDocument, IndexDocumentRequest, MatchQuery,
-    MergeResponse, PrefixQuery, RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
-    SearchResponse, SortSpec, StatsAggregationResult, TermQuery, TermsAggregationResult,
-    TermsQuery, UpdateSettingsRequest, WildcardQuery,
+    BulkResponse, CloudSearchError, CreateIndexRequest, CreateSnapshotResponse,
+    DateHistogramAggregationResult, ErrorResponse, FlushResponse, HealthResponse, IndexDocument,
+    IndexDocumentRequest, ListSnapshotsResponse, MatchQuery, MergeResponse, PrefixQuery,
+    RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
+    StatsAggregationResult, TermQuery, TermsAggregationResult, TermsQuery, UpdateSettingsRequest,
+    WildcardQuery,
 };
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use serde_json::Value;
@@ -88,6 +89,11 @@ struct CompatBulkItemResult {
 
 #[derive(serde::Serialize)]
 struct CompatDeleteIndexResponse {
+    result: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct CompatDeleteSnapshotResponse {
     result: &'static str,
 }
 
@@ -240,6 +246,13 @@ pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
         .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
         .route("/{index}/_search", put(search_index).post(search_index))
         .route("/{index}/_settings", put(update_index_settings))
+        .route("/{index}/_snapshot", get(list_snapshots))
+        .route(
+            "/{index}/_snapshot/{name}",
+            post(create_snapshot).get(get_snapshot),
+        )
+        .route("/{index}/_snapshot/{name}/_restore", post(restore_snapshot))
+        .route("/{index}/_snapshot/{name}", delete(delete_snapshot))
         .layer(TraceLayer::new_for_http())
         .with_state(ApiState::new(registry))
 }
@@ -1081,6 +1094,113 @@ async fn merge_index(
     Ok((StatusCode::OK, Json::<MergeResponse>(response)))
 }
 
+async fn create_snapshot(
+    State(state): State<ApiState>,
+    Path((index, name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
+    let handle = state.registry.index_handle(&index).await?;
+    let handle = handle.lock().await;
+    let response = handle.create_snapshot(&name).await?;
+    state.metrics().record_request(
+        "snapshot_create",
+        "POST",
+        StatusCode::CREATED,
+        started_at.elapsed().as_secs_f64(),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json::<CreateSnapshotResponse>(response),
+    ))
+}
+
+async fn list_snapshots(
+    State(state): State<ApiState>,
+    Path(index): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
+    let handle = state.registry.index_handle(&index).await?;
+    let handle = handle.lock().await;
+    let snapshots = handle.list_snapshots().await?;
+    state.metrics().record_request(
+        "snapshot_list",
+        "GET",
+        StatusCode::OK,
+        started_at.elapsed().as_secs_f64(),
+    );
+    Ok((StatusCode::OK, Json(ListSnapshotsResponse { snapshots })))
+}
+
+async fn get_snapshot(
+    State(state): State<ApiState>,
+    Path((index, name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
+    let handle = state.registry.index_handle(&index).await?;
+    let handle = handle.lock().await;
+    let snapshot = handle.get_snapshot(&name).await?;
+    match snapshot {
+        Some(meta) => {
+            state.metrics().record_request(
+                "snapshot_get",
+                "GET",
+                StatusCode::OK,
+                started_at.elapsed().as_secs_f64(),
+            );
+            Ok((StatusCode::OK, Json(meta)))
+        }
+        None => {
+            state.metrics().record_request(
+                "snapshot_get",
+                "GET",
+                StatusCode::NOT_FOUND,
+                started_at.elapsed().as_secs_f64(),
+            );
+            Err(ApiError(CloudSearchError::SnapshotNotFound(name.clone())))
+        }
+    }
+}
+
+async fn delete_snapshot(
+    State(state): State<ApiState>,
+    Path((index, name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
+    let handle = state.registry.index_handle(&index).await?;
+    let handle = handle.lock().await;
+    handle.delete_snapshot(&name).await?;
+    state.metrics().record_request(
+        "snapshot_delete",
+        "DELETE",
+        StatusCode::OK,
+        started_at.elapsed().as_secs_f64(),
+    );
+    Ok((
+        StatusCode::OK,
+        Json(CompatDeleteSnapshotResponse { result: "deleted" }),
+    ))
+}
+
+async fn restore_snapshot(
+    State(state): State<ApiState>,
+    Path((index, name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
+    let handle = state.registry.index_handle(&index).await?;
+    let mut handle = handle.lock().await;
+    let response = handle.restore_snapshot(&name).await?;
+    state.metrics().record_request(
+        "snapshot_restore",
+        "POST",
+        StatusCode::OK,
+        started_at.elapsed().as_secs_f64(),
+    );
+    Ok((
+        StatusCode::OK,
+        Json::<cloudsearch_common::RestoreResponse>(response),
+    ))
+}
+
 #[derive(Debug)]
 struct ApiError(CloudSearchError);
 
@@ -1107,6 +1227,7 @@ impl IntoResponse for ApiError {
             | CloudSearchError::WalChecksumMismatch
             | CloudSearchError::Io(_)
             | CloudSearchError::Serde(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            CloudSearchError::SnapshotNotFound(_) => StatusCode::NOT_FOUND,
         };
 
         (

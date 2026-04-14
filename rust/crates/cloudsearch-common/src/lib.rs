@@ -33,6 +33,8 @@ pub enum CloudSearchError {
     InvalidWalRecord(String),
     #[error("WAL checksum mismatch")]
     WalChecksumMismatch,
+    #[error("snapshot '{0}' not found")]
+    SnapshotNotFound(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
@@ -197,6 +199,36 @@ pub struct FlushResponse {
 pub struct MergeResponse {
     pub result: &'static str,
     pub merged_documents: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateSnapshotResponse {
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_sequence_number: u64,
+    pub document_count: usize,
+    pub checksum: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListSnapshotsResponse {
+    pub snapshots: Vec<SnapshotMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotMetadata {
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_sequence_number: u64,
+    pub document_count: usize,
+    pub checksum: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreResponse {
+    pub result: String,
+    pub restored_documents: usize,
+    pub sequence_number: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -48,7 +48,7 @@ Exit criteria:
 - better resource accounting ✓ (per-index metrics in /metrics endpoint)
 - namespace-ready metadata ✓
 - retention hooks and time-aware management ✓ (TTL-based document eviction)
-- snapshot interfaces and backup design
+- snapshot interfaces and backup design ✓ (create, list, get, delete, restore with CRC32C integrity verification)
 
 Exit criteria:
 
