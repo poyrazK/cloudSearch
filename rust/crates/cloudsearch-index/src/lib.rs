@@ -9,8 +9,9 @@ use cloudsearch_common::{
     TermsBucket, TermsQuery, WildcardQuery,
 };
 use cloudsearch_storage::{
-    SegmentManifest, SegmentSnapshot, WalManager, WalRecord, read_segment_snapshot,
-    write_segment_snapshot,
+    SegmentManifest, SegmentSnapshot, SnapshotMetadata, WalManager, WalRecord,
+    delete_snapshot as storage_delete_snapshot, list_snapshots, read_named_snapshot,
+    read_segment_snapshot, read_snapshot_metadata, write_named_snapshot, write_segment_snapshot,
 };
 use regex::Regex;
 use std::{
@@ -796,6 +797,128 @@ impl IndexHandle {
         Ok(MergeResponse {
             result: "merged",
             merged_documents,
+        })
+    }
+
+    /// Create a named snapshot of the current index state.
+    pub async fn create_snapshot(
+        &self,
+        name: &str,
+    ) -> Result<cloudsearch_common::CreateSnapshotResponse> {
+        let snapshot = SegmentSnapshot {
+            last_sequence_number: self.last_sequence_number,
+            documents: self.searchable_documents.values().cloned().collect(),
+        };
+
+        let data_bytes = serde_json::to_vec(&snapshot)?;
+        let checksum = crc32c::crc32c(&data_bytes);
+
+        let metadata = SnapshotMetadata {
+            name: name.to_string(),
+            created_at: chrono::Utc::now(),
+            last_sequence_number: self.last_sequence_number,
+            document_count: snapshot.documents.len(),
+            checksum,
+        };
+
+        write_named_snapshot(&self.segments_dir, name, &snapshot, &metadata).await?;
+        tracing::info!(index = %self.metadata.name, snapshot = %name, docs = snapshot.documents.len(), "snapshot created");
+
+        Ok(cloudsearch_common::CreateSnapshotResponse {
+            name: metadata.name,
+            created_at: metadata.created_at,
+            last_sequence_number: metadata.last_sequence_number,
+            document_count: metadata.document_count,
+            checksum: metadata.checksum,
+        })
+    }
+
+    /// List all named snapshots for this index.
+    pub async fn list_snapshots(&self) -> Result<Vec<cloudsearch_common::SnapshotMetadata>> {
+        let snapshots = list_snapshots(&self.segments_dir).await?;
+        Ok(snapshots
+            .into_iter()
+            .map(|s| cloudsearch_common::SnapshotMetadata {
+                name: s.name,
+                created_at: s.created_at,
+                last_sequence_number: s.last_sequence_number,
+                document_count: s.document_count,
+                checksum: s.checksum,
+            })
+            .collect())
+    }
+
+    /// Get metadata for a specific named snapshot.
+    pub async fn get_snapshot(
+        &self,
+        name: &str,
+    ) -> Result<Option<cloudsearch_common::SnapshotMetadata>> {
+        let meta = read_snapshot_metadata(&self.segments_dir, name).await?;
+        Ok(meta.map(|s| cloudsearch_common::SnapshotMetadata {
+            name: s.name,
+            created_at: s.created_at,
+            last_sequence_number: s.last_sequence_number,
+            document_count: s.document_count,
+            checksum: s.checksum,
+        }))
+    }
+
+    /// Delete a named snapshot.
+    pub async fn delete_snapshot(&self, name: &str) -> Result<()> {
+        storage_delete_snapshot(&self.segments_dir, name).await?;
+        tracing::info!(index = %self.metadata.name, snapshot = %name, "snapshot deleted");
+        Ok(())
+    }
+
+    /// Restore the index from a named snapshot.
+    pub async fn restore_snapshot(&mut self, name: &str) -> Result<FlushResponse> {
+        let snapshot = read_named_snapshot(&self.segments_dir, name)
+            .await?
+            .ok_or_else(|| {
+                CloudSearchError::InvalidWalRecord(format!("snapshot '{}' not found", name))
+            })?;
+
+        let metadata = read_snapshot_metadata(&self.segments_dir, name)
+            .await?
+            .ok_or_else(|| {
+                CloudSearchError::InvalidWalRecord(format!(
+                    "snapshot metadata '{}' not found",
+                    name
+                ))
+            })?;
+
+        // Validate checksum
+        let data_bytes = serde_json::to_vec(&snapshot)?;
+        let computed_checksum = crc32c::crc32c(&data_bytes);
+        if computed_checksum != metadata.checksum {
+            return Err(CloudSearchError::WalChecksumMismatch);
+        }
+
+        // Restore searchable documents
+        self.searchable_documents = snapshot
+            .documents
+            .iter()
+            .map(|doc| (doc.id.clone(), doc.clone()))
+            .collect();
+        self.last_sequence_number = metadata.last_sequence_number;
+
+        // Write as the new current segment
+        write_segment_snapshot(&self.segments_dir, &snapshot).await?;
+        self.wal.rollover().await?;
+        self.wal.trim_through(snapshot.last_sequence_number).await?;
+
+        tracing::info!(
+            index = %self.metadata.name,
+            snapshot = %name,
+            docs = snapshot.documents.len(),
+            seq = snapshot.last_sequence_number,
+            "snapshot restored"
+        );
+
+        Ok(FlushResponse {
+            result: "restored",
+            flushed_documents: snapshot.documents.len(),
+            sequence_number: snapshot.last_sequence_number,
         })
     }
 
