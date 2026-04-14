@@ -199,6 +199,29 @@ pub struct MergeResponse {
     pub merged_documents: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateSnapshotResponse {
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_sequence_number: u64,
+    pub document_count: usize,
+    pub checksum: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListSnapshotsResponse {
+    pub snapshots: Vec<SnapshotMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotMetadata {
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_sequence_number: u64,
+    pub document_count: usize,
+    pub checksum: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SearchRequest {
     pub query: Option<SearchQuery>,

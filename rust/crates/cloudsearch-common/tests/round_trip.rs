@@ -879,3 +879,52 @@ fn test_app_config_custom() {
         max_concurrent_background_ops: Some(4),
     });
 }
+
+// Snapshot types
+
+#[test]
+fn test_create_snapshot_response() {
+    let original = CreateSnapshotResponse {
+        name: "backup-1".to_string(),
+        created_at: chrono::Utc::now(),
+        last_sequence_number: 42,
+        document_count: 100,
+        checksum: 0xDEADBEEF,
+    };
+    round_trip(&original);
+}
+
+#[test]
+fn test_list_snapshots_response() {
+    let original = ListSnapshotsResponse {
+        snapshots: vec![
+            SnapshotMetadata {
+                name: "backup-1".to_string(),
+                created_at: chrono::Utc::now(),
+                last_sequence_number: 10,
+                document_count: 50,
+                checksum: 0x12345678,
+            },
+            SnapshotMetadata {
+                name: "backup-2".to_string(),
+                created_at: chrono::Utc::now(),
+                last_sequence_number: 20,
+                document_count: 75,
+                checksum: 0x87654321,
+            },
+        ],
+    };
+    round_trip(&original);
+}
+
+#[test]
+fn test_snapshot_metadata() {
+    let original = SnapshotMetadata {
+        name: "weekly-backup".to_string(),
+        created_at: chrono::Utc::now(),
+        last_sequence_number: 100,
+        document_count: 500,
+        checksum: 0xABCDEF01,
+    };
+    round_trip(&original);
+}
