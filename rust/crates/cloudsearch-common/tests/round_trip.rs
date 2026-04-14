@@ -384,6 +384,7 @@ fn test_create_index_request_with_settings() {
             namespace: Some("test".to_string()),
             retention_secs: Some(86400),
         },
+        ..Default::default()
     });
 }
 
