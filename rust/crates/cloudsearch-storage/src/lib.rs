@@ -102,6 +102,7 @@ impl WalManager {
         file.write_all(&header).await?;
         file.write_all(&payload).await?;
         file.flush().await?;
+        file.sync_all().await?;
 
         Ok(())
     }
@@ -320,6 +321,11 @@ pub async fn write_segment_snapshot(
 
     fs::write(&temp_path, bytes).await?;
     fs::rename(temp_path, path).await?;
+
+    // Sync the directory to ensure the rename is durable on disk
+    let dir_file = OpenOptions::new().read(true).open(segments_dir).await?;
+    dir_file.sync_all().await?;
+
     Ok(())
 }
 
@@ -389,6 +395,10 @@ pub async fn write_named_snapshot(
     let meta_temp = dir.join(format!("{name}.meta.tmp"));
     fs::write(&meta_temp, meta_pretty).await?;
     fs::rename(meta_temp, snapshot_meta_path(segments_dir, name)).await?;
+
+    // Sync directory to ensure all renames are durable
+    let dir_file = OpenOptions::new().read(true).open(&dir).await?;
+    dir_file.sync_all().await?;
 
     // Silence unused variable warning for meta_bytes
     let _ = meta_bytes;
