@@ -749,6 +749,10 @@ impl IndexHandle {
     }
 
     pub async fn flush(&mut self) -> Result<FlushResponse> {
+        // Rollover WAL first so the snapshot captures a consistent post-rollover state.
+        // This ensures WAL replay on restart starts from the new generation.
+        self.wal.rollover().await?;
+
         let snapshot = SegmentSnapshot {
             last_sequence_number: self.last_sequence_number,
             documents: self.searchable_documents.values().cloned().collect(),
@@ -756,7 +760,6 @@ impl IndexHandle {
 
         write_segment_snapshot(&self.segments_dir, &snapshot).await?;
         tracing::info!(index = %self.metadata.name, seq = self.last_sequence_number, "flushed segment to disk");
-        self.wal.rollover().await?;
         self.wal.trim_through(snapshot.last_sequence_number).await?;
 
         if let Some(plan) = self.plan_merge(&snapshot) {
