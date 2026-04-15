@@ -10,9 +10,14 @@ use cloudsearch_common::{
 };
 use cloudsearch_storage::{
     SegmentManifest, SegmentSnapshot, SnapshotMetadata, WalManager, WalRecord,
-    delete_snapshot as storage_delete_snapshot, list_snapshots, read_named_snapshot,
-    read_segment_snapshot, read_snapshot_metadata, write_named_snapshot, write_segment_snapshot,
+    delete_snapshot as storage_delete_snapshot, list_snapshots, read_doc_values,
+    read_named_snapshot, read_segment_snapshot, read_snapshot_metadata,
+    write_doc_values as storage_write_doc_values, write_named_snapshot, write_segment_snapshot,
 };
+mod doc_values;
+mod doc_values_reader;
+use crate::doc_values::DocValuesWriter;
+use crate::doc_values_reader::DocValuesReader;
 use regex::Regex;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -204,6 +209,15 @@ impl IndexCatalog {
         }
         tracing::info!(index = %name, recovered_docs = recovered_count, "WAL recovery complete");
 
+        // Load doc values sidecar if available
+        let doc_values_reader = match read_doc_values(&segments_dir).await {
+            Ok(fields) if !fields.is_empty() => {
+                tracing::info!(index = %name, num_fields = fields.len(), "loaded doc values");
+                Some(DocValuesReader::new(fields))
+            }
+            _ => None,
+        };
+
         Ok(IndexHandle {
             metadata,
             metadata_path,
@@ -213,6 +227,7 @@ impl IndexCatalog {
             pending_operations: BTreeMap::new(),
             last_sequence_number,
             document_timestamps,
+            doc_values_reader,
         })
     }
 
@@ -352,6 +367,8 @@ pub struct IndexHandle {
     last_sequence_number: u64,
     /// Stores document_id -> expiration DateTime for retention policy.
     document_timestamps: BTreeMap<String, DateTime<Utc>>,
+    /// Pre-extracted columnar doc values for aggregations, if available.
+    doc_values_reader: Option<DocValuesReader>,
 }
 
 #[derive(Debug, Clone)]
@@ -536,7 +553,11 @@ impl IndexHandle {
 
         let matching_documents: Vec<IndexDocument> =
             scored.iter().map(|(_, d)| (*d).clone()).collect();
-        let aggregations = compute_aggregations(&matching_documents, request.aggs.as_ref());
+        let aggregations = compute_aggregations(
+            &matching_documents,
+            request.aggs.as_ref(),
+            self.doc_values_reader.as_ref(),
+        );
 
         if let Some(sort) = &request.sort {
             scored.sort_by(|(_, l), (_, r)| {
@@ -765,6 +786,13 @@ impl IndexHandle {
 
         write_segment_snapshot(&self.segments_dir, &snapshot).await?;
         tracing::info!(index = %self.metadata.name, seq = self.last_sequence_number, "flushed segment to disk");
+
+        // Build and write doc values sidecar for aggregations
+        let doc_values =
+            DocValuesWriter::build_from_documents(&snapshot.documents, &self.metadata.mappings);
+        storage_write_doc_values(&self.segments_dir, &doc_values).await?;
+        tracing::info!(index = %self.metadata.name, num_fields = doc_values.len(), "wrote doc values sidecar");
+
         self.wal.trim_through(snapshot.last_sequence_number).await?;
 
         if let Some(plan) = self.plan_merge(&snapshot) {
@@ -1275,6 +1303,7 @@ fn matches_terms_query(document: &IndexDocument, terms: &TermsQuery) -> bool {
 fn compute_aggregations(
     documents: &[IndexDocument],
     requests: Option<&BTreeMap<String, AggregationRequest>>,
+    doc_values: Option<&DocValuesReader>,
 ) -> BTreeMap<String, AggregationResult> {
     let mut aggregations = BTreeMap::new();
 
@@ -1284,17 +1313,18 @@ fn compute_aggregations(
 
     for (name, request) in requests {
         let result = match request {
-            AggregationRequest::Terms(terms) => {
-                AggregationResult::Terms(compute_terms_aggregation(documents, &terms.field))
-            }
-            AggregationRequest::Stats(stats) => {
-                AggregationResult::Stats(compute_stats_aggregation(documents, &stats.field))
-            }
+            AggregationRequest::Terms(terms) => AggregationResult::Terms(
+                compute_terms_aggregation(documents, &terms.field, doc_values),
+            ),
+            AggregationRequest::Stats(stats) => AggregationResult::Stats(
+                compute_stats_aggregation(documents, &stats.field, doc_values),
+            ),
             AggregationRequest::DateHistogram(histogram) => {
                 AggregationResult::DateHistogram(compute_date_histogram_aggregation(
                     documents,
                     &histogram.field,
                     &histogram.interval,
+                    doc_values,
                 ))
             }
         };
@@ -1305,14 +1335,36 @@ fn compute_aggregations(
     aggregations
 }
 
-fn compute_terms_aggregation(documents: &[IndexDocument], field: &str) -> TermsAggregationResult {
-    let mut counts: HashMap<String, (serde_json::Value, usize)> = HashMap::new();
+fn compute_terms_aggregation(
+    documents: &[IndexDocument],
+    field: &str,
+    doc_values: Option<&DocValuesReader>,
+) -> TermsAggregationResult {
+    // Use doc values if available
+    if let Some(reader) = doc_values
+        && let Some(keywords) = reader.keywords(field)
+    {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for k in keywords {
+            *counts.entry(k.to_string()).or_insert(0) += 1;
+        }
+        let mut buckets: Vec<TermsBucket> = counts
+            .into_iter()
+            .map(|(key, doc_count)| TermsBucket {
+                key: serde_json::Value::String(key),
+                doc_count,
+            })
+            .collect();
+        buckets.sort_by(|l, r| r.doc_count.cmp(&l.doc_count));
+        return TermsAggregationResult { buckets };
+    }
 
+    // Fall back to JSON extraction
+    let mut counts: HashMap<String, (serde_json::Value, usize)> = HashMap::new();
     for document in documents {
         let Some(value) = document.source.get(field) else {
             continue;
         };
-
         if !matches!(
             value,
             serde_json::Value::String(_)
@@ -1321,16 +1373,17 @@ fn compute_terms_aggregation(documents: &[IndexDocument], field: &str) -> TermsA
         ) {
             continue;
         }
-
         let key = value.to_string();
-        let entry = counts.entry(key).or_insert_with(|| (value.clone(), 0));
+        let entry = counts
+            .entry(key.clone())
+            .or_insert_with(|| (value.clone(), 0));
         entry.1 += 1;
     }
 
-    let mut buckets = counts
+    let mut buckets: Vec<TermsBucket> = counts
         .into_values()
         .map(|(key, doc_count)| TermsBucket { key, doc_count })
-        .collect::<Vec<_>>();
+        .collect();
 
     buckets.sort_by(|left, right| {
         right
@@ -1342,7 +1395,52 @@ fn compute_terms_aggregation(documents: &[IndexDocument], field: &str) -> TermsA
     TermsAggregationResult { buckets }
 }
 
-fn compute_stats_aggregation(documents: &[IndexDocument], field: &str) -> StatsAggregationResult {
+fn compute_stats_aggregation(
+    documents: &[IndexDocument],
+    field: &str,
+    doc_values: Option<&DocValuesReader>,
+) -> StatsAggregationResult {
+    // Use doc values if available
+    if let Some(reader) = doc_values {
+        if let Some(values) = reader.f64_values(field) {
+            let count = values.len();
+            let sum = values.iter().sum::<f64>();
+            let min = values.iter().copied().reduce(f64::min);
+            let max = values.iter().copied().reduce(f64::max);
+            let avg = if count > 0 {
+                Some(sum / count as f64)
+            } else {
+                None
+            };
+            return StatsAggregationResult {
+                count,
+                min,
+                max,
+                avg,
+                sum,
+            };
+        }
+        if let Some(values) = reader.i64_values(field) {
+            let count = values.len();
+            let sum: f64 = values.iter().copied().map(|v| v as f64).sum();
+            let min = values.iter().copied().map(|v| v as f64).reduce(f64::min);
+            let max = values.iter().copied().map(|v| v as f64).reduce(f64::max);
+            let avg = if count > 0 {
+                Some(sum / count as f64)
+            } else {
+                None
+            };
+            return StatsAggregationResult {
+                count,
+                min,
+                max,
+                avg,
+                sum,
+            };
+        }
+    }
+
+    // Fall back to JSON extraction
     let values = documents
         .iter()
         .filter_map(|document| document.source.get(field))
@@ -1358,7 +1456,6 @@ fn compute_stats_aggregation(documents: &[IndexDocument], field: &str) -> StatsA
     } else {
         None
     };
-
     StatsAggregationResult {
         count,
         min,
@@ -1372,9 +1469,29 @@ fn compute_date_histogram_aggregation(
     documents: &[IndexDocument],
     field: &str,
     interval: &DateHistogramInterval,
+    doc_values: Option<&DocValuesReader>,
 ) -> DateHistogramAggregationResult {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    // Try doc values first (timestamps stored as i64 millis)
+    if let Some(reader) = doc_values
+        && let Some(values) = reader.i64_values(field)
+    {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for ts_millis in values {
+            if let Some(ts) = DateTime::from_timestamp_millis(ts_millis) {
+                let bucket = truncate_timestamp(ts, interval)
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                *counts.entry(bucket).or_default() += 1;
+            }
+        }
+        let buckets: Vec<DateHistogramBucket> = counts
+            .into_iter()
+            .map(|(key, doc_count)| DateHistogramBucket { key, doc_count })
+            .collect();
+        return DateHistogramAggregationResult { buckets };
+    }
 
+    // Fall back to JSON parsing
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for document in documents {
         let Some(raw) = document
             .source
@@ -1383,22 +1500,19 @@ fn compute_date_histogram_aggregation(
         else {
             continue;
         };
-
         let Ok(timestamp) = DateTime::parse_from_rfc3339(raw) else {
             continue;
         };
-
         let bucket_key = truncate_timestamp(timestamp.with_timezone(&Utc), interval)
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         *counts.entry(bucket_key).or_default() += 1;
     }
 
-    DateHistogramAggregationResult {
-        buckets: counts
-            .into_iter()
-            .map(|(key, doc_count)| DateHistogramBucket { key, doc_count })
-            .collect(),
-    }
+    let buckets: Vec<DateHistogramBucket> = counts
+        .into_iter()
+        .map(|(key, doc_count)| DateHistogramBucket { key, doc_count })
+        .collect();
+    DateHistogramAggregationResult { buckets }
 }
 
 fn truncate_timestamp(timestamp: DateTime<Utc>, interval: &DateHistogramInterval) -> DateTime<Utc> {
