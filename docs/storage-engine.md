@@ -136,6 +136,7 @@ Current implementation notes:
 - flush then trims WAL generations covered by the flushed sequence
 - segment snapshot writes call `fsync` on the parent directory to guarantee the rename entry is durable
 - named snapshot writes also call `fsync` on the parent directory after renames
+- flush also builds and writes a doc values sidecar (`doc_values/<field>.bin`) for all aggregatable field types (keyword, integer, long, double, boolean, timestamp)
 
 Flush should run less frequently than refresh.
 
