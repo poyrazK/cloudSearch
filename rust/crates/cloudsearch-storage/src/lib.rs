@@ -1,6 +1,7 @@
 use chrono::Utc;
 use cloudsearch_common::{CloudSearchError, IndexDocument, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tokio::{
     fs::{self, OpenOptions},
@@ -67,6 +68,40 @@ pub struct SnapshotMetadata {
     pub last_sequence_number: u64,
     pub document_count: usize,
     pub checksum: u32,
+}
+
+/// DocValueType for columnar sidecar storage.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DocValueType {
+    Keyword,
+    Integer,
+    Long,
+    Double,
+    Boolean,
+    Timestamp,
+}
+
+/// Header stored at the start of each doc values sidecar file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocValuesHeader {
+    pub field: String,
+    pub value_type: DocValueType,
+    pub doc_count: u64,
+}
+
+/// A single field's doc values, stored in packed binary format.
+#[derive(Debug, Clone)]
+pub struct DocValuesField {
+    pub field: String,
+    pub value_type: DocValueType,
+    pub doc_count: u64,
+    /// Packed binary data. Format depends on value_type:
+    /// - Keyword: (u32 offset, u32 len) pairs, then string pool
+    /// - Integer/Long/Timestamp: packed i64 array
+    /// - Double: packed f64 array
+    /// - Boolean: packed u8 bit array
+    pub data: Vec<u8>,
 }
 
 impl WalManager {
@@ -306,6 +341,97 @@ pub async fn read_segment_snapshot(
 
     let bytes = fs::read(path).await?;
     Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+fn doc_values_dir(segments_dir: &Path) -> PathBuf {
+    segments_dir.join("doc_values")
+}
+
+fn doc_values_path(segments_dir: &Path, field: &str) -> PathBuf {
+    doc_values_dir(segments_dir).join(format!("{field}.bin"))
+}
+
+/// Write all doc values fields to the sidecar directory.
+pub async fn write_doc_values(
+    segments_dir: impl AsRef<Path>,
+    fields: &BTreeMap<String, DocValuesField>,
+) -> Result<()> {
+    let segments_dir = segments_dir.as_ref();
+    let dv_dir = doc_values_dir(segments_dir);
+    fs::create_dir_all(&dv_dir).await?;
+
+    for (field, f) in fields {
+        let path = doc_values_path(segments_dir, field);
+        // Format: header (JSON) + binary data
+        let header = DocValuesHeader {
+            field: f.field.clone(),
+            value_type: f.value_type.clone(),
+            doc_count: f.doc_count,
+        };
+        let header_bytes = serde_json::to_vec(&header)?;
+        let len_bytes = (header_bytes.len() as u32).to_le_bytes();
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .await?;
+        file.write_all(&len_bytes).await?;
+        file.write_all(&header_bytes).await?;
+        file.write_all(&f.data).await?;
+        file.flush().await?;
+        file.sync_all().await?;
+    }
+
+    // Sync parent directory
+    let dir_file = OpenOptions::new().read(true).open(&dv_dir).await?;
+    dir_file.sync_all().await?;
+
+    Ok(())
+}
+
+/// Read all doc values fields from the sidecar directory.
+pub async fn read_doc_values(
+    segments_dir: impl AsRef<Path>,
+) -> Result<BTreeMap<String, DocValuesField>> {
+    let segments_dir = segments_dir.as_ref();
+    let dv_dir = doc_values_dir(segments_dir);
+
+    if !fs::try_exists(&dv_dir).await? {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut entries = fs::read_dir(&dv_dir).await?;
+    let mut result = BTreeMap::new();
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "bin") {
+            let mut file = OpenOptions::new().read(true).open(&path).await?;
+            let mut len_buf = [0u8; 4];
+            file.read_exact(&mut len_buf).await?;
+            let header_len = u32::from_le_bytes(len_buf) as usize;
+
+            let mut header_buf = vec![0u8; header_len];
+            file.read_exact(&mut header_buf).await?;
+            let header: DocValuesHeader = serde_json::from_slice(&header_buf)?;
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).await?;
+
+            result.insert(
+                header.field.clone(),
+                DocValuesField {
+                    field: header.field,
+                    value_type: header.value_type,
+                    doc_count: header.doc_count,
+                    data,
+                },
+            );
+        }
+    }
+
+    Ok(result)
 }
 
 pub async fn write_segment_snapshot(
