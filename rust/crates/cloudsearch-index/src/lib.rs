@@ -9,10 +9,12 @@ use cloudsearch_common::{
     TermsBucket, TermsQuery, WildcardQuery,
 };
 use cloudsearch_storage::{
-    SegmentManifest, SegmentSnapshot, SnapshotMetadata, WalManager, WalRecord,
-    delete_snapshot as storage_delete_snapshot, list_snapshots, read_doc_values,
-    read_named_snapshot, read_segment_snapshot, read_snapshot_metadata,
-    write_doc_values as storage_write_doc_values, write_named_snapshot, write_segment_snapshot,
+    IndexManifest, SegmentMeta, SegmentSnapshot, SnapshotMetadata, WalManager, WalRecord,
+    delete_snapshot as storage_delete_snapshot, legacy_snapshot_exists, list_snapshots,
+    read_doc_values, read_index_manifest, read_named_snapshot, read_segment_file,
+    read_segment_snapshot, read_snapshot_metadata, segment_file_path,
+    write_doc_values as storage_write_doc_values, write_index_manifest, write_named_snapshot,
+    write_segment_snapshot,
 };
 mod doc_values;
 mod doc_values_reader;
@@ -34,11 +36,11 @@ const MERGE_TRIGGER_DOCUMENT_COUNT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergePlan {
-    segments: Vec<SegmentManifest>,
+    segments: Vec<SegmentMeta>,
 }
 
 impl MergePlan {
-    pub fn new(segments: Vec<SegmentManifest>) -> Self {
+    pub fn new(segments: Vec<SegmentMeta>) -> Self {
         Self { segments }
     }
 
@@ -94,6 +96,10 @@ impl IndexCatalog {
 
         fs::create_dir_all(index_dir.join("wal")).await?;
         fs::create_dir_all(index_dir.join("segments")).await?;
+
+        // Initialize empty manifest for new indexes
+        let segments_dir = index_dir.join("segments");
+        write_index_manifest(&segments_dir, &IndexManifest::new()).await?;
 
         let mut metadata = IndexMetadata::new(name, request.settings);
         if let Some(mappings) = request.mappings {
@@ -162,23 +168,55 @@ impl IndexCatalog {
         let metadata_path = self.metadata_path(name);
         let segments_dir = self.index_dir(name).join("segments");
         let wal = WalManager::open(self.index_dir(name).join("wal")).await?;
-        let snapshot = read_segment_snapshot(&segments_dir).await?;
 
-        let mut searchable_documents = snapshot
-            .as_ref()
-            .map(|snapshot| {
-                snapshot
-                    .documents
-                    .iter()
-                    .cloned()
-                    .map(|document| (document.id.clone(), document))
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let mut last_sequence_number = snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.last_sequence_number)
-            .unwrap_or(0);
+        // Try new manifest-based recovery first, fall back to legacy current.json migration
+        let manifest = match read_index_manifest(&segments_dir).await? {
+            Some(m) => m,
+            None => {
+                // Migration: check if old current.json exists
+                if legacy_snapshot_exists(&segments_dir).await? {
+                    tracing::info!(index = %name, "migrating legacy current.json to manifest");
+                    let snapshot = read_segment_snapshot(&segments_dir).await?;
+                    let segment_number = 1;
+                    let seg_path = segment_file_path(&segments_dir, segment_number);
+                    if let Some(ref _snap) = snapshot {
+                        // Rename current.json → seg_000001.json
+                        let current_path = segments_dir.join("current.json");
+                        fs::rename(&current_path, &seg_path).await?;
+                    }
+                    let meta = SegmentMeta {
+                        segment_number,
+                        last_sequence_number: snapshot
+                            .as_ref()
+                            .map(|s| s.last_sequence_number)
+                            .unwrap_or(0),
+                        document_count: snapshot
+                            .as_ref()
+                            .map(|s| s.documents.len() as u64)
+                            .unwrap_or(0),
+                        checksum: 0, // checksum not computed for legacy
+                    };
+                    IndexManifest::new().with_segment(meta)
+                } else {
+                    IndexManifest::new()
+                }
+            }
+        };
+
+        // Load all segments into searchable_documents (last-write-wins)
+        let mut searchable_documents: BTreeMap<String, IndexDocument> = BTreeMap::new();
+        let mut max_seq = 0u64;
+        for seg_meta in &manifest.segments {
+            let seg_path = segment_file_path(&segments_dir, seg_meta.segment_number);
+            if let Ok(Some(snap)) = read_segment_file(&seg_path).await {
+                for doc in snap.documents {
+                    searchable_documents.insert(doc.id.clone(), doc);
+                }
+                max_seq = max_seq.max(seg_meta.last_sequence_number);
+            }
+        }
+
+        let mut last_sequence_number = max_seq;
 
         tracing::info!(index = %name, "recovering WAL");
         let entries = wal.replay_from(last_sequence_number).await?;
@@ -192,7 +230,6 @@ impl IndexCatalog {
             match entry.record {
                 WalRecord::IndexDocument { document } => {
                     searchable_documents.insert(document.id.clone(), document.clone());
-                    // Reconstruct timestamp from document source
                     if let Some(ts) = extract_document_timestamp_from_doc(&metadata, &document)
                         && let Some(retention) = metadata.settings.retention_secs
                     {
@@ -223,6 +260,7 @@ impl IndexCatalog {
             metadata_path,
             wal,
             segments_dir,
+            manifest,
             searchable_documents,
             pending_operations: BTreeMap::new(),
             last_sequence_number,
@@ -362,6 +400,8 @@ pub struct IndexHandle {
     metadata_path: PathBuf,
     wal: WalManager,
     segments_dir: PathBuf,
+    /// Tracks active immutable segments — replaces single mutable snapshot.
+    manifest: IndexManifest,
     searchable_documents: BTreeMap<String, IndexDocument>,
     pending_operations: BTreeMap<String, PendingOperation>,
     last_sequence_number: u64,
@@ -461,16 +501,16 @@ impl IndexHandle {
         false
     }
 
-    pub(crate) fn plan_merge(&self, segment_snapshot: &SegmentSnapshot) -> Option<MergePlan> {
-        let manifest = SegmentManifest::from(segment_snapshot);
+    pub(crate) fn plan_merge(&self) -> Option<MergePlan> {
+        // Find the oldest segment to merge (simple strategy: always merge oldest)
+        let oldest = self.manifest.segments.first()?;
 
-        if manifest.document_count == 0
-            || manifest.document_count < MERGE_TRIGGER_DOCUMENT_COUNT as u64
+        if oldest.document_count == 0 || oldest.document_count < MERGE_TRIGGER_DOCUMENT_COUNT as u64
         {
             return None;
         }
 
-        Some(MergePlan::new(vec![manifest]))
+        Some(MergePlan::new(vec![oldest.clone()]))
     }
 
     pub async fn apply_merge_plan(&mut self, plan: &MergePlan) -> Result<()> {
@@ -478,21 +518,19 @@ impl IndexHandle {
             return Ok(());
         }
 
-        // Read the current on-disk segment
-        let snapshot = match read_segment_snapshot(&self.segments_dir).await? {
-            Some(s) => s,
-            None => {
-                tracing::debug!(index = %self.metadata.name, "no on-disk segment found during merge");
-                return Ok(());
-            }
-        };
+        // Collect segment IDs to merge
+        let segment_ids: Vec<u64> = plan.segments.iter().map(|s| s.segment_number).collect();
 
-        // Build merged document set starting from on-disk documents
-        let mut merged: BTreeMap<String, IndexDocument> = snapshot
-            .documents
-            .into_iter()
-            .map(|doc| (doc.id.clone(), doc))
-            .collect();
+        // Read all segment files being merged
+        let mut merged: BTreeMap<String, IndexDocument> = BTreeMap::new();
+        for seg_meta in &plan.segments {
+            let seg_path = segment_file_path(&self.segments_dir, seg_meta.segment_number);
+            if let Ok(Some(snap)) = read_segment_file(&seg_path).await {
+                for doc in snap.documents {
+                    merged.insert(doc.id.clone(), doc);
+                }
+            }
+        }
 
         // Apply pending operations
         for (id, op) in &self.pending_operations {
@@ -508,14 +546,52 @@ impl IndexHandle {
 
         let merged_documents = merged.len();
 
+        // Determine next segment number
+        let new_segment_number = self.manifest.next_segment_number();
+
         // Write new compacted segment
         let new_snapshot = SegmentSnapshot {
             last_sequence_number: self.last_sequence_number,
             documents: merged.clone().into_values().collect(),
         };
-        write_segment_snapshot(&self.segments_dir, &new_snapshot).await?;
+
+        // Write to segment file path (NOT current.json)
+        let new_seg_path = segment_file_path(&self.segments_dir, new_segment_number);
+        let temp_path = self
+            .segments_dir
+            .join(format!("seg_{new_segment_number:06}.tmp"));
+        let bytes = serde_json::to_vec_pretty(&new_snapshot)?;
+        fs::write(&temp_path, bytes).await?;
+        fs::rename(&temp_path, &new_seg_path).await?;
+
+        // Compute checksum
+        let data_bytes = serde_json::to_vec(&new_snapshot)?;
+        let checksum = crc32c::crc32c(&data_bytes);
+
+        // Build new manifest: remove merged segments, add new one
+        let mut new_manifest = IndexManifest {
+            version: self.manifest.version + 1,
+            last_updated: chrono::Utc::now(),
+            segments: self
+                .manifest
+                .segments
+                .iter()
+                .filter(|s| !segment_ids.contains(&s.segment_number))
+                .cloned()
+                .collect(),
+        };
+        new_manifest.segments.push(SegmentMeta {
+            segment_number: new_segment_number,
+            last_sequence_number: new_snapshot.last_sequence_number,
+            document_count: merged_documents as u64,
+            checksum,
+        });
+
+        // Atomic manifest swap
+        write_index_manifest(&self.segments_dir, &new_manifest).await?;
 
         // Update in-memory state
+        self.manifest = new_manifest;
         self.searchable_documents = merged;
 
         tracing::info!(index = %self.metadata.name, docs = merged_documents, "apply_merge_plan complete");
@@ -784,8 +860,50 @@ impl IndexHandle {
             documents: self.searchable_documents.values().cloned().collect(),
         };
 
-        write_segment_snapshot(&self.segments_dir, &snapshot).await?;
-        tracing::info!(index = %self.metadata.name, seq = self.last_sequence_number, "flushed segment to disk");
+        // Determine next segment number
+        let segment_number = self.manifest.next_segment_number();
+
+        // Write new immutable segment file
+        let seg_path = segment_file_path(&self.segments_dir, segment_number);
+        let temp_path = self
+            .segments_dir
+            .join(format!("seg_{segment_number:06}.tmp"));
+        let bytes = serde_json::to_vec_pretty(&snapshot)?;
+        fs::write(&temp_path, bytes).await?;
+        fs::rename(temp_path, &seg_path).await?;
+        // Sync directory for durability
+        let dir_file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&self.segments_dir)
+            .await?;
+        dir_file.sync_all().await?;
+
+        // Compute checksum of segment data
+        let data_bytes = serde_json::to_vec(&snapshot)?;
+        let checksum = crc32c::crc32c(&data_bytes);
+
+        // Build updated manifest
+        let new_segment_meta = SegmentMeta {
+            segment_number,
+            last_sequence_number: snapshot.last_sequence_number,
+            document_count: snapshot.documents.len() as u64,
+            checksum,
+        };
+
+        let mut new_manifest = IndexManifest {
+            version: self.manifest.version + 1,
+            last_updated: chrono::Utc::now(),
+            segments: self.manifest.segments.clone(),
+        };
+        new_manifest.segments.push(new_segment_meta);
+
+        // Atomic manifest swap
+        write_index_manifest(&self.segments_dir, &new_manifest).await?;
+
+        // Update in-memory manifest
+        self.manifest = new_manifest;
+
+        tracing::info!(index = %self.metadata.name, seq = self.last_sequence_number, seg = segment_number, "flushed segment to disk");
 
         // Build and write doc values sidecar for aggregations
         let doc_values =
@@ -795,7 +913,7 @@ impl IndexHandle {
 
         self.wal.trim_through(snapshot.last_sequence_number).await?;
 
-        if let Some(plan) = self.plan_merge(&snapshot) {
+        if let Some(plan) = self.plan_merge() {
             self.apply_merge_plan(&plan).await?;
         }
 
@@ -3928,12 +4046,12 @@ mod tests {
             .expect("index doc");
         handle.refresh().await.expect("refresh");
 
-        let snapshot = SegmentSnapshot {
+        let _snapshot = SegmentSnapshot {
             last_sequence_number: handle.last_sequence_number,
             documents: handle.searchable_documents.values().cloned().collect(),
         };
 
-        assert!(handle.plan_merge(&snapshot).is_none());
+        assert!(handle.plan_merge().is_none());
     }
 
     #[tokio::test]
@@ -3965,13 +4083,9 @@ mod tests {
                 .expect("index doc");
         }
         handle.refresh().await.expect("refresh");
+        handle.flush().await.expect("flush");
 
-        let snapshot = SegmentSnapshot {
-            last_sequence_number: handle.last_sequence_number,
-            documents: handle.searchable_documents.values().cloned().collect(),
-        };
-
-        let plan = handle.plan_merge(&snapshot).expect("merge plan");
+        let plan = handle.plan_merge().expect("merge plan");
         assert_eq!(plan.segments.len(), 1);
         assert_eq!(
             plan.segments[0].document_count,

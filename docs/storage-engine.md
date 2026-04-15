@@ -81,30 +81,31 @@ Each segment should contain:
 - easier merge behavior
 - better fit for near-real-time search
 
-## Proposed On-Disk Logical Layout
+## On-Disk Logical Layout
 
-Each index should have its own local directory.
+Each index has its own local directory.
 
-Example structure:
+Current structure:
 
 ```text
 indexes/
   <index-id>/
     metadata.json
     wal/
+      CURRENT
       000001.log
       000002.log
     segments/
-      seg_000001/
-        segment.meta
-        terms.dat
-        postings.dat
-        stored_fields.dat
-        doc_values.dat
-        deletes.dat
+      manifest.json        # atomic swap target — tracks all active segments
+      seg_000001.json     # immutable segment files (one per flush)
+      seg_000002.json
+      ...
+      doc_values/         # flat doc values sidecar (per-segment planned)
+        field1.bin
+        field2.bin
 ```
 
-The exact file format can evolve, but the logical separation should remain clear.
+The manifest uses atomic rename (`manifest.tmp` → `manifest.json` + directory sync) so readers see a consistent snapshot of the segment list at all times.
 
 ## Refresh
 
@@ -132,7 +133,9 @@ Current implementation notes:
 
 - flush forces a WAL generation rollover before writing the segment snapshot
 - this ordering prevents restart replay inconsistencies (WAL already rolled over so snapshot sequence is valid)
-- flush writes a simple searchable segment snapshot to `segments/current.json`
+- flush writes an immutable segment to `segments/seg_NNNNNN.json`
+- flush atomically updates `segments/manifest.json` to include the new segment (rename + directory sync)
+- multiple segments can coexist — each is referenced by the manifest
 - flush then trims WAL generations covered by the flushed sequence
 - segment snapshot writes call `fsync` on the parent directory to guarantee the rename entry is durable
 - named snapshot writes also call `fsync` on the parent directory after renames
@@ -189,8 +192,9 @@ Recovery sequence:
 
 Current implementation notes:
 
-- recovery loads the flushed segment snapshot first
-- WAL replay then starts after the flushed sequence boundary
+- recovery loads all segments from `manifest.json` into searchable_documents (last-write-wins)
+- WAL replay starts from the maximum `last_sequence_number` across all segments
+- Legacy indexes (without manifest.json) migrate automatically: `current.json` is renamed to `seg_000001.json` and an initial manifest is created
 
 ## Merge Lifecycle
 
@@ -198,10 +202,12 @@ Merge is now available as an explicit operation via `POST /{index}/_merge`.
 
 Current implementation notes:
 
-- merge rewrites the current segment snapshot in place
-- deduplicating overwrites by keeping the latest document version
-- removing deleted documents from the searchable view
-- the merged segment preserves `last_sequence_number`
+- merge selects the oldest segment from the manifest for compaction
+- merge reads selected segment files and applies pending operations (last-write-wins for overwrites, removes for deletes)
+- merge writes a new compacted segment to `segments/seg_NNNNNN.json`
+- merge updates `manifest.json` atomically: removes merged segments, adds new one
+- deduplication keeps the latest document version; deleted documents are removed from the searchable view
+- the merged segment preserves the highest `last_sequence_number`
 
 Recovery correctness is more important than startup speed in the first version.
 

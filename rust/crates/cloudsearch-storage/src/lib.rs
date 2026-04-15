@@ -60,6 +60,52 @@ impl From<&SegmentSnapshot> for SegmentManifest {
     }
 }
 
+/// Metadata for a single immutable segment, referenced by the index manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SegmentMeta {
+    pub segment_number: u64,
+    pub last_sequence_number: u64,
+    pub document_count: u64,
+    pub checksum: u32,
+}
+
+/// The index manifest — tracks all active immutable segments.
+/// Replaces the single mutable `current.json` pattern.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexManifest {
+    pub version: u64,
+    pub last_updated: chrono::DateTime<chrono::Utc>,
+    pub segments: Vec<SegmentMeta>,
+}
+
+impl IndexManifest {
+    pub fn new() -> Self {
+        Self {
+            version: 1,
+            last_updated: chrono::Utc::now(),
+            segments: Vec::new(),
+        }
+    }
+
+    pub fn with_segment(mut self, meta: SegmentMeta) -> Self {
+        self.segments.push(meta);
+        self
+    }
+
+    pub fn next_segment_number(&self) -> u64 {
+        self.segments
+            .last()
+            .map(|s| s.segment_number + 1)
+            .unwrap_or(1)
+    }
+}
+
+impl Default for IndexManifest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Metadata for a named snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotMetadata {
@@ -343,6 +389,15 @@ pub async fn read_segment_snapshot(
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
+/// Read a segment snapshot from a specific segment file path (absolute path).
+pub async fn read_segment_file(path: impl AsRef<Path>) -> Result<Option<SegmentSnapshot>> {
+    if !fs::try_exists(path.as_ref()).await? {
+        return Ok(None);
+    }
+    let bytes = fs::read(path.as_ref()).await?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
 fn doc_values_dir(segments_dir: &Path) -> PathBuf {
     segments_dir.join("doc_values")
 }
@@ -614,6 +669,46 @@ pub async fn delete_snapshot(segments_dir: impl AsRef<Path>, name: &str) -> Resu
         fs::remove_file(meta_path).await?;
     }
     Ok(())
+}
+
+fn manifest_path(segments_dir: &Path) -> PathBuf {
+    segments_dir.join("manifest.json")
+}
+
+pub fn segment_file_path(segments_dir: &Path, segment_number: u64) -> PathBuf {
+    segments_dir.join(format!("seg_{segment_number:06}.json"))
+}
+
+/// Write the index manifest atomically (rename + dir sync).
+pub async fn write_index_manifest(
+    segments_dir: impl AsRef<Path>,
+    manifest: &IndexManifest,
+) -> Result<()> {
+    let segments_dir = segments_dir.as_ref();
+    let path = manifest_path(segments_dir);
+    let temp_path = segments_dir.join("manifest.tmp");
+    let bytes = serde_json::to_vec_pretty(manifest)?;
+    fs::write(&temp_path, bytes).await?;
+    fs::rename(temp_path, &path).await?;
+    // Sync directory so manifest entry is durable
+    let dir_file = OpenOptions::new().read(true).open(segments_dir).await?;
+    dir_file.sync_all().await?;
+    Ok(())
+}
+
+/// Read the index manifest, returning None if it doesn't exist.
+pub async fn read_index_manifest(segments_dir: impl AsRef<Path>) -> Result<Option<IndexManifest>> {
+    let path = manifest_path(segments_dir.as_ref());
+    if !fs::try_exists(&path).await? {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).await?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+/// Check if the legacy `current.json` exists (for migration).
+pub async fn legacy_snapshot_exists(segments_dir: impl AsRef<Path>) -> Result<bool> {
+    Ok(fs::try_exists(segment_snapshot_path(segments_dir.as_ref())).await?)
 }
 
 fn segment_snapshot_path(segments_dir: &Path) -> PathBuf {
