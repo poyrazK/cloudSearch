@@ -7,7 +7,7 @@ use cloudsearch_common::{
     TermQuery,
 };
 use cloudsearch_index::{IndexCatalog, MergePlan};
-use cloudsearch_storage::SegmentManifest;
+use cloudsearch_storage::SegmentMeta;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -70,9 +70,11 @@ async fn apply_merge_plan_skips_when_no_on_disk_segment() {
         .expect("index");
 
     // Create a merge plan — should skip gracefully when no segment on disk
-    let plan = MergePlan::new(vec![SegmentManifest {
+    let plan = MergePlan::new(vec![SegmentMeta {
+        segment_number: 1,
         last_sequence_number: 1,
         document_count: 1,
+        checksum: 0,
     }]);
     let result = handle.apply_merge_plan(&plan).await;
     result.expect("apply_merge_plan should succeed gracefully");
