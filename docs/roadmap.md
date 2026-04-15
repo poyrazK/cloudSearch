@@ -27,7 +27,7 @@ Exit criteria:
 ## Phase 2 - Production-Grade Single-Node Engine
 
 - bulk ingestion
-- immutable on-disk segments
+- immutable on-disk segments ✓
 - stored source and doc values
 - sorting and pagination
 - aggregations: `terms`, `date_histogram`, `stats`
