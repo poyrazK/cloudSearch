@@ -58,6 +58,10 @@ pub struct IndexSettings {
     /// TTL in seconds. Documents are automatically evicted after this duration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retention_secs: Option<u64>,
+    /// Minimum segment size (in documents) before it becomes eligible for merge.
+    /// None uses the built-in default of 8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_threshold_docs: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

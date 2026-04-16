@@ -1433,6 +1433,7 @@ mod tests {
                                 primary_time_field: Some("@timestamp".to_string()),
                                 namespace: None,
                                 retention_secs: None,
+                                merge_threshold_docs: None,
                             },
                             ..Default::default()
                         })
@@ -1502,6 +1503,7 @@ mod tests {
                                 primary_time_field: None,
                                 namespace: Some("tenant@invalid".to_string()),
                                 retention_secs: None,
+                                merge_threshold_docs: None,
                             },
                             ..Default::default()
                         })
@@ -1549,6 +1551,7 @@ mod tests {
                                 primary_time_field: None,
                                 namespace: Some("".to_string()),
                                 retention_secs: None,
+                                merge_threshold_docs: None,
                             },
                             ..Default::default()
                         })
@@ -1582,6 +1585,7 @@ mod tests {
                                 primary_time_field: None,
                                 namespace: Some("a".repeat(65)),
                                 retention_secs: None,
+                                merge_threshold_docs: None,
                             },
                             ..Default::default()
                         })
@@ -1615,6 +1619,7 @@ mod tests {
                                 primary_time_field: None,
                                 namespace: Some("tenant-abc".to_string()),
                                 retention_secs: None,
+                                merge_threshold_docs: None,
                             },
                             ..Default::default()
                         })
@@ -3494,6 +3499,7 @@ mod tests {
                                 primary_time_field: None,
                                 namespace: None,
                                 retention_secs: None,
+                                merge_threshold_docs: None,
                             },
                             ..Default::default()
                         })

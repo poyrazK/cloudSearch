@@ -317,6 +317,7 @@ fn test_index_settings_with_namespace() {
         primary_time_field: Some("created_at".to_string()),
         namespace: Some("prod".to_string()),
         retention_secs: None,
+        merge_threshold_docs: None,
     });
 }
 
@@ -328,6 +329,7 @@ fn test_index_settings_namespace_none() {
         primary_time_field: None,
         namespace: None,
         retention_secs: None,
+        merge_threshold_docs: None,
     });
 }
 
@@ -383,6 +385,7 @@ fn test_create_index_request_with_settings() {
             primary_time_field: Some("ts".to_string()),
             namespace: Some("test".to_string()),
             retention_secs: Some(86400),
+            merge_threshold_docs: None,
         },
         ..Default::default()
     });
