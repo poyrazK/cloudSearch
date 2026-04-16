@@ -214,10 +214,27 @@ impl WalManager {
                 }
 
                 let record_type = header[1];
-                let payload_len = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
-                let sequence_number = u64::from_le_bytes(header[6..14].try_into().unwrap());
-                let recorded_at_unix_ms = i64::from_le_bytes(header[14..22].try_into().unwrap());
-                let checksum = u32::from_le_bytes(header[22..26].try_into().unwrap());
+                // SAFETY: header is always HEADER_LEN (26) bytes due to the loop guard above
+                let payload_len = {
+                    let mut buf = [0u8; 4];
+                    buf.copy_from_slice(&header[2..6]);
+                    u32::from_le_bytes(buf)
+                } as usize;
+                let sequence_number = {
+                    let mut buf = [0u8; 8];
+                    buf.copy_from_slice(&header[6..14]);
+                    u64::from_le_bytes(buf)
+                };
+                let recorded_at_unix_ms = {
+                    let mut buf = [0u8; 8];
+                    buf.copy_from_slice(&header[14..22]);
+                    i64::from_le_bytes(buf)
+                };
+                let checksum = {
+                    let mut buf = [0u8; 4];
+                    buf.copy_from_slice(&header[22..26]);
+                    u32::from_le_bytes(buf)
+                };
 
                 let payload_start = offset + HEADER_LEN;
                 let payload_end = payload_start + payload_len;
@@ -360,8 +377,17 @@ impl WalManager {
 
         while offset + HEADER_LEN <= bytes.len() {
             let header = &bytes[offset..offset + HEADER_LEN];
-            let payload_len = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
-            let sequence_number = u64::from_le_bytes(header[6..14].try_into().unwrap());
+            // SAFETY: header is always HEADER_LEN (26) bytes due to the loop guard above
+            let payload_len = {
+                let mut buf = [0u8; 4];
+                buf.copy_from_slice(&header[2..6]);
+                u32::from_le_bytes(buf)
+            } as usize;
+            let sequence_number = {
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(&header[6..14]);
+                u64::from_le_bytes(buf)
+            };
             let payload_end = offset + HEADER_LEN + payload_len;
 
             if payload_end > bytes.len() {
@@ -651,7 +677,7 @@ pub async fn list_snapshots(segments_dir: impl AsRef<Path>) -> Result<Vec<Snapsh
         snapshots.push(meta);
     }
 
-    snapshots.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    snapshots.sort_by_key(|a| a.created_at);
     Ok(snapshots)
 }
 

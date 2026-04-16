@@ -13,7 +13,9 @@ pub enum CloudSearchError {
     IndexAlreadyExists(String),
     #[error("index '{0}' not found")]
     IndexNotFound(String),
-    #[error("invalid index name '{0}'")]
+    #[error("document '{0}' not found")]
+    DocumentNotFound(String),
+    #[error("invalid index name '{0}': must be lowercase alphanumeric, hyphens, or underscores")]
     InvalidIndexName(String),
     #[error("invalid namespace: {0}")]
     InvalidNamespace(String),

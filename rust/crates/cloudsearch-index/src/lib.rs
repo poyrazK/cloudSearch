@@ -813,37 +813,57 @@ impl IndexHandle {
 
     pub async fn bulk_apply(&mut self, request: BulkRequest) -> Result<BulkResponse> {
         let mut items = Vec::with_capacity(request.operations.len());
+        let mut has_errors = false;
 
         for operation in request.operations {
             match operation {
                 BulkOperation::Index(index) => {
-                    let sequence_number = self
+                    match self
                         .index_document(IndexDocument {
                             id: index.id.clone(),
                             source: index.source,
                         })
-                        .await?;
-
-                    items.push(BulkItem::Index(BulkItemResult {
-                        id: index.id,
-                        result: "created".to_string(),
-                        sequence_number,
-                    }));
+                        .await
+                    {
+                        Ok(sequence_number) => {
+                            items.push(BulkItem::Index(BulkItemResult {
+                                id: index.id,
+                                result: "created".to_string(),
+                                sequence_number,
+                            }));
+                        }
+                        Err(err) => {
+                            has_errors = true;
+                            items.push(BulkItem::Index(BulkItemResult {
+                                id: index.id,
+                                result: format!("error: {err}"),
+                                sequence_number: 0,
+                            }));
+                        }
+                    }
                 }
-                BulkOperation::Delete(delete) => {
-                    let sequence_number = self.delete_document(&delete.id).await?;
-
-                    items.push(BulkItem::Delete(BulkItemResult {
-                        id: delete.id,
-                        result: "deleted".to_string(),
-                        sequence_number,
-                    }));
-                }
+                BulkOperation::Delete(delete) => match self.delete_document(&delete.id).await {
+                    Ok(sequence_number) => {
+                        items.push(BulkItem::Delete(BulkItemResult {
+                            id: delete.id,
+                            result: "deleted".to_string(),
+                            sequence_number,
+                        }));
+                    }
+                    Err(err) => {
+                        has_errors = true;
+                        items.push(BulkItem::Delete(BulkItemResult {
+                            id: delete.id,
+                            result: format!("error: {err}"),
+                            sequence_number: 0,
+                        }));
+                    }
+                },
             }
         }
 
         Ok(BulkResponse {
-            errors: false,
+            errors: has_errors,
             items,
         })
     }
@@ -1493,7 +1513,7 @@ fn compute_terms_aggregation(
                 doc_count,
             })
             .collect();
-        buckets.sort_by(|l, r| r.doc_count.cmp(&l.doc_count));
+        buckets.sort_by_key(|b| std::cmp::Reverse(b.doc_count));
         return TermsAggregationResult { buckets };
     }
 

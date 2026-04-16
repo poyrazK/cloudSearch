@@ -416,7 +416,7 @@ async fn get_document(
     let handle = handle.lock().await;
     let document = handle
         .get_document(&id)
-        .ok_or_else(|| ApiError(CloudSearchError::IndexNotFound(format!("document '{id}'"))))?;
+        .ok_or_else(|| ApiError(CloudSearchError::DocumentNotFound(id.clone())))?;
     state.metrics().record_request(
         "document_get",
         "GET",
@@ -1214,7 +1214,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.0 {
             CloudSearchError::IndexAlreadyExists(_) => StatusCode::CONFLICT,
-            CloudSearchError::IndexNotFound(_) => StatusCode::NOT_FOUND,
+            CloudSearchError::IndexNotFound(_)
+            | CloudSearchError::DocumentNotFound(_)
+            | CloudSearchError::SnapshotNotFound(_) => StatusCode::NOT_FOUND,
             CloudSearchError::InvalidIndexName(_)
             | CloudSearchError::InvalidSearchRequest(_)
             | CloudSearchError::MappingConflict(_)
@@ -1223,11 +1225,10 @@ impl IntoResponse for ApiError {
             | CloudSearchError::MappingLimitExceeded(_)
             | CloudSearchError::InvalidNamespace(_)
             | CloudSearchError::ResourceLimitExceeded(_) => StatusCode::BAD_REQUEST,
+            CloudSearchError::Serde(_) => StatusCode::BAD_REQUEST,
             CloudSearchError::InvalidWalRecord(_)
             | CloudSearchError::WalChecksumMismatch
-            | CloudSearchError::Io(_)
-            | CloudSearchError::Serde(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            CloudSearchError::SnapshotNotFound(_) => StatusCode::NOT_FOUND,
+            | CloudSearchError::Io(_) => StatusCode::SERVICE_UNAVAILABLE,
         };
 
         (
@@ -2780,7 +2781,7 @@ mod tests {
 
         assert_eq!(
             value,
-            serde_json::json!({"error": "index 'document 'missing'' not found"})
+            serde_json::json!({"error": "document 'missing' not found"})
         );
     }
 
@@ -3716,7 +3717,7 @@ mod tests {
             .await
             .expect("bulk response");
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = response
             .into_body()
             .collect()
@@ -3724,12 +3725,8 @@ mod tests {
             .expect("body")
             .to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).expect("deserialize body");
-        assert!(
-            value["error"]
-                .as_str()
-                .unwrap()
-                .contains("mapping limit exceeded")
-        );
+        // Bulk returns 200 with errors: true when individual operations fail
+        assert!(value["errors"].as_bool().unwrap());
     }
 
     #[tokio::test]
