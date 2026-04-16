@@ -502,15 +502,35 @@ impl IndexHandle {
     }
 
     pub(crate) fn plan_merge(&self) -> Option<MergePlan> {
-        // Find the oldest segment to merge (simple strategy: always merge oldest)
-        let oldest = self.manifest.segments.first()?;
+        // Policy: merge if 2+ small segments exist (worth compacting together),
+        // OR if 1 segment exceeds the threshold (large enough to warrant compaction).
+        let threshold = self
+            .metadata
+            .settings
+            .merge_threshold_docs
+            .unwrap_or(MERGE_TRIGGER_DOCUMENT_COUNT) as u64;
 
-        if oldest.document_count == 0 || oldest.document_count < MERGE_TRIGGER_DOCUMENT_COUNT as u64
-        {
-            return None;
+        let below: Vec<_> = self
+            .manifest
+            .segments
+            .iter()
+            .filter(|s| s.document_count > 0 && s.document_count < threshold)
+            .cloned()
+            .collect();
+
+        if below.len() >= 2 {
+            // Multiple small segments — compact them together
+            return Some(MergePlan::new(below));
         }
 
-        Some(MergePlan::new(vec![oldest.clone()]))
+        // Check if single large segment warrants immediate merge
+        if let Some(large) = self.manifest.segments.last()
+            && large.document_count >= threshold
+        {
+            return Some(MergePlan::new(vec![large.clone()]));
+        }
+
+        None
     }
 
     pub async fn apply_merge_plan(&mut self, plan: &MergePlan) -> Result<()> {
@@ -1850,6 +1870,7 @@ mod tests {
                         primary_time_field: Some("@timestamp".to_string()),
                         namespace: None,
                         retention_secs: None,
+                        merge_threshold_docs: None,
                     },
                     ..Default::default()
                 },
@@ -1881,6 +1902,7 @@ mod tests {
                         primary_time_field: None,
                         namespace: Some("tenant-abc".to_string()),
                         retention_secs: None,
+                        merge_threshold_docs: None,
                     },
                     ..Default::default()
                 },
@@ -1909,6 +1931,7 @@ mod tests {
                         primary_time_field: None,
                         namespace: Some("".to_string()),
                         retention_secs: None,
+                        merge_threshold_docs: None,
                     },
                     ..Default::default()
                 },
@@ -1935,6 +1958,7 @@ mod tests {
                         primary_time_field: None,
                         namespace: Some(long_namespace),
                         retention_secs: None,
+                        merge_threshold_docs: None,
                     },
                     ..Default::default()
                 },
@@ -1960,6 +1984,7 @@ mod tests {
                         primary_time_field: None,
                         namespace: Some("tenant@abc".to_string()),
                         retention_secs: None,
+                        merge_threshold_docs: None,
                     },
                     ..Default::default()
                 },
@@ -1986,6 +2011,7 @@ mod tests {
                         primary_time_field: None,
                         namespace: Some(ns_64.clone()),
                         retention_secs: None,
+                        merge_threshold_docs: None,
                     },
                     ..Default::default()
                 },
@@ -2287,6 +2313,7 @@ mod tests {
                         primary_time_field: None,
                         namespace: None,
                         retention_secs: None,
+                        merge_threshold_docs: None,
                     },
                     ..Default::default()
                 },
@@ -2344,6 +2371,7 @@ mod tests {
                         primary_time_field: None,
                         namespace: None,
                         retention_secs: None,
+                        merge_threshold_docs: None,
                     },
                     mappings: Some(mappings),
                 },

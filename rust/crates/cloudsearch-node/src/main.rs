@@ -2,8 +2,16 @@ use cloudsearch_api::router_with_registry;
 use cloudsearch_common::AppConfig;
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use std::{env, sync::Arc, time::Duration};
-use tokio::net::TcpListener;
+use tokio::{
+    net::TcpListener,
+    sync::{Semaphore, broadcast},
+    time::sleep,
+};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+struct ShutdownHandle {
+    sender: broadcast::Sender<()>,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,21 +50,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     catalog.initialize().await?;
     let registry = Arc::new(IndexRegistry::new(catalog));
 
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+    let shutdown = ShutdownHandle {
+        sender: shutdown_tx,
+    };
+
+    // Semaphore to limit concurrent background operations across all indexes
+    // Use MAX_PERMITS as "unlimited" when not configured (Semaphore permits max)
+    const MAX_PERMITS: usize = 2305843009213693951;
+    let bg_semaphore = Arc::new(Semaphore::new(
+        config.max_concurrent_background_ops.unwrap_or(MAX_PERMITS),
+    ));
+
     spawn_refresh_loop(
         registry.clone(),
         Duration::from_secs(config.refresh_interval_secs),
+        shutdown_rx.resubscribe(),
+        Arc::clone(&bg_semaphore),
     );
     spawn_flush_loop(
         registry.clone(),
         Duration::from_secs(config.flush_interval_secs),
+        shutdown_rx.resubscribe(),
+        Arc::clone(&bg_semaphore),
     );
     spawn_merge_loop(
         registry.clone(),
         Duration::from_secs(config.merge_interval_secs),
+        shutdown_rx.resubscribe(),
+        Arc::clone(&bg_semaphore),
     );
     spawn_retention_loop(
         registry.clone(),
         Duration::from_secs(config.retention_interval_secs),
+        shutdown_rx.resubscribe(),
+        Arc::clone(&bg_semaphore),
     );
 
     let app = router_with_registry(registry);
@@ -65,19 +93,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cloudSearch node listening on {}", config.bind_addr);
     tracing::info!("cloudSearch node listening on {}", config.bind_addr);
 
-    axum::serve(listener, app).await?;
+    // Wait for shutdown signal (SIGINT/SIGTERM) then broadcast shutdown to all loops
+    let shutdown_tx = shutdown.sender;
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutdown signal received, stopping background tasks...");
+        let _ = shutdown_tx.send(());
+    });
+
+    // Graceful shutdown: stop accepting new connections when shutdown signal is received
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
 
     Ok(())
 }
 
-fn spawn_refresh_loop(registry: Arc<IndexRegistry>, interval: Duration) {
+fn spawn_refresh_loop(
+    registry: Arc<IndexRegistry>,
+    interval: Duration,
+    mut shutdown: broadcast::Receiver<()>,
+    sem: Arc<Semaphore>,
+) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = sleep(interval) => {}
+                _ = shutdown.recv() => {
+                    tracing::debug!("refresh loop received shutdown signal, stopping");
+                    break;
+                }
+            }
             let handles = registry.cached_handles_with_names().await;
             for (index_name, handle) in handles {
                 let handle = handle.clone();
+                let sem = Arc::clone(&sem);
                 tokio::spawn(async move {
+                    // Acquire permit inside the task so it stays alive with the task
+                    let _permit = sem.acquire().await;
                     let result = async {
                         let mut guard = handle.lock().await;
                         guard.refresh().await
@@ -92,14 +147,27 @@ fn spawn_refresh_loop(registry: Arc<IndexRegistry>, interval: Duration) {
     });
 }
 
-fn spawn_flush_loop(registry: Arc<IndexRegistry>, interval: Duration) {
+fn spawn_flush_loop(
+    registry: Arc<IndexRegistry>,
+    interval: Duration,
+    mut shutdown: broadcast::Receiver<()>,
+    sem: Arc<Semaphore>,
+) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = sleep(interval) => {}
+                _ = shutdown.recv() => {
+                    tracing::debug!("flush loop received shutdown signal, stopping");
+                    break;
+                }
+            }
             let handles = registry.cached_handles_with_names().await;
             for (index_name, handle) in handles {
                 let handle = handle.clone();
+                let sem = Arc::clone(&sem);
                 tokio::spawn(async move {
+                    let _permit = sem.acquire().await;
                     let result = async {
                         let mut guard = handle.lock().await;
                         guard.flush().await
@@ -114,14 +182,27 @@ fn spawn_flush_loop(registry: Arc<IndexRegistry>, interval: Duration) {
     });
 }
 
-fn spawn_merge_loop(registry: Arc<IndexRegistry>, interval: Duration) {
+fn spawn_merge_loop(
+    registry: Arc<IndexRegistry>,
+    interval: Duration,
+    mut shutdown: broadcast::Receiver<()>,
+    sem: Arc<Semaphore>,
+) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = sleep(interval) => {}
+                _ = shutdown.recv() => {
+                    tracing::debug!("merge loop received shutdown signal, stopping");
+                    break;
+                }
+            }
             let handles = registry.cached_handles_with_names().await;
             for (index_name, handle) in handles {
                 let handle = handle.clone();
+                let sem = Arc::clone(&sem);
                 tokio::spawn(async move {
+                    let _permit = sem.acquire().await;
                     let result = async {
                         let mut guard = handle.lock().await;
                         guard.merge().await
@@ -136,14 +217,27 @@ fn spawn_merge_loop(registry: Arc<IndexRegistry>, interval: Duration) {
     });
 }
 
-fn spawn_retention_loop(registry: Arc<IndexRegistry>, interval: Duration) {
+fn spawn_retention_loop(
+    registry: Arc<IndexRegistry>,
+    interval: Duration,
+    mut shutdown: broadcast::Receiver<()>,
+    sem: Arc<Semaphore>,
+) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = sleep(interval) => {}
+                _ = shutdown.recv() => {
+                    tracing::debug!("retention loop received shutdown signal, stopping");
+                    break;
+                }
+            }
             let handles = registry.cached_handles_with_names().await;
             for (index_name, handle) in handles {
                 let handle = handle.clone();
+                let sem = Arc::clone(&sem);
                 tokio::spawn(async move {
+                    let _permit = sem.acquire().await;
                     let result = async {
                         let mut guard = handle.lock().await;
                         guard.evict_expired_documents().await
