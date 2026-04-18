@@ -30,6 +30,8 @@ struct CompatIndexDocumentResponse {
     result: &'static str,
 }
 
+mod query_string;
+
 #[derive(serde::Serialize)]
 struct CompatGetDocumentResponse {
     #[serde(rename = "_id")]
