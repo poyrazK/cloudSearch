@@ -17,22 +17,12 @@ pub fn parse_query_string(input: &str) -> Result<SearchQuery, CloudSearchError> 
 
 /// Token produced by the tokenizer.
 #[derive(Debug, Clone, PartialEq)]
-enum Token<'a> {
-    /// Field name
-    Field(&'a str),
-    /// Plain value (word without colons)
-    Value(&'a str),
+enum Token {
     /// The colon separator between field and value
     Colon,
-    /// Boolean operator
-    And,
-    Or,
-    Not,
     /// Parentheses
     Lparen,
     Rparen,
-    /// End of input
-    Eof,
 }
 
 struct Parser<'a> {
@@ -58,9 +48,9 @@ impl<'a> Parser<'a> {
             let rest = &self.input[self.pos..];
 
             // Handle NOT: combine with left using must_not
-            if rest.starts_with("NOT") {
-                let after = rest[3..].chars().next();
-                if after.map_or(true, |c| !c.is_alphanumeric() && c != '_' && c != '-') {
+            if let Some(stripped) = rest.strip_prefix("NOT") {
+                let after = stripped.chars().next();
+                if after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
                     self.pos += 3;
                     let right = self.parse_and_expr()?;
                     left = self.make_bool_must_not_and(left, right)?;
@@ -98,9 +88,9 @@ impl<'a> Parser<'a> {
             }
 
             // Handle AND
-            if rest.starts_with("AND") {
-                let after = rest[3..].chars().next();
-                if after.map_or(true, |c| !c.is_alphanumeric() && c != '_' && c != '-') {
+            if let Some(stripped) = rest.strip_prefix("AND") {
+                let after = stripped.chars().next();
+                if after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
                     self.pos += 3;
                     let right = self.parse_not_expr()?;
                     left = self.make_bool_must(left, right)?;
@@ -109,15 +99,15 @@ impl<'a> Parser<'a> {
             }
 
             // Stop at OR or NOT (let parse_or_expr handle it)
-            if rest.starts_with("OR") {
-                let after = rest[2..].chars().next();
-                if after.map_or(true, |c| !c.is_alphanumeric() && c != '_' && c != '-') {
+            if let Some(stripped) = rest.strip_prefix("OR") {
+                let after = stripped.chars().next();
+                if after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
                     break;
                 }
             }
-            if rest.starts_with("NOT") {
-                let after = rest[3..].chars().next();
-                if after.map_or(true, |c| !c.is_alphanumeric() && c != '_' && c != '-') {
+            if let Some(stripped) = rest.strip_prefix("NOT") {
+                let after = stripped.chars().next();
+                if after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
                     break;
                 }
             }
@@ -204,8 +194,8 @@ impl<'a> Parser<'a> {
         value: &str,
     ) -> Result<SearchQuery, CloudSearchError> {
         // Range operators: check >=, <= first before >, <
-        if value.starts_with(">=") {
-            let num = self.parse_numeric(&value[2..])?;
+        if let Some(stripped) = value.strip_prefix(">=") {
+            let num = self.parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: Some(num.clone()),
@@ -214,8 +204,8 @@ impl<'a> Parser<'a> {
                 lt: None,
             }));
         }
-        if value.starts_with("<=") {
-            let num = self.parse_numeric(&value[2..])?;
+        if let Some(stripped) = value.strip_prefix("<=") {
+            let num = self.parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: None,
@@ -224,8 +214,8 @@ impl<'a> Parser<'a> {
                 lt: None,
             }));
         }
-        if value.starts_with('>') {
-            let num = self.parse_numeric(&value[1..])?;
+        if let Some(stripped) = value.strip_prefix('>') {
+            let num = self.parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: None,
@@ -234,8 +224,8 @@ impl<'a> Parser<'a> {
                 lt: None,
             }));
         }
-        if value.starts_with('<') {
-            let num = self.parse_numeric(&value[1..])?;
+        if let Some(stripped) = value.strip_prefix('<') {
+            let num = self.parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: None,
@@ -246,18 +236,18 @@ impl<'a> Parser<'a> {
         }
 
         // Range syntax: A..B
-        if let Some((lo, hi)) = value.split_once("..") {
-            if !lo.is_empty() || !hi.is_empty() {
-                let lo_num = self.parse_numeric(lo)?;
-                let hi_num = self.parse_numeric(hi)?;
-                return Ok(SearchQuery::Range(RangeQuery {
-                    field: field.to_string(),
-                    gte: Some(lo_num.clone()),
-                    gt: None,
-                    lte: Some(hi_num.clone()),
-                    lt: None,
-                }));
-            }
+        if let Some((lo, hi)) = value.split_once("..")
+            && (!lo.is_empty() || !hi.is_empty())
+        {
+            let lo_num = self.parse_numeric(lo)?;
+            let hi_num = self.parse_numeric(hi)?;
+            return Ok(SearchQuery::Range(RangeQuery {
+                field: field.to_string(),
+                gte: Some(lo_num.clone()),
+                gt: None,
+                lte: Some(hi_num.clone()),
+                lt: None,
+            }));
         }
 
         // Wildcard detection: contains * or ?
@@ -382,8 +372,7 @@ impl<'a> Parser<'a> {
     fn skip_word(&mut self, word: &str) -> bool {
         self.skip_whitespace();
         let rest = &self.input[self.pos..];
-        if rest.starts_with(word) {
-            let after = &rest[word.len()..];
+        if let Some(after) = rest.strip_prefix(word) {
             // Ensure it's a whole word (next char not alphanumeric/underscore/hyphen)
             if after.is_empty()
                 || !after.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '-')
@@ -399,19 +388,19 @@ impl<'a> Parser<'a> {
     fn is_at_operator(&self) -> bool {
         let rest = &self.input[self.pos..];
         // AND
-        if rest.starts_with("AND") {
-            let after = rest[3..].chars().next();
-            return after.map_or(true, |c| !c.is_alphanumeric() && c != '_' && c != '-');
+        if let Some(stripped) = rest.strip_prefix("AND") {
+            let after = stripped.chars().next();
+            return after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-');
         }
         // OR
-        if rest.starts_with("OR") {
-            let after = rest[2..].chars().next();
-            return after.map_or(true, |c| !c.is_alphanumeric() && c != '_' && c != '-');
+        if let Some(stripped) = rest.strip_prefix("OR") {
+            let after = stripped.chars().next();
+            return after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-');
         }
         // NOT
-        if rest.starts_with("NOT") {
-            let after = rest[3..].chars().next();
-            return after.map_or(true, |c| !c.is_alphanumeric() && c != '_' && c != '-');
+        if let Some(stripped) = rest.strip_prefix("NOT") {
+            let after = stripped.chars().next();
+            return after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-');
         }
         false
     }
@@ -443,28 +432,6 @@ impl<'a> Parser<'a> {
                     false
                 }
             }
-            Token::And => self.skip_word("AND"),
-            Token::Or => self.skip_word("OR"),
-            Token::Not => self.skip_word("NOT"),
-            Token::Eof => {
-                self.skip_whitespace();
-                self.pos >= self.input.len()
-            }
-            _ => false,
-        }
-    }
-
-    fn is_at(&mut self, token: Token) -> bool {
-        self.skip_whitespace();
-        match token {
-            Token::Colon => self.input[self.pos..].starts_with(':'),
-            Token::Lparen => self.input[self.pos..].starts_with('('),
-            Token::Rparen => self.input[self.pos..].starts_with(')'),
-            Token::And => self.input[self.pos..].starts_with("AND"),
-            Token::Or => self.input[self.pos..].starts_with("OR"),
-            Token::Not => self.input[self.pos..].starts_with("NOT"),
-            Token::Eof => self.pos >= self.input.len(),
-            _ => false,
         }
     }
 
@@ -610,23 +577,13 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Wrap a query in must_not.
-    fn make_bool_must_not(&self, inner: SearchQuery) -> Result<SearchQuery, CloudSearchError> {
-        Ok(SearchQuery::Bool(BoolQuery {
-            must: vec![],
-            should: vec![],
-            filter: vec![],
-            must_not: vec![inner],
-        }))
-    }
-
     /// Combine left AND (NOT right) → must: [left's must + should], must_not: [right]
     fn make_bool_must_not_and(
         &self,
         left: SearchQuery,
         right: SearchQuery,
     ) -> Result<SearchQuery, CloudSearchError> {
-        let (mut must, mut should, filter) = match left {
+        let (must, should, filter) = match left {
             SearchQuery::Bool(BoolQuery {
                 must: m,
                 should,
