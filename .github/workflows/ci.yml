@@ -95,13 +95,15 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/crates/*/Cargo.toml') }}
 
       - name: Cache cargo-nextest
+        id: cache-nextest
         uses: actions/cache@v5
         with:
           path: ~/.cargo/bin/cargo-nextest
           key: cargo-nextest-${{ hashFiles('rust/Cargo.lock') }}
 
       - name: Install cargo-nextest
-        run: cargo install cargo-nextest --locked --force
+        if: steps.cache-nextest.outputs.cache-hit != 'true'
+        run: cargo install cargo-nextest --locked
 
       - name: Run all tests with nextest
         run: cargo nextest run --workspace --all-targets
