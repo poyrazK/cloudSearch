@@ -48,7 +48,8 @@ Current implementation notes:
 
 ## Supported Search API
 
-- `POST /{index}/_search`
+- `POST /{index}/_search` — search with JSON body
+- `GET /{index}/_search?q=...` — search with query string
 
 ## Observability API
 
@@ -129,6 +130,27 @@ Current implementation notes:
 - document GET responses use `_id` and `_source`, while bulk item responses use `_id` plus a `result` field
 - search currently supports top-level fields only
 - bulk format is simplified JSON, not Elasticsearch NDJSON
+
+### Query String Syntax
+
+The `GET /{index}/_search?q=...` endpoint accepts a query string that is parsed into a SearchQuery:
+
+| Syntax | Example | Description |
+|--------|---------|-------------|
+| `field:value` | `status:active` | Term query |
+| `value` | `hello` | Bare word treated as `tag:value` |
+| `field:>N` | `price:>10` | Range greater than |
+| `field:>=N` | `price:>=10` | Range greater than or equal |
+| `field:<N` | `price:<100` | Range less than |
+| `field:<=N` | `price:<=100` | Range less than or equal |
+| `field:A..B` | `price:10..100` | Range between |
+| `field:*` | `service:auth-*` | Wildcard query |
+| `"quoted"` | `message:"hello world"` | Quoted string value |
+| `AND` | `status:active AND type:post` | Boolean AND |
+| `OR` | `tag:foo OR tag:bar` | Boolean OR |
+| `NOT` | `status:active NOT deleted:true` | Negation |
+| `(...)` | `(tag:foo OR tag:bar) AND status:active` | Grouping |
+| implicit | `status:active type:post` | Implicit AND |
 
 ### Supported Aggregations In V1
 
