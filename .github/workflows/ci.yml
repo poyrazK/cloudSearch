@@ -101,7 +101,7 @@ jobs:
           key: cargo-nextest-${{ hashFiles('rust/Cargo.lock') }}
 
       - name: Install cargo-nextest
-        run: cargo install cargo-nextest --locked
+        run: cargo install cargo-nextest --locked --force
 
       - name: Run all tests with nextest
         run: cargo nextest run --workspace --all-targets
@@ -140,7 +140,7 @@ jobs:
           key: cargo-nextest-${{ hashFiles('rust/Cargo.lock') }}
 
       - name: Install cargo-nextest
-        run: cargo install cargo-nextest --locked
+        run: cargo install cargo-nextest --locked --force
 
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
