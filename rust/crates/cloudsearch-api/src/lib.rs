@@ -246,7 +246,10 @@ pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
         .route("/{index}/_flush", put(flush_index).post(flush_index))
         .route("/{index}/_merge", post(merge_index))
         .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
-        .route("/{index}/_search", get(search_index_get).post(search_index).put(search_index))
+        .route(
+            "/{index}/_search",
+            get(search_index_get).post(search_index).put(search_index),
+        )
         .route("/{index}/_settings", put(update_index_settings))
         .route("/{index}/_snapshot", get(list_snapshots))
         .route(

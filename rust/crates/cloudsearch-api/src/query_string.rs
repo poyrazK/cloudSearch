@@ -4,8 +4,7 @@
 //! into the existing SearchQuery AST.
 
 use cloudsearch_common::{
-    BoolQuery, CloudSearchError, RangeQuery,
-    SearchQuery, TermQuery, WildcardQuery,
+    BoolQuery, CloudSearchError, RangeQuery, SearchQuery, TermQuery, WildcardQuery,
 };
 
 /// Parse a query string into a SearchQuery.
@@ -285,9 +284,7 @@ impl<'a> Parser<'a> {
         // Fall back to float
         s.parse::<f64>()
             .map(|n| serde_json::json!(n))
-            .map_err(|_| {
-                CloudSearchError::InvalidSearchRequest(format!("invalid number '{}'", s))
-            })
+            .map_err(|_| CloudSearchError::InvalidSearchRequest(format!("invalid number '{}'", s)))
     }
 
     fn parse_value(&self, s: &str) -> Result<serde_json::Value, CloudSearchError> {
@@ -363,7 +360,11 @@ impl<'a> Parser<'a> {
 
     fn skip_whitespace(&mut self) {
         while self.pos < self.input.len()
-            && self.input[self.pos..].chars().next().map(|c| c.is_whitespace()) == Some(true)
+            && self.input[self.pos..]
+                .chars()
+                .next()
+                .map(|c| c.is_whitespace())
+                == Some(true)
         {
             self.pos += 1;
         }
@@ -481,11 +482,7 @@ impl<'a> Parser<'a> {
     fn ensure_exhausted(&self) -> Result<(), CloudSearchError> {
         let mut pos = self.pos;
         while pos < self.input.len()
-            && self.input[pos..]
-                .chars()
-                .next()
-                .map(|c| c.is_whitespace())
-                == Some(true)
+            && self.input[pos..].chars().next().map(|c| c.is_whitespace()) == Some(true)
         {
             pos += 1;
         }
@@ -584,9 +581,7 @@ impl<'a> Parser<'a> {
 
         match left {
             SearchQuery::Bool(BoolQuery {
-                must: m,
-                should: s,
-                ..
+                must: m, should: s, ..
             }) => {
                 if !m.is_empty() {
                     must.extend(m);
@@ -597,9 +592,7 @@ impl<'a> Parser<'a> {
         }
         match right {
             SearchQuery::Bool(BoolQuery {
-                must: m,
-                should: s,
-                ..
+                must: m, should: s, ..
             }) => {
                 if !m.is_empty() {
                     must.extend(m);
@@ -618,10 +611,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Wrap a query in must_not.
-    fn make_bool_must_not(
-        &self,
-        inner: SearchQuery,
-    ) -> Result<SearchQuery, CloudSearchError> {
+    fn make_bool_must_not(&self, inner: SearchQuery) -> Result<SearchQuery, CloudSearchError> {
         Ok(SearchQuery::Bool(BoolQuery {
             must: vec![],
             should: vec![],
