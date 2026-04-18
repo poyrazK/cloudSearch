@@ -1,0 +1,60 @@
+name: Coverage
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# Only run on main pushes (after merges), not on PRs
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/crates/*/Cargo.toml') }}
+
+      - name: Cache cargo-nextest
+        id: cache-nextest
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-nextest
+          key: cargo-nextest-${{ hashFiles('rust/Cargo.lock') }}
+
+      - name: Install cargo-nextest
+        if: steps.cache-nextest.outputs.cache-hit != 'true'
+        run: cargo install cargo-nextest --locked
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Generate coverage report
+        run: cargo llvm-cov nextest --workspace --all-targets --lcov --output-path lcov.info
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-coverage-lcov
+          path: rust/lcov.info

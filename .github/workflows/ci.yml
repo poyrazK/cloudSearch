@@ -70,7 +70,7 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  unit-tests:
+  test:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -94,70 +94,16 @@ jobs:
             rust/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/crates/*/Cargo.toml') }}
 
-      - name: Run unit and crate tests
-        run: cargo test -p cloudsearch-api -p cloudsearch-common -p cloudsearch-index -p cloudsearch-storage
-
-  integration-tests:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: rust
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo registry and build artifacts
+      - name: Cache cargo-nextest
+        id: cache-nextest
         uses: actions/cache@v5
         with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-            ~/.cargo/registry
-            ~/.cargo/git
-            rust/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/crates/*/Cargo.toml') }}
+          path: ~/.cargo/bin/cargo-nextest
+          key: cargo-nextest-${{ hashFiles('rust/Cargo.lock') }}
 
-      - name: Run node integration tests
-        run: cargo test -p cloudsearch-node --test node_restart
+      - name: Install cargo-nextest
+        if: steps.cache-nextest.outputs.cache-hit != 'true'
+        run: cargo install cargo-nextest --locked
 
-  coverage:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: rust
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Cache Cargo registry and build artifacts
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-            ~/.cargo/registry
-            ~/.cargo/git
-            rust/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/crates/*/Cargo.toml') }}
-
-      - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
-
-      - name: Generate coverage report
-        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
-
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: rust-coverage-lcov
-          path: rust/lcov.info
+      - name: Run all tests with nextest
+        run: cargo nextest run --workspace --all-targets
