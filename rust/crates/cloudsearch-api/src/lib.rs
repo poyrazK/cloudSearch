@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -246,7 +246,7 @@ pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
         .route("/{index}/_flush", put(flush_index).post(flush_index))
         .route("/{index}/_merge", post(merge_index))
         .route("/{index}/_refresh", put(refresh_index).post(refresh_index))
-        .route("/{index}/_search", put(search_index).post(search_index))
+        .route("/{index}/_search", get(search_index_get).post(search_index).put(search_index))
         .route("/{index}/_settings", put(update_index_settings))
         .route("/{index}/_snapshot", get(list_snapshots))
         .route(
@@ -442,7 +442,10 @@ async fn search_index(
     Json(request): Json<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
     let started_at = Instant::now();
-    let request = parse_search_request(request)?;
+    let mut request = parse_search_request(request)?;
+    if let Some(q) = request.query.take() {
+        request.query = Some(q);
+    }
     let handle = state.registry.index_handle(&index).await?;
     let handle = handle.lock().await;
     handle.validate_search_request(&request)?;
@@ -452,6 +455,43 @@ async fn search_index(
         metrics.record_request(
             "search",
             "POST",
+            StatusCode::OK,
+            started_at.elapsed().as_secs_f64(),
+        );
+    }
+    let elapsed = started_at.elapsed();
+    if elapsed.as_millis() > 50 {
+        tracing::warn!(index = %index, duration_ms = elapsed.as_millis(), "slow query");
+    }
+    Ok((
+        StatusCode::OK,
+        Json(to_compat_search_response(handle.search(&request))),
+    ))
+}
+
+async fn search_index_get(
+    State(state): State<ApiState>,
+    Path(index): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
+    let mut request = SearchRequest::default();
+
+    if let Some(q) = params.get("q") {
+        let parsed = crate::query_string::parse_query_string(q)
+            .map_err(|e| ApiError(CloudSearchError::InvalidSearchRequest(e.to_string())))?;
+        request.query = Some(parsed);
+    }
+
+    let handle = state.registry.index_handle(&index).await?;
+    let handle = handle.lock().await;
+    handle.validate_search_request(&request)?;
+    {
+        let mut metrics = state.metrics();
+        metrics.search_requests_total += 1;
+        metrics.record_request(
+            "search",
+            "GET",
             StatusCode::OK,
             started_at.elapsed().as_secs_f64(),
         );
