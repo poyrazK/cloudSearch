@@ -17,7 +17,7 @@ impl DocValuesReader {
     /// Returns an iterator over available field names.
     #[allow(dead_code)]
     pub fn fields(&self) -> impl Iterator<Item = &str> {
-        self.fields.keys().map(|s| s.as_str())
+        self.fields.keys().map(std::string::String::as_str)
     }
 
     /// Returns the doc count, or 0 if no fields loaded.

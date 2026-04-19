@@ -17,7 +17,7 @@ pub async fn wait_for_health(client: &Client, base_url: &str) {
                 last_err = response.status().to_string();
             }
             Err(err) => {
-                last_err = format!("{:?}", err);
+                last_err = format!("{err:?}");
             }
         }
         sleep(Duration::from_millis(100)).await;
@@ -79,6 +79,7 @@ impl Drop for TestNode {
 }
 
 /// Returns a port that is available for binding.
+#[must_use]
 pub fn reserve_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind random port");
     listener.local_addr().expect("local addr").port()
@@ -103,10 +104,12 @@ fn spawn_node_process(data_dir: &Path, port: u16) -> Child {
     cmd.spawn().expect("spawn node")
 }
 
+#[must_use]
 pub fn spawn_node(data_dir: &Path, port: u16) -> Child {
     spawn_node_with_intervals(data_dir, port, 1, 30)
 }
 
+#[must_use]
 pub fn spawn_node_with_intervals(
     data_dir: &Path,
     port: u16,
@@ -122,6 +125,7 @@ pub fn spawn_node_with_intervals(
     )
 }
 
+#[must_use]
 pub fn spawn_node_with_all_intervals(
     data_dir: &Path,
     port: u16,

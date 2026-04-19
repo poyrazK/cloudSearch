@@ -86,7 +86,11 @@ fn encode_keywords(documents: &[IndexDocument], field: &str) -> Vec<u8> {
 fn encode_i64(documents: &[IndexDocument], field: &str) -> Vec<u8> {
     let mut result = Vec::with_capacity(documents.len() * 8);
     for doc in documents {
-        let n = doc.source.get(field).and_then(|v| v.as_i64()).unwrap_or(0);
+        let n = doc
+            .source
+            .get(field)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
         result.extend_from_slice(&n.to_le_bytes());
     }
     result
@@ -99,7 +103,7 @@ fn encode_f64(documents: &[IndexDocument], field: &str) -> Vec<u8> {
         let n = doc
             .source
             .get(field)
-            .and_then(|v| v.as_f64())
+            .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
         result.extend_from_slice(&n.to_le_bytes());
     }
@@ -114,7 +118,7 @@ fn encode_boolean(documents: &[IndexDocument], field: &str) -> Vec<u8> {
         let bit = doc
             .source
             .get(field)
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         if bit {
             result[i / 8] |= 1 << (i % 8);

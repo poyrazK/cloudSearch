@@ -179,8 +179,7 @@ impl<'a> Parser<'a> {
         if value.is_empty() {
             self.pos = start;
             return Err(CloudSearchError::InvalidSearchRequest(format!(
-                "missing value for field '{}'",
-                field
+                "missing value for field '{field}'"
             )));
         }
 
@@ -274,7 +273,7 @@ impl<'a> Parser<'a> {
         // Fall back to float
         s.parse::<f64>()
             .map(|n| serde_json::json!(n))
-            .map_err(|_| CloudSearchError::InvalidSearchRequest(format!("invalid number '{}'", s)))
+            .map_err(|_| CloudSearchError::InvalidSearchRequest(format!("invalid number '{s}'")))
     }
 
     fn parse_value(&self, s: &str) -> Result<serde_json::Value, CloudSearchError> {
@@ -353,7 +352,7 @@ impl<'a> Parser<'a> {
             && self.input[self.pos..]
                 .chars()
                 .next()
-                .map(|c| c.is_whitespace())
+                .map(char::is_whitespace)
                 == Some(true)
         {
             self.pos += 1;
@@ -440,8 +439,7 @@ impl<'a> Parser<'a> {
             Ok(())
         } else {
             Err(CloudSearchError::InvalidSearchRequest(format!(
-                "expected {}",
-                description
+                "expected {description}"
             )))
         }
     }
@@ -449,7 +447,7 @@ impl<'a> Parser<'a> {
     fn ensure_exhausted(&self) -> Result<(), CloudSearchError> {
         let mut pos = self.pos;
         while pos < self.input.len()
-            && self.input[pos..].chars().next().map(|c| c.is_whitespace()) == Some(true)
+            && self.input[pos..].chars().next().map(char::is_whitespace) == Some(true)
         {
             pos += 1;
         }
@@ -635,7 +633,7 @@ mod tests {
         let result = parse_query_string("status:active type:post").unwrap();
         let bool_q = match result {
             SearchQuery::Bool(b) => b,
-            other => panic!("expected Bool, got {:?}", other),
+            other => panic!("expected Bool, got {other:?}"),
         };
         assert_eq!(bool_q.must.len(), 2);
     }
@@ -645,7 +643,7 @@ mod tests {
         let result = parse_query_string("status:active AND type:post").unwrap();
         let bool_q = match result {
             SearchQuery::Bool(b) => b,
-            other => panic!("expected Bool, got {:?}", other),
+            other => panic!("expected Bool, got {other:?}"),
         };
         assert_eq!(bool_q.must.len(), 2);
     }
@@ -655,7 +653,7 @@ mod tests {
         let result = parse_query_string("tag:foo OR tag:bar").unwrap();
         let bool_q = match result {
             SearchQuery::Bool(b) => b,
-            other => panic!("expected Bool, got {:?}", other),
+            other => panic!("expected Bool, got {other:?}"),
         };
         assert_eq!(bool_q.should.len(), 2);
     }
@@ -665,7 +663,7 @@ mod tests {
         let result = parse_query_string("status:active NOT deleted:true").unwrap();
         let bool_q = match result {
             SearchQuery::Bool(b) => b,
-            other => panic!("expected Bool, got {:?}", other),
+            other => panic!("expected Bool, got {other:?}"),
         };
         assert_eq!(bool_q.must.len(), 1);
         assert_eq!(bool_q.must_not.len(), 1);
@@ -676,7 +674,7 @@ mod tests {
         let result = parse_query_string("(tag:foo OR tag:bar) AND status:active").unwrap();
         let bool_q = match result {
             SearchQuery::Bool(b) => b,
-            other => panic!("expected Bool, got {:?}", other),
+            other => panic!("expected Bool, got {other:?}"),
         };
         assert_eq!(bool_q.must.len(), 2);
     }
@@ -799,7 +797,7 @@ mod tests {
                 .unwrap();
         let bool_q = match result {
             SearchQuery::Bool(b) => b,
-            other => panic!("expected Bool, got {:?}", other),
+            other => panic!("expected Bool, got {other:?}"),
         };
         assert_eq!(bool_q.must.len(), 2); // status:active + the OR group
         assert_eq!(bool_q.must_not.len(), 1);
