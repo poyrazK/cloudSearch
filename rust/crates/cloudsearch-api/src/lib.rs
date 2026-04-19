@@ -145,22 +145,19 @@ impl MetricsState {
 
         for ((route, method, status), value) in &self.request_counts {
             lines.push(format!(
-                "cloudsearch_requests_total{{route=\"{}\",method=\"{}\",status=\"{}\"}} {}",
-                route, method, status, value
+                "cloudsearch_requests_total{{route=\"{route}\",method=\"{method}\",status=\"{status}\"}} {value}"
             ));
         }
 
         for ((route, method), value) in &self.request_duration_sum_secs {
             lines.push(format!(
-                "cloudsearch_request_duration_seconds_sum{{route=\"{}\",method=\"{}\"}} {}",
-                route, method, value
+                "cloudsearch_request_duration_seconds_sum{{route=\"{route}\",method=\"{method}\"}} {value}"
             ));
         }
 
         for ((route, method), value) in &self.request_duration_count {
             lines.push(format!(
-                "cloudsearch_request_duration_seconds_count{{route=\"{}\",method=\"{}\"}} {}",
-                route, method, value
+                "cloudsearch_request_duration_seconds_count{{route=\"{route}\",method=\"{method}\"}} {value}"
             ));
         }
 
@@ -187,7 +184,7 @@ impl MetricsState {
             "cloudsearch_delete_index_total {}",
             self.delete_index_total
         ));
-        lines.push(format!("cloudsearch_open_indexes {}", open_indexes));
+        lines.push(format!("cloudsearch_open_indexes {open_indexes}"));
 
         for (index_name, metrics) in index_metrics {
             lines.push(format!(
@@ -216,6 +213,7 @@ pub struct ApiState {
 }
 
 impl ApiState {
+    #[must_use]
     pub fn new(registry: Arc<IndexRegistry>) -> Self {
         Self {
             registry,
@@ -1572,8 +1570,7 @@ mod tests {
         let error_msg = value["error"].as_str().expect("error message string");
         assert!(
             error_msg.contains("invalid namespace"),
-            "expected error about invalid namespace, got: {}",
-            error_msg
+            "expected error about invalid namespace, got: {error_msg}"
         );
     }
 
@@ -1595,7 +1592,7 @@ mod tests {
                             settings: IndexSettings {
                                 mapping_mode: Default::default(),
                                 primary_time_field: None,
-                                namespace: Some("".to_string()),
+                                namespace: Some(String::new()),
                                 retention_secs: None,
                                 merge_threshold_docs: None,
                             },

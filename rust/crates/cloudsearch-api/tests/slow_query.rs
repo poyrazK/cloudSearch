@@ -22,7 +22,7 @@ async fn make_app() -> axum::Router {
 
 async fn setup_index_with_docs(app: &axum::Router, count: usize) {
     for i in 0..count {
-        let doc_id = format!("doc-{}", i);
+        let doc_id = format!("doc-{i}");
         app.clone()
             .oneshot(
                 Request::builder()

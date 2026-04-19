@@ -258,8 +258,7 @@ fn parse_interval_env(name: &str, default: u64) -> u64 {
             Ok(parsed) => parsed,
             Err(_) => {
                 eprintln!(
-                    "cloudSearch ignored invalid value '{}' for {}; using default {}",
-                    value, name, default
+                    "cloudSearch ignored invalid value '{value}' for {name}; using default {default}"
                 );
                 default
             }

@@ -40,10 +40,12 @@ pub struct MergePlan {
 }
 
 impl MergePlan {
+    #[must_use]
     pub fn new(segments: Vec<SegmentMeta>) -> Self {
         Self { segments }
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
@@ -265,6 +267,7 @@ impl IndexCatalog {
         })
     }
 
+    #[must_use]
     pub fn root_dir(&self) -> &Path {
         &self.root_dir
     }
@@ -283,6 +286,7 @@ impl IndexCatalog {
 }
 
 impl IndexRegistry {
+    #[must_use]
     pub fn new(catalog: Arc<IndexCatalog>) -> Self {
         Self {
             catalog,
@@ -439,21 +443,25 @@ fn extract_document_timestamp_from_doc(
 
 impl IndexHandle {
     /// Returns the retention duration in seconds, if configured.
+    #[must_use]
     pub fn retention_secs(&self) -> Option<u64> {
         self.metadata.settings.retention_secs
     }
 
     /// Returns the primary time field name, if configured.
+    #[must_use]
     pub fn primary_time_field(&self) -> Option<&str> {
         self.metadata.settings.primary_time_field.as_deref()
     }
 
     /// Returns true if this index has a retention policy configured.
+    #[must_use]
     pub fn has_retention_policy(&self) -> bool {
         self.retention_secs().is_some() && self.primary_time_field().is_some()
     }
 
     /// Returns per-index resource metrics.
+    #[must_use]
     pub fn metrics(&self) -> IndexMetrics {
         IndexMetrics {
             document_count: self.searchable_documents.len(),
@@ -614,14 +622,17 @@ impl IndexHandle {
         Ok(())
     }
 
+    #[must_use]
     pub fn metadata(&self) -> &IndexMetadata {
         &self.metadata
     }
 
+    #[must_use]
     pub fn documents(&self) -> &BTreeMap<String, IndexDocument> {
         &self.searchable_documents
     }
 
+    #[must_use]
     pub fn get_document(&self, document_id: &str) -> Option<&IndexDocument> {
         match self.pending_operations.get(document_id) {
             Some(PendingOperation::Upsert(document)) => Some(document),
@@ -630,6 +641,7 @@ impl IndexHandle {
         }
     }
 
+    #[must_use]
     pub fn search(&self, request: &SearchRequest) -> SearchResponse {
         let query = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll);
         let now = Utc::now();
@@ -1217,8 +1229,7 @@ impl IndexHandle {
             && matches!(mapping.field_type, FieldType::Object)
         {
             return Err(CloudSearchError::InvalidSearchRequest(format!(
-                "field '{}' cannot be used as a scalar in '{}'",
-                field, context
+                "field '{field}' cannot be used as a scalar in '{context}'"
             )));
         }
 
@@ -1230,8 +1241,7 @@ impl IndexHandle {
             match mapping.field_type {
                 FieldType::Keyword => Ok(()),
                 _ => Err(CloudSearchError::InvalidSearchRequest(format!(
-                    "field '{}' does not support match queries in '{}'",
-                    field, context
+                    "field '{field}' does not support match queries in '{context}'"
                 ))),
             }
         } else {
@@ -1247,8 +1257,7 @@ impl IndexHandle {
             )
         {
             return Err(CloudSearchError::InvalidSearchRequest(format!(
-                "field '{}' is not numeric for '{}'",
-                field, context
+                "field '{field}' is not numeric for '{context}'"
             )));
         }
 
@@ -1260,8 +1269,7 @@ impl IndexHandle {
             && mapping.field_type != FieldType::Timestamp
         {
             return Err(CloudSearchError::InvalidSearchRequest(format!(
-                "field '{}' is not a timestamp for '{}'",
-                field, context
+                "field '{field}' is not a timestamp for '{context}'"
             )));
         }
 
@@ -1276,8 +1284,7 @@ impl IndexHandle {
             )
         {
             return Err(CloudSearchError::InvalidSearchRequest(format!(
-                "field '{}' does not support range queries",
-                field
+                "field '{field}' does not support range queries"
             )));
         }
 
@@ -1355,7 +1362,7 @@ fn score_match_query(document: &IndexDocument, query: &MatchQuery) -> Option<f32
 }
 
 fn tokenize(text: &str) -> Vec<String> {
-    text.split_whitespace().map(|t| t.to_lowercase()).collect()
+    text.split_whitespace().map(str::to_lowercase).collect()
 }
 
 fn matches_prefix_query(document: &IndexDocument, prefix: &PrefixQuery) -> bool {
@@ -1412,21 +1419,21 @@ fn score_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> Option<
         .collect();
 
     // All must clauses must match.
-    if must_scores.iter().any(|s| s.is_none()) {
+    if must_scores.iter().any(std::option::Option::is_none) {
         return None;
     }
     // All filter clauses must match (not scored).
-    if filter_scores.iter().any(|s| s.is_none()) {
+    if filter_scores.iter().any(std::option::Option::is_none) {
         return None;
     }
     // No must_not clause may match.
-    if must_not_scores.iter().any(|s| s.is_some()) {
+    if must_not_scores.iter().any(std::option::Option::is_some) {
         return None;
     }
     // When there are no must/filter clauses, at least one should must match.
     let should_required =
         bool_query.must.is_empty() && bool_query.filter.is_empty() && !bool_query.should.is_empty();
-    if should_required && !should_scores.iter().any(|s| s.is_some()) {
+    if should_required && !should_scores.iter().any(std::option::Option::is_some) {
         return None;
     }
 
@@ -1929,7 +1936,7 @@ mod tests {
                     settings: IndexSettings {
                         mapping_mode: MappingMode::ControlledDynamic,
                         primary_time_field: None,
-                        namespace: Some("".to_string()),
+                        namespace: Some(String::new()),
                         retention_secs: None,
                         merge_threshold_docs: None,
                     },
@@ -4455,7 +4462,7 @@ mod tests {
         let empty_prefix = handle.search(&SearchRequest {
             query: Some(SearchQuery::Prefix(PrefixQuery {
                 field: "service".to_string(),
-                value: "".to_string(),
+                value: String::new(),
             })),
             ..Default::default()
         });

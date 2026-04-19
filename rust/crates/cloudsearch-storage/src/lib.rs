@@ -79,6 +79,7 @@ pub struct IndexManifest {
 }
 
 impl IndexManifest {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             version: 1,
@@ -87,11 +88,13 @@ impl IndexManifest {
         }
     }
 
+    #[must_use]
     pub fn with_segment(mut self, meta: SegmentMeta) -> Self {
         self.segments.push(meta);
         self
     }
 
+    #[must_use]
     pub fn next_segment_number(&self) -> u64 {
         self.segments.last().map_or(1, |s| s.segment_number + 1)
     }
@@ -276,6 +279,7 @@ impl WalManager {
         Ok(last + 1)
     }
 
+    #[must_use]
     pub fn wal_dir(&self) -> &Path {
         &self.wal_dir
     }
@@ -665,8 +669,7 @@ pub async fn list_snapshots(segments_dir: impl AsRef<Path>) -> Result<Vec<Snapsh
         let data_path = snapshot_data_path(segments_dir, snapshot_name);
         if !fs::try_exists(&data_path).await? {
             return Err(CloudSearchError::InvalidWalRecord(format!(
-                "missing snapshot data file for '{}'",
-                snapshot_name
+                "missing snapshot data file for '{snapshot_name}'"
             )));
         }
 
@@ -697,6 +700,7 @@ fn manifest_path(segments_dir: &Path) -> PathBuf {
     segments_dir.join("manifest.json")
 }
 
+#[must_use]
 pub fn segment_file_path(segments_dir: &Path, segment_number: u64) -> PathBuf {
     segments_dir.join(format!("seg_{segment_number:06}.json"))
 }
@@ -1237,7 +1241,7 @@ mod tests {
             .await
             .expect_err("unsupported version should fail");
         assert!(matches!(error, CloudSearchError::InvalidWalRecord(_)));
-        assert!(format!("{}", error).contains("unsupported WAL version"));
+        assert!(error.to_string().contains("unsupported WAL version"));
     }
 
     #[tokio::test]
