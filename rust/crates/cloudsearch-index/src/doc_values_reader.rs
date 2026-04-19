@@ -23,11 +23,7 @@ impl DocValuesReader {
     /// Returns the doc count, or 0 if no fields loaded.
     #[allow(dead_code)]
     pub fn doc_count(&self) -> u64 {
-        self.fields
-            .values()
-            .next()
-            .map(|f| f.doc_count)
-            .unwrap_or(0)
+        self.fields.values().next().map_or(0, |f| f.doc_count)
     }
 
     /// Get keyword values as a Vec of string slices.

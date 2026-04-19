@@ -188,12 +188,8 @@ impl IndexCatalog {
                         segment_number,
                         last_sequence_number: snapshot
                             .as_ref()
-                            .map(|s| s.last_sequence_number)
-                            .unwrap_or(0),
-                        document_count: snapshot
-                            .as_ref()
-                            .map(|s| s.documents.len() as u64)
-                            .unwrap_or(0),
+                            .map_or(0, |s| s.last_sequence_number),
+                        document_count: snapshot.as_ref().map_or(0, |s| s.documents.len() as u64),
                         checksum: 0, // checksum not computed for legacy
                     };
                     IndexManifest::new().with_segment(meta)

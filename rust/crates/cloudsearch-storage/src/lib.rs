@@ -93,10 +93,7 @@ impl IndexManifest {
     }
 
     pub fn next_segment_number(&self) -> u64 {
-        self.segments
-            .last()
-            .map(|s| s.segment_number + 1)
-            .unwrap_or(1)
+        self.segments.last().map_or(1, |s| s.segment_number + 1)
     }
 }
 
@@ -275,8 +272,7 @@ impl WalManager {
             .replay()
             .await?
             .last()
-            .map(|entry| entry.sequence_number)
-            .unwrap_or(0);
+            .map_or(0, |entry| entry.sequence_number);
         Ok(last + 1)
     }
 
