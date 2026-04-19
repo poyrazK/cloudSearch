@@ -68,7 +68,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/crates/*/Cargo.toml') }}
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::map_unwrap_or -D clippy::get_unwrap -D clippy::if_then_some_else_none -D clippy::derive_partial_eq_without_eq -D clippy::unnecessary_literal_unwrap
+        run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::map_unwrap_or -D clippy::get_unwrap -D clippy::if_then_some_else_none -D clippy::derive_partial_eq_without_eq -D clippy::unnecessary_literal_unwrap -D clippy::todo
 
   test:
     runs-on: ubuntu-latest
