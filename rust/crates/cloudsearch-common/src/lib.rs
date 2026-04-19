@@ -386,12 +386,12 @@ pub enum AggregationResult {
     DateHistogram(DateHistogramAggregationResult),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TermsAggregationResult {
     pub buckets: Vec<TermsBucket>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TermsBucket {
     pub key: serde_json::Value,
     pub doc_count: usize,
