@@ -4,7 +4,7 @@
 
 use axum::{body::Body, http::Request};
 use cloudsearch_api::router;
-use cloudsearch_common::{CreateIndexRequest, IndexDocumentRequest};
+use cloudsearch_common::{CreateIndexRequest, IndexDocumentRequest, IndexSettings};
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -27,7 +27,7 @@ async fn create_index(app: &axum::Router, name: &str) {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&CreateIndexRequest {
-                        settings: Default::default(),
+                        settings: IndexSettings::default(),
                         ..Default::default()
                     })
                     .expect("serialize"),

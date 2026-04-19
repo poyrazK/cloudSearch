@@ -2039,7 +2039,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2050,7 +2050,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2070,7 +2070,7 @@ mod tests {
             .create_index(
                 "Logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2091,7 +2091,7 @@ mod tests {
             .create_index(
                 &long_name,
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2112,7 +2112,7 @@ mod tests {
                 .create_index(
                     name,
                     CreateIndexRequest {
-                        settings: Default::default(),
+                        settings: IndexSettings::default(),
                         ..Default::default()
                     },
                 )
@@ -2135,7 +2135,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2152,7 +2152,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2188,7 +2188,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2224,7 +2224,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2265,7 +2265,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2433,7 +2433,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2484,7 +2484,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2525,7 +2525,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2559,7 +2559,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2593,7 +2593,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2627,7 +2627,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2675,7 +2675,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2709,7 +2709,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2751,7 +2751,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2812,7 +2812,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2851,7 +2851,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2919,7 +2919,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -2971,7 +2971,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3000,7 +3000,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3056,7 +3056,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3135,7 +3135,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3176,7 +3176,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3221,7 +3221,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3311,7 +3311,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3370,7 +3370,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3417,7 +3417,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3459,7 +3459,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3537,7 +3537,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3622,7 +3622,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3718,7 +3718,7 @@ mod tests {
             .create_index(
                 "test",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3758,7 +3758,7 @@ mod tests {
             .create_index(
                 "test",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3798,7 +3798,7 @@ mod tests {
             .create_index(
                 "test",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3839,7 +3839,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3906,7 +3906,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -3966,7 +3966,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4018,7 +4018,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4055,7 +4055,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4090,7 +4090,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4133,7 +4133,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4175,7 +4175,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4211,7 +4211,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4243,7 +4243,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4285,7 +4285,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4334,7 +4334,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4377,7 +4377,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4479,7 +4479,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4598,7 +4598,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )
@@ -4691,7 +4691,7 @@ mod tests {
             .create_index(
                 "logs",
                 CreateIndexRequest {
-                    settings: Default::default(),
+                    settings: IndexSettings::default(),
                     ..Default::default()
                 },
             )

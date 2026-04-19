@@ -1291,8 +1291,9 @@ mod tests {
     use cloudsearch_common::{
         AggregationRequest, BoolQuery, BulkDeleteOperation, BulkIndexOperation, BulkOperation,
         BulkRequest, CreateIndexRequest, DateHistogramAggregationRequest, DateHistogramInterval,
-        IndexDocumentRequest, IndexSettings, RangeQuery, SearchQuery, SearchRequest, SortOrder,
-        SortSpec, StatsAggregationRequest, TermQuery, TermsAggregationRequest, TermsQuery,
+        IndexDocumentRequest, IndexSettings, MappingMode, RangeQuery, SearchQuery, SearchRequest,
+        SortOrder, SortSpec, StatsAggregationRequest, TermQuery, TermsAggregationRequest,
+        TermsQuery,
     };
     use http_body_util::BodyExt;
     use std::sync::Arc;
@@ -1352,7 +1353,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -1473,7 +1474,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
                             settings: IndexSettings {
-                                mapping_mode: Default::default(),
+                                mapping_mode: MappingMode::default(),
                                 primary_time_field: Some("@timestamp".to_string()),
                                 namespace: None,
                                 retention_secs: None,
@@ -1543,7 +1544,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
                             settings: IndexSettings {
-                                mapping_mode: Default::default(),
+                                mapping_mode: MappingMode::default(),
                                 primary_time_field: None,
                                 namespace: Some("tenant@invalid".to_string()),
                                 retention_secs: None,
@@ -1590,7 +1591,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
                             settings: IndexSettings {
-                                mapping_mode: Default::default(),
+                                mapping_mode: MappingMode::default(),
                                 primary_time_field: None,
                                 namespace: Some(String::new()),
                                 retention_secs: None,
@@ -1624,7 +1625,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
                             settings: IndexSettings {
-                                mapping_mode: Default::default(),
+                                mapping_mode: MappingMode::default(),
                                 primary_time_field: None,
                                 namespace: Some("a".repeat(65)),
                                 retention_secs: None,
@@ -1658,7 +1659,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
                             settings: IndexSettings {
-                                mapping_mode: Default::default(),
+                                mapping_mode: MappingMode::default(),
                                 primary_time_field: None,
                                 namespace: Some("tenant-abc".to_string()),
                                 retention_secs: None,
@@ -1693,7 +1694,7 @@ mod tests {
                         .header("content-type", "application/json")
                         .body(Body::from(
                             serde_json::to_vec(&CreateIndexRequest {
-                                settings: Default::default(),
+                                settings: IndexSettings::default(),
                                 ..Default::default()
                             })
                             .expect("serialize create request"),
@@ -1756,7 +1757,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -1826,7 +1827,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -1992,7 +1993,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -2133,7 +2134,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -2300,7 +2301,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -2382,7 +2383,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize"),
@@ -2431,7 +2432,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize"),
@@ -2484,7 +2485,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize"),
@@ -2567,7 +2568,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -2645,7 +2646,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -2710,7 +2711,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -2792,7 +2793,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -2842,7 +2843,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -2882,7 +2883,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -3018,7 +3019,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -3066,7 +3067,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -3149,7 +3150,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -3363,7 +3364,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -3465,7 +3466,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -3581,7 +3582,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -3658,7 +3659,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -3728,7 +3729,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -3786,7 +3787,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -3908,7 +3909,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -4031,7 +4032,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -4149,7 +4150,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),
@@ -4250,7 +4251,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&CreateIndexRequest {
-                            settings: Default::default(),
+                            settings: IndexSettings::default(),
                             ..Default::default()
                         })
                         .expect("serialize create request"),

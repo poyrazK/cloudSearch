@@ -3,8 +3,8 @@
 //! Run with: cargo test -p cloudsearch-index --test coverage
 
 use cloudsearch_common::{
-    BoolQuery, CreateIndexRequest, IndexDocument, SearchQuery, SearchRequest, SortOrder, SortSpec,
-    TermQuery,
+    BoolQuery, CreateIndexRequest, IndexDocument, IndexSettings, SearchQuery, SearchRequest,
+    SortOrder, SortSpec, TermQuery,
 };
 use cloudsearch_index::{IndexCatalog, MergePlan};
 use cloudsearch_storage::SegmentMeta;
@@ -27,7 +27,7 @@ async fn get_document_returns_none_for_pending_delete() {
         .create_index(
             "test",
             CreateIndexRequest {
-                settings: Default::default(),
+                settings: IndexSettings::default(),
                 ..Default::default()
             },
         )
@@ -55,7 +55,7 @@ async fn apply_merge_plan_skips_when_no_on_disk_segment() {
         .create_index(
             "test",
             CreateIndexRequest {
-                settings: Default::default(),
+                settings: IndexSettings::default(),
                 ..Default::default()
             },
         )
@@ -89,7 +89,7 @@ async fn validate_search_request_rejects_nested_bool_with_object_field() {
         .create_index(
             "test",
             CreateIndexRequest {
-                settings: Default::default(),
+                settings: IndexSettings::default(),
                 ..Default::default()
             },
         )
