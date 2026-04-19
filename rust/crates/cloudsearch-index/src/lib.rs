@@ -1351,11 +1351,7 @@ fn score_match_query(document: &IndexDocument, query: &MatchQuery) -> Option<f32
         .iter()
         .filter(|t| field_set.contains(t))
         .count();
-    if matched > 0 {
-        Some(matched as f32 / query_tokens.len() as f32)
-    } else {
-        None
-    }
+    (matched > 0).then(|| matched as f32 / query_tokens.len() as f32)
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -1561,11 +1557,7 @@ fn compute_stats_aggregation(
             let sum = values.iter().sum::<f64>();
             let min = values.iter().copied().reduce(f64::min);
             let max = values.iter().copied().reduce(f64::max);
-            let avg = if count > 0 {
-                Some(sum / count as f64)
-            } else {
-                None
-            };
+            let avg = (count > 0).then(|| sum / count as f64);
             return StatsAggregationResult {
                 count,
                 min,
@@ -1579,11 +1571,7 @@ fn compute_stats_aggregation(
             let sum: f64 = values.iter().copied().map(|v| v as f64).sum();
             let min = values.iter().copied().map(|v| v as f64).reduce(f64::min);
             let max = values.iter().copied().map(|v| v as f64).reduce(f64::max);
-            let avg = if count > 0 {
-                Some(sum / count as f64)
-            } else {
-                None
-            };
+            let avg = (count > 0).then(|| sum / count as f64);
             return StatsAggregationResult {
                 count,
                 min,
@@ -1605,11 +1593,7 @@ fn compute_stats_aggregation(
     let sum = values.iter().sum::<f64>();
     let min = values.iter().copied().reduce(f64::min);
     let max = values.iter().copied().reduce(f64::max);
-    let avg = if count > 0 {
-        Some(sum / count as f64)
-    } else {
-        None
-    };
+    let avg = (count > 0).then(|| sum / count as f64);
     StatsAggregationResult {
         count,
         min,
@@ -2427,18 +2411,9 @@ mod tests {
 
         // check mappings were persisted
         let loaded = catalog.get_index("logs").await.expect("get index");
-        assert_eq!(
-            loaded.mappings.get("status").unwrap().field_type,
-            FieldType::Keyword
-        );
-        assert_eq!(
-            loaded.mappings.get("count").unwrap().field_type,
-            FieldType::Integer
-        );
-        assert_eq!(
-            loaded.mappings.get("message").unwrap().field_type,
-            FieldType::Keyword
-        );
+        assert_eq!(loaded.mappings["status"].field_type, FieldType::Keyword);
+        assert_eq!(loaded.mappings["count"].field_type, FieldType::Integer);
+        assert_eq!(loaded.mappings["message"].field_type, FieldType::Keyword);
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@ const WAL_VERSION: u8 = 1;
 const HEADER_LEN: usize = 26;
 const DEFAULT_GENERATION: u64 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WalRecord {
     IndexDocument {
@@ -27,7 +27,7 @@ pub enum WalRecord {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalEntry {
     pub sequence_number: u64,
     pub recorded_at_unix_ms: i64,
