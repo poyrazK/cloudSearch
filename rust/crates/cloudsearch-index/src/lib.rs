@@ -72,11 +72,19 @@ impl IndexCatalog {
         }
     }
 
+    /// Initializes the catalog by creating the indexes directory.
+    ///
+    /// # Errors
+    /// Returns an error if directory creation fails.
     pub async fn initialize(&self) -> Result<()> {
         fs::create_dir_all(self.indexes_dir()).await?;
         Ok(())
     }
 
+    /// Creates a new index with the given name and settings.
+    ///
+    /// # Errors
+    /// Returns an error if validation fails or index creation fails.
     pub async fn create_index(
         &self,
         name: &str,
@@ -115,6 +123,10 @@ impl IndexCatalog {
         Ok(metadata)
     }
 
+    /// Gets metadata for an existing index.
+    ///
+    /// # Errors
+    /// Returns an error if validation fails or file operations fail.
     pub async fn get_index(&self, name: &str) -> Result<IndexMetadata> {
         validate_index_name(name)?;
 
@@ -127,6 +139,10 @@ impl IndexCatalog {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    /// Deletes an index and its storage.
+    ///
+    /// # Errors
+    /// Returns an error if validation fails or file operations fail.
     pub async fn delete_index(&self, name: &str) -> Result<()> {
         let _guard = self.lifecycle_lock.write().await;
         validate_index_name(name)?;
@@ -140,6 +156,10 @@ impl IndexCatalog {
         Ok(())
     }
 
+    /// Updates index settings.
+    ///
+    /// # Errors
+    /// Returns an error if validation fails or file operations fail.
     pub async fn update_index_settings(
         &self,
         name: &str,
@@ -164,6 +184,10 @@ impl IndexCatalog {
         Ok(metadata)
     }
 
+    /// Opens an existing index for reading and writing.
+    ///
+    /// # Errors
+    /// Returns an error if the index does not exist or if file operations fail.
     pub async fn open_index(&self, name: &str) -> Result<IndexHandle> {
         let _guard = self.lifecycle_lock.write().await;
         let metadata = self.get_index(name).await?;
@@ -295,6 +319,10 @@ impl IndexRegistry {
         }
     }
 
+    /// Creates a new index and opens it for writing.
+    ///
+    /// # Errors
+    /// Returns an error if index creation fails or the index already exists.
     pub async fn create_index(
         &self,
         name: &str,
@@ -309,10 +337,18 @@ impl IndexRegistry {
         Ok(metadata)
     }
 
+    /// Gets metadata for an existing index.
+    ///
+    /// # Errors
+    /// Returns an error if the index does not exist or file operations fail.
     pub async fn get_index(&self, name: &str) -> Result<IndexMetadata> {
         self.catalog.get_index(name).await
     }
 
+    /// Deletes an index and removes it from the registry.
+    ///
+    /// # Errors
+    /// Returns an error if the index does not exist or deletion fails.
     pub async fn delete_index(&self, name: &str) -> Result<()> {
         let _guard = self.lifecycle_lock.write().await;
         self.catalog.delete_index(name).await?;
@@ -320,6 +356,10 @@ impl IndexRegistry {
         Ok(())
     }
 
+    /// Updates index settings.
+    ///
+    /// # Errors
+    /// Returns an error if the index does not exist or settings update fails.
     pub async fn update_index_settings(
         &self,
         name: &str,
@@ -330,6 +370,10 @@ impl IndexRegistry {
             .await
     }
 
+    /// Gets or opens an index handle for direct operations.
+    ///
+    /// # Errors
+    /// Returns an error if the index does not exist or cannot be opened.
     pub async fn index_handle(&self, name: &str) -> Result<Arc<Mutex<IndexHandle>>> {
         {
             let handles = self.handles.lock().await;
@@ -537,6 +581,10 @@ impl IndexHandle {
         None
     }
 
+    /// Applies a merge plan to consolidate segments.
+    ///
+    /// # Errors
+    /// Returns an error if segment file operations fail.
     pub async fn apply_merge_plan(&mut self, plan: &MergePlan) -> Result<()> {
         if plan.is_empty() {
             return Ok(());
@@ -707,6 +755,9 @@ impl IndexHandle {
 
     /// Evicts all expired documents by soft-deleting them via WAL.
     /// Returns the number of documents evicted.
+    ///
+    /// # Errors
+    /// Returns an error if WAL operations fail.
     pub async fn evict_expired_documents(&mut self) -> Result<usize> {
         if !self.has_retention_policy() {
             return Ok(0);
@@ -745,6 +796,10 @@ impl IndexHandle {
         Ok(evicted)
     }
 
+    /// Validates a search request.
+    ///
+    /// # Errors
+    /// Returns an error if the query is invalid or fields are not aggregatable.
     pub fn validate_search_request(&self, request: &SearchRequest) -> Result<()> {
         if let Some(query) = &request.query {
             self.validate_query(query)?;
@@ -779,6 +834,10 @@ impl IndexHandle {
         Ok(())
     }
 
+    /// Indexes a document and returns its sequence number.
+    ///
+    /// # Errors
+    /// Returns an error if mapping validation fails or WAL operations fail.
     pub async fn index_document(&mut self, document: IndexDocument) -> Result<u64> {
         self.validate_and_update_mappings(&document.source).await?;
 
@@ -803,6 +862,10 @@ impl IndexHandle {
         Ok(sequence_number)
     }
 
+    /// Soft-deletes a document by writing a delete record to the WAL.
+    ///
+    /// # Errors
+    /// Returns an error if WAL operations fail.
     pub async fn delete_document(&mut self, document_id: &str) -> Result<u64> {
         let sequence_number = self.last_sequence_number + 1;
         self.wal
@@ -819,6 +882,10 @@ impl IndexHandle {
         Ok(sequence_number)
     }
 
+    /// Applies multiple index or delete operations in batch.
+    ///
+    /// # Errors
+    /// Returns an error if any individual operation fails.
     pub async fn bulk_apply(&mut self, request: BulkRequest) -> Result<BulkResponse> {
         let mut items = Vec::with_capacity(request.operations.len());
         let mut has_errors = false;
@@ -876,6 +943,10 @@ impl IndexHandle {
         })
     }
 
+    /// Makes recently indexed documents searchable.
+    ///
+    /// # Errors
+    /// Returns an error if file operations fail.
     pub async fn refresh(&mut self) -> Result<usize> {
         let refreshed_documents = self.pending_operations.len();
 
@@ -898,6 +969,10 @@ impl IndexHandle {
         Ok(refreshed_documents)
     }
 
+    /// Persists all in-memory data to disk and rolls over the WAL.
+    ///
+    /// # Errors
+    /// Returns an error if file or WAL operations fail.
     pub async fn flush(&mut self) -> Result<FlushResponse> {
         // Rollover WAL first so the snapshot captures a consistent post-rollover state.
         // This ensures WAL replay on restart starts from the new generation.
@@ -972,6 +1047,10 @@ impl IndexHandle {
         })
     }
 
+    /// Merges small segments into larger ones to reduce segment count.
+    ///
+    /// # Errors
+    /// Returns an error if merge operations fail.
     pub async fn merge(&mut self) -> Result<MergeResponse> {
         let mut merged = self.searchable_documents.clone();
 
@@ -1002,7 +1081,10 @@ impl IndexHandle {
         })
     }
 
-    /// Create a named snapshot of the current index state.
+    /// Creates a named snapshot of the current index state.
+    ///
+    /// # Errors
+    /// Returns an error if snapshot creation fails.
     pub async fn create_snapshot(
         &self,
         name: &str,
@@ -1061,6 +1143,9 @@ impl IndexHandle {
     }
 
     /// List all named snapshots for this index.
+    ///
+    /// # Errors
+    /// Returns an error if snapshot listing fails.
     pub async fn list_snapshots(&self) -> Result<Vec<cloudsearch_common::SnapshotMetadata>> {
         let snapshots = list_snapshots(&self.segments_dir).await?;
         Ok(snapshots
@@ -1070,6 +1155,9 @@ impl IndexHandle {
     }
 
     /// Get metadata for a specific named snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if snapshot metadata read fails.
     pub async fn get_snapshot(
         &self,
         name: &str,
@@ -1079,6 +1167,9 @@ impl IndexHandle {
     }
 
     /// Delete a named snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if snapshot deletion fails.
     pub async fn delete_snapshot(&self, name: &str) -> Result<()> {
         storage_delete_snapshot(&self.segments_dir, name).await?;
         tracing::info!(index = %self.metadata.name, snapshot = %name, "snapshot deleted");
@@ -1086,6 +1177,9 @@ impl IndexHandle {
     }
 
     /// Restore the index from a named snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if snapshot read or restoration fails.
     pub async fn restore_snapshot(
         &mut self,
         name: &str,

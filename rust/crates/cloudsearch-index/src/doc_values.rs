@@ -7,7 +7,7 @@ pub struct DocValuesWriter;
 
 impl DocValuesWriter {
     /// Build doc values for all documents, using field type from mappings.
-    /// Returns a map of field_name -> DocValuesField for each aggregatable field.
+    /// Returns a map of `field_name` -> `DocValuesField` for each aggregatable field.
     pub fn build_from_documents(
         documents: &[IndexDocument],
         mappings: &BTreeMap<String, FieldMapping>,
@@ -64,7 +64,7 @@ fn encode_keywords(documents: &[IndexDocument], field: &str) -> Vec<u8> {
     let mut offsets: Vec<u32> = Vec::with_capacity(num_docs);
 
     for doc in documents {
-        let offset_before = pool.len() as u32;
+        let offset_before = u32::try_from(pool.len()).unwrap();
         if let Some(s) = doc.source.get(field).and_then(|v| v.as_str()) {
             offsets.push(offset_before);
             pool.extend_from_slice(s.as_bytes());

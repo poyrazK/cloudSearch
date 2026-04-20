@@ -8,7 +8,7 @@ pub struct DocValuesReader {
 }
 
 impl DocValuesReader {
-    /// Create from a map of doc values fields (built by DocValuesWriter).
+    /// Create from a map of doc values fields (built by `DocValuesWriter`).
     #[allow(dead_code)]
     pub fn new(fields: BTreeMap<String, DocValuesField>) -> Self {
         Self { fields }
@@ -34,7 +34,7 @@ impl DocValuesReader {
             return None;
         }
 
-        let num_docs = f.doc_count as usize;
+        let num_docs = usize::try_from(f.doc_count).unwrap();
         let offset_table_end = num_docs * 4;
         let pool = &f.data[offset_table_end..];
 
@@ -63,7 +63,7 @@ impl DocValuesReader {
             return None;
         }
 
-        let num_docs = f.doc_count as usize;
+        let num_docs = usize::try_from(f.doc_count).unwrap();
         let mut result = Vec::with_capacity(num_docs);
         for chunk in f.data.chunks(8) {
             result.push(i64::from_le_bytes(chunk.try_into().unwrap()));
@@ -79,7 +79,7 @@ impl DocValuesReader {
             return None;
         }
 
-        let num_docs = f.doc_count as usize;
+        let num_docs = usize::try_from(f.doc_count).unwrap();
         let mut result = Vec::with_capacity(num_docs);
         for chunk in f.data.chunks(8) {
             result.push(f64::from_le_bytes(chunk.try_into().unwrap()));
@@ -96,7 +96,7 @@ impl DocValuesReader {
             return None;
         }
 
-        let num_docs = f.doc_count as usize;
+        let num_docs = usize::try_from(f.doc_count).unwrap();
         let mut result = Vec::with_capacity(num_docs);
         for i in 0..num_docs {
             result.push((f.data[i / 8] >> (i % 8)) & 1 != 0);
