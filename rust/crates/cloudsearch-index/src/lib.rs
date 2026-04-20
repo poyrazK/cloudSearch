@@ -255,7 +255,7 @@ impl IndexCatalog {
                     if let Some(ts) = extract_document_timestamp_from_doc(&metadata, &document)
                         && let Some(retention) = metadata.settings.retention_secs
                     {
-                        let expiry = ts + chrono::Duration::seconds(retention as i64);
+                        let expiry = ts + chrono::Duration::seconds(retention.cast_signed());
                         document_timestamps.insert(document.id.clone(), expiry);
                     }
                 }
@@ -449,7 +449,7 @@ pub struct IndexHandle {
     searchable_documents: BTreeMap<String, IndexDocument>,
     pending_operations: BTreeMap<String, PendingOperation>,
     last_sequence_number: u64,
-    /// Stores document_id -> expiration DateTime for retention policy.
+    /// Stores `document_id` -> expiration `DateTime` for retention policy.
     document_timestamps: BTreeMap<String, DateTime<Utc>>,
     /// Pre-extracted columnar doc values for aggregations, if available.
     doc_values_reader: Option<DocValuesReader>,
@@ -843,7 +843,7 @@ impl IndexHandle {
 
         // Extract and store timestamp for retention policy
         if let Some(ts) = self.extract_document_timestamp(&document) {
-            let expiry = ts + chrono::Duration::seconds(self.retention_secs().unwrap_or(0) as i64);
+            let expiry = ts + chrono::Duration::seconds(self.retention_secs().unwrap_or(0).cast_signed());
             self.document_timestamps.insert(document.id.clone(), expiry);
         }
 
@@ -1213,7 +1213,7 @@ impl IndexHandle {
         if let Some(retention) = self.retention_secs() {
             for doc in snapshot.documents.iter() {
                 if let Some(ts) = self.extract_document_timestamp(doc) {
-                    let expiry = ts + chrono::Duration::seconds(retention as i64);
+                    let expiry = ts + chrono::Duration::seconds(retention.cast_signed());
                     self.document_timestamps.insert(doc.id.clone(), expiry);
                 }
             }
@@ -1657,7 +1657,7 @@ fn compute_stats_aggregation(
             let sum = values.iter().sum::<f64>();
             let min = values.iter().copied().reduce(f64::min);
             let max = values.iter().copied().reduce(f64::max);
-            let avg = (count > 0).then(|| sum / count as f64);
+            let avg = if count > 0 { Some(sum / count as f64) } else { None };
             return StatsAggregationResult {
                 count,
                 min,
@@ -1671,7 +1671,7 @@ fn compute_stats_aggregation(
             let sum: f64 = values.iter().copied().map(|v| v as f64).sum();
             let min = values.iter().copied().map(|v| v as f64).reduce(f64::min);
             let max = values.iter().copied().map(|v| v as f64).reduce(f64::max);
-            let avg = (count > 0).then(|| sum / count as f64);
+            let avg = if count > 0 { Some(sum / count as f64) } else { None };
             return StatsAggregationResult {
                 count,
                 min,
