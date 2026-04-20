@@ -1182,25 +1182,22 @@ async fn get_snapshot(
     let handle = state.registry.index_handle(&index).await?;
     let handle = handle.lock().await;
     let snapshot = handle.get_snapshot(&name).await?;
-    match snapshot {
-        Some(meta) => {
-            state.metrics().record_request(
-                "snapshot_get",
-                "GET",
-                StatusCode::OK,
-                started_at.elapsed().as_secs_f64(),
-            );
-            Ok((StatusCode::OK, Json(meta)))
-        }
-        None => {
-            state.metrics().record_request(
-                "snapshot_get",
-                "GET",
-                StatusCode::NOT_FOUND,
-                started_at.elapsed().as_secs_f64(),
-            );
-            Err(ApiError(CloudSearchError::SnapshotNotFound(name.clone())))
-        }
+    if let Some(meta) = snapshot {
+        state.metrics().record_request(
+            "snapshot_get",
+            "GET",
+            StatusCode::OK,
+            started_at.elapsed().as_secs_f64(),
+        );
+        Ok((StatusCode::OK, Json(meta)))
+    } else {
+        state.metrics().record_request(
+            "snapshot_get",
+            "GET",
+            StatusCode::NOT_FOUND,
+            started_at.elapsed().as_secs_f64(),
+        );
+        Err(ApiError(CloudSearchError::SnapshotNotFound(name.clone())))
     }
 }
 
@@ -1267,8 +1264,8 @@ impl IntoResponse for ApiError {
             | CloudSearchError::UnsupportedArrayField(_)
             | CloudSearchError::MappingLimitExceeded(_)
             | CloudSearchError::InvalidNamespace(_)
-            | CloudSearchError::ResourceLimitExceeded(_) => StatusCode::BAD_REQUEST,
-            CloudSearchError::Serde(_) => StatusCode::BAD_REQUEST,
+            | CloudSearchError::ResourceLimitExceeded(_)
+            | CloudSearchError::Serde(_) => StatusCode::BAD_REQUEST,
             CloudSearchError::InvalidWalRecord(_)
             | CloudSearchError::WalChecksumMismatch
             | CloudSearchError::Io(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -3135,6 +3132,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::similar_names)]
     #[tokio::test]
     async fn supports_elasticsearch_style_query_shapes_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");

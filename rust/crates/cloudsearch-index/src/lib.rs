@@ -1373,9 +1373,8 @@ fn matches_prefix_query(document: &IndexDocument, prefix: &PrefixQuery) -> bool 
 }
 
 fn matches_wildcard_query(document: &IndexDocument, wildcard: &WildcardQuery) -> bool {
-    let re = match build_wildcard_regex(&wildcard.value) {
-        Some(re) => re,
-        None => return false,
+    let Some(re) = build_wildcard_regex(&wildcard.value) else {
+        return false;
     };
     document
         .source
@@ -1688,8 +1687,7 @@ fn matches_range_query(document: &IndexDocument, range: &RangeQuery) -> bool {
     match comparable_value(value) {
         Some(ComparableValue::Number(number)) => matches_numeric_range(number, range),
         Some(ComparableValue::Timestamp(timestamp)) => matches_timestamp_range(timestamp, range),
-        Some(ComparableValue::String(_)) | Some(ComparableValue::Boolean(_)) => false,
-        None => false,
+        Some(ComparableValue::String(_) | ComparableValue::Boolean(_)) | None => false,
     }
 }
 
@@ -3612,6 +3610,7 @@ mod tests {
         assert_eq!(timestamps.hits.hits[0].id, "doc-3");
     }
 
+    #[allow(clippy::float_cmp)]
     #[tokio::test]
     async fn terms_and_stats_aggregations_respect_query_and_ignore_pagination() {
         let temp_dir = TempDir::new().expect("temp dir");

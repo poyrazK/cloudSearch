@@ -24,6 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let mut config = AppConfig::default();
+    // Use MAX_PERMITS as "unlimited" when not configured (Semaphore permits max)
+    let max_permits = 2305843009213693951usize;
     config.bind_addr = env::var("CLOUDSEARCH_BIND").unwrap_or(config.bind_addr);
     config.data_dir = env::var("CLOUDSEARCH_DATA_DIR")
         .map(Into::into)
@@ -55,11 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sender: shutdown_tx,
     };
 
-    // Semaphore to limit concurrent background operations across all indexes
-    // Use MAX_PERMITS as "unlimited" when not configured (Semaphore permits max)
-    const MAX_PERMITS: usize = 2305843009213693951;
     let bg_semaphore = Arc::new(Semaphore::new(
-        config.max_concurrent_background_ops.unwrap_or(MAX_PERMITS),
+        config.max_concurrent_background_ops.unwrap_or(max_permits),
     ));
 
     spawn_refresh_loop(
@@ -254,15 +253,12 @@ fn spawn_retention_loop(
 
 fn parse_interval_env(name: &str, default: u64) -> u64 {
     match env::var(name) {
-        Ok(value) => match value.parse::<u64>() {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                eprintln!(
-                    "cloudSearch ignored invalid value '{value}' for {name}; using default {default}"
-                );
-                default
-            }
-        },
+        Ok(value) => value.parse::<u64>().unwrap_or_else(|_| {
+            eprintln!(
+                "cloudSearch ignored invalid value '{value}' for {name}; using default {default}"
+            );
+            default
+        }),
         Err(_) => default,
     }
 }

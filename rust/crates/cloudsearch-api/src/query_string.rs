@@ -53,14 +53,14 @@ impl<'a> Parser<'a> {
                 if after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
                     self.pos += 3;
                     let right = self.parse_and_expr()?;
-                    left = self.make_bool_must_not_and(left, right)?;
+                    left = self.make_bool_must_not_and(left, right);
                     continue;
                 }
             }
 
             if self.skip_word("OR") {
                 let right = self.parse_and_expr()?;
-                left = self.make_bool_should(left, right)?;
+                left = self.make_bool_should(left, right);
                 continue;
             }
 
@@ -93,7 +93,7 @@ impl<'a> Parser<'a> {
                 if after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
                     self.pos += 3;
                     let right = self.parse_not_expr()?;
-                    left = self.make_bool_must(left, right)?;
+                    left = self.make_bool_must(left, right);
                     continue;
                 }
             }
@@ -115,7 +115,7 @@ impl<'a> Parser<'a> {
             // Implicit AND: bare clause following
             if !rest.starts_with(')') && !self.is_at_operator() {
                 let right = self.parse_not_expr()?;
-                left = self.make_bool_must(left, right)?;
+                left = self.make_bool_must(left, right);
                 continue;
             }
 
@@ -258,7 +258,7 @@ impl<'a> Parser<'a> {
         }
 
         // Default: term query
-        let json_value = self.parse_value(value)?;
+        let json_value = self.parse_value(value);
         Ok(SearchQuery::Term(TermQuery {
             field: field.to_string(),
             value: json_value,
@@ -276,13 +276,13 @@ impl<'a> Parser<'a> {
             .map_err(|_| CloudSearchError::InvalidSearchRequest(format!("invalid number '{s}'")))
     }
 
-    fn parse_value(&self, s: &str) -> Result<serde_json::Value, CloudSearchError> {
+    fn parse_value(&self, s: &str) -> serde_json::Value {
         // Try to parse as JSON first (numbers, booleans)
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-            return Ok(v);
+            return v;
         }
         // Fall back to string
-        Ok(serde_json::Value::String(s.to_string()))
+        serde_json::Value::String(s.to_string())
     }
 
     /// Read a word (alphanumeric + underscore, non-empty)
@@ -462,11 +462,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Combine two queries into a BoolQuery with must.
-    fn make_bool_must(
-        &self,
-        left: SearchQuery,
-        right: SearchQuery,
-    ) -> Result<SearchQuery, CloudSearchError> {
+    fn make_bool_must(&self, left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let mut must = Vec::new();
         let mut must_not = Vec::new();
 
@@ -527,20 +523,16 @@ impl<'a> Parser<'a> {
             other => must.push(other),
         }
 
-        Ok(SearchQuery::Bool(BoolQuery {
+        SearchQuery::Bool(BoolQuery {
             must,
             should: vec![],
             filter: vec![],
             must_not,
-        }))
+        })
     }
 
     /// Combine two queries into a BoolQuery with should.
-    fn make_bool_should(
-        &self,
-        left: SearchQuery,
-        right: SearchQuery,
-    ) -> Result<SearchQuery, CloudSearchError> {
+    fn make_bool_should(&self, left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let mut should = Vec::new();
         let mut must = Vec::new();
 
@@ -567,20 +559,16 @@ impl<'a> Parser<'a> {
             other => should.push(other),
         }
 
-        Ok(SearchQuery::Bool(BoolQuery {
+        SearchQuery::Bool(BoolQuery {
             must,
             should,
             filter: vec![],
             must_not: vec![],
-        }))
+        })
     }
 
     /// Combine left AND (NOT right) → must: [left's must + should], must_not: [right]
-    fn make_bool_must_not_and(
-        &self,
-        left: SearchQuery,
-        right: SearchQuery,
-    ) -> Result<SearchQuery, CloudSearchError> {
+    fn make_bool_must_not_and(&self, left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let (must, should, filter) = match left {
             SearchQuery::Bool(BoolQuery {
                 must: m,
@@ -590,12 +578,12 @@ impl<'a> Parser<'a> {
             }) => (m, should, filter),
             other => (vec![other], vec![], vec![]),
         };
-        Ok(SearchQuery::Bool(BoolQuery {
+        SearchQuery::Bool(BoolQuery {
             must,
             should,
             filter,
             must_not: vec![right],
-        }))
+        })
     }
 }
 
