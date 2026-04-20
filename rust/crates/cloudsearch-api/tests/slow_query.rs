@@ -1,6 +1,6 @@
 //! Slow query warning tests for cloudsearch-api.
 //!
-//! Run with: cargo test -p cloudsearch-api --test slow_query
+//! Run with: cargo test -p cloudsearch-api --test `slow_query`
 
 use axum::{body::Body, http::Request};
 use cloudsearch_api::router;

@@ -1211,7 +1211,7 @@ impl IndexHandle {
         // Rebuild document_timestamps from restored documents
         self.document_timestamps.clear();
         if let Some(retention) = self.retention_secs() {
-            for doc in snapshot.documents.iter() {
+            for doc in &snapshot.documents {
                 if let Some(ts) = self.extract_document_timestamp(doc) {
                     let expiry = ts + chrono::Duration::seconds(retention.cast_signed());
                     self.document_timestamps.insert(doc.id.clone(), expiry);

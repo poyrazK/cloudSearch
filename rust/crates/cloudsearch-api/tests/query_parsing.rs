@@ -1,7 +1,7 @@
 //! Query parsing edge case tests for cloudsearch-api.
 //!
 //! These test the API-layer query validation (not cloudsearch-index internals).
-//! Run with: cargo test -p cloudsearch-api --test query_parsing
+//! Run with: cargo test -p cloudsearch-api --test `query_parsing`
 
 use axum::{body::Body, http::Request};
 use cloudsearch_api::router;

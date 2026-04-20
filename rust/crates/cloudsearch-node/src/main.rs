@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = AppConfig::default();
     // Use MAX_PERMITS as "unlimited" when not configured (Semaphore permits max)
-    let max_permits = 2305843009213693951usize;
+    let max_permits = 2_305_843_009_213_693_951_usize;
     config.bind_addr = env::var("CLOUDSEARCH_BIND").unwrap_or(config.bind_addr);
     config.data_dir = env::var("CLOUDSEARCH_DATA_DIR")
         .map(Into::into)
@@ -119,7 +119,7 @@ fn spawn_refresh_loop(
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = sleep(interval) => {}
+                () = sleep(interval) => {}
                 _ = shutdown.recv() => {
                     tracing::debug!("refresh loop received shutdown signal, stopping");
                     break;
@@ -155,7 +155,7 @@ fn spawn_flush_loop(
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = sleep(interval) => {}
+                () = sleep(interval) => {}
                 _ = shutdown.recv() => {
                     tracing::debug!("flush loop received shutdown signal, stopping");
                     break;
@@ -190,7 +190,7 @@ fn spawn_merge_loop(
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = sleep(interval) => {}
+                () = sleep(interval) => {}
                 _ = shutdown.recv() => {
                     tracing::debug!("merge loop received shutdown signal, stopping");
                     break;
@@ -225,7 +225,7 @@ fn spawn_retention_loop(
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = sleep(interval) => {}
+                () = sleep(interval) => {}
                 _ = shutdown.recv() => {
                     tracing::debug!("retention loop received shutdown signal, stopping");
                     break;

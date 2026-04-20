@@ -1,13 +1,13 @@
 //! Query string parser for cloudSearch.
 //!
 //! Converts query strings like `"field:value AND (tag:foo OR tag:bar)"`
-//! into the existing SearchQuery AST.
+//! into the existing `SearchQuery` AST.
 
 use cloudsearch_common::{
     BoolQuery, CloudSearchError, RangeQuery, SearchQuery, TermQuery, WildcardQuery,
 };
 
-/// Parse a query string into a SearchQuery.
+/// Parse a query string into a `SearchQuery`.
 pub fn parse_query_string(input: &str) -> Result<SearchQuery, CloudSearchError> {
     let mut parser = Parser::new(input);
     let query = parser.parse_query()?;
@@ -39,7 +39,7 @@ impl<'a> Parser<'a> {
         self.parse_or_expr()
     }
 
-    /// OR_EXPR ::= AND_EXPR ( "OR" AND_EXPR )*
+    /// `OR_EXPR` ::= `AND_EXPR` ( "OR" `AND_EXPR` )*
     fn parse_or_expr(&mut self) -> Result<SearchQuery, CloudSearchError> {
         let mut left = self.parse_and_expr()?;
 
@@ -70,7 +70,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// AND_EXPR ::= NOT_EXPR ( "AND" NOT_EXPR )*
+    /// `AND_EXPR` ::= `NOT_EXPR` ( "AND" `NOT_EXPR` )*
     fn parse_and_expr(&mut self) -> Result<SearchQuery, CloudSearchError> {
         let mut left = self.parse_not_expr()?;
 
@@ -125,7 +125,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// NOT_EXPR ::= PRIMARY (handles NOT in parse_and_expr)
+    /// `NOT_EXPR` ::= PRIMARY (handles NOT in `parse_and_expr`)
     fn parse_not_expr(&mut self) -> Result<SearchQuery, CloudSearchError> {
         self.parse_primary()
     }
@@ -186,7 +186,7 @@ impl<'a> Parser<'a> {
         Ok(Some((field, value.to_string())))
     }
 
-    /// Classify a field:value pair and build the appropriate SearchQuery.
+    /// Classify a field:value pair and build the appropriate `SearchQuery`.
     fn classify_and_build_query(
         &self,
         field: &str,
@@ -351,9 +351,7 @@ impl<'a> Parser<'a> {
         while self.pos < self.input.len()
             && self.input[self.pos..]
                 .chars()
-                .next()
-                .map(char::is_whitespace)
-                == Some(true)
+                .next().is_some_and(char::is_whitespace)
         {
             self.pos += 1;
         }
@@ -447,7 +445,7 @@ impl<'a> Parser<'a> {
     fn ensure_exhausted(&self) -> Result<(), CloudSearchError> {
         let mut pos = self.pos;
         while pos < self.input.len()
-            && self.input[pos..].chars().next().map(char::is_whitespace) == Some(true)
+            && self.input[pos..].chars().next().is_some_and(char::is_whitespace)
         {
             pos += 1;
         }
@@ -461,7 +459,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Combine two queries into a BoolQuery with must.
+    /// Combine two queries into a `BoolQuery` with must.
     fn make_bool_must(&self, left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let mut must = Vec::new();
         let mut must_not = Vec::new();
@@ -531,7 +529,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Combine two queries into a BoolQuery with should.
+    /// Combine two queries into a `BoolQuery` with should.
     fn make_bool_should(&self, left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let mut should = Vec::new();
         let mut must = Vec::new();
@@ -567,7 +565,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Combine left AND (NOT right) → must: [left's must + should], must_not: [right]
+    /// Combine left AND (NOT right) → must: [left's must + should], `must_not`: [right]
     fn make_bool_must_not_and(&self, left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let (must, should, filter) = match left {
             SearchQuery::Bool(BoolQuery {

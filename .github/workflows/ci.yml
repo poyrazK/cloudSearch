@@ -68,7 +68,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/crates/*/Cargo.toml') }}
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::map_unwrap_or -D clippy::get_unwrap -D clippy::if_then_some_else_none -D clippy::derive_partial_eq_without_eq -D clippy::unnecessary_literal_unwrap -D clippy::todo -D clippy::dbg_macro -D clippy::fn_params_excessive_bools -D clippy::implicit_clone -D clippy::cast_lossless -D clippy::unnecessary_cast -D clippy::collapsible_str_replace -D clippy::uninlined_format_args -D clippy::redundant_closure_for_method_calls -D clippy::manual_string_new -D clippy::must_use_candidate -D clippy::default_trait_access -D clippy::float_cmp -D clippy::items_after_statements -D clippy::unnested_or_patterns -D clippy::manual_let_else -D clippy::similar_names -D clippy::unnecessary_wraps -D clippy::single_match_else -D clippy::match_same_arms
+        run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::pedantic
 
   test:
     runs-on: ubuntu-latest
