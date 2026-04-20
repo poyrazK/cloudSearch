@@ -947,6 +947,7 @@ impl IndexHandle {
     ///
     /// # Errors
     /// Returns an error if file operations fail.
+    #[allow(clippy::unused_async)]
     pub async fn refresh(&mut self) -> Result<usize> {
         let refreshed_documents = self.pending_operations.len();
 
