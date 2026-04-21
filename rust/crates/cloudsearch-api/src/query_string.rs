@@ -53,14 +53,14 @@ impl<'a> Parser<'a> {
                 if after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
                     self.pos += 3;
                     let right = self.parse_and_expr()?;
-                    left = self.make_bool_must_not_and(left, right);
+                    left = Self::make_bool_must_not_and(left, right);
                     continue;
                 }
             }
 
             if self.skip_word("OR") {
                 let right = self.parse_and_expr()?;
-                left = self.make_bool_should(left, right);
+                left = Self::make_bool_should(left, right);
                 continue;
             }
 
@@ -93,7 +93,7 @@ impl<'a> Parser<'a> {
                 if after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
                     self.pos += 3;
                     let right = self.parse_not_expr()?;
-                    left = self.make_bool_must(left, right);
+                    left = Self::make_bool_must(left, right);
                     continue;
                 }
             }
@@ -115,7 +115,7 @@ impl<'a> Parser<'a> {
             // Implicit AND: bare clause following
             if !rest.starts_with(')') && !self.is_at_operator() {
                 let right = self.parse_not_expr()?;
-                left = self.make_bool_must(left, right);
+                left = Self::make_bool_must(left, right);
                 continue;
             }
 
@@ -194,7 +194,7 @@ impl<'a> Parser<'a> {
     ) -> Result<SearchQuery, CloudSearchError> {
         // Range operators: check >=, <= first before >, <
         if let Some(stripped) = value.strip_prefix(">=") {
-            let num = self.parse_numeric(stripped)?;
+            let num = Self::parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: Some(num.clone()),
@@ -204,7 +204,7 @@ impl<'a> Parser<'a> {
             }));
         }
         if let Some(stripped) = value.strip_prefix("<=") {
-            let num = self.parse_numeric(stripped)?;
+            let num = Self::parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: None,
@@ -214,7 +214,7 @@ impl<'a> Parser<'a> {
             }));
         }
         if let Some(stripped) = value.strip_prefix('>') {
-            let num = self.parse_numeric(stripped)?;
+            let num = Self::parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: None,
@@ -224,7 +224,7 @@ impl<'a> Parser<'a> {
             }));
         }
         if let Some(stripped) = value.strip_prefix('<') {
-            let num = self.parse_numeric(stripped)?;
+            let num = Self::parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: None,
@@ -238,8 +238,8 @@ impl<'a> Parser<'a> {
         if let Some((lo, hi)) = value.split_once("..")
             && (!lo.is_empty() || !hi.is_empty())
         {
-            let lo_num = self.parse_numeric(lo)?;
-            let hi_num = self.parse_numeric(hi)?;
+            let lo_num = Self::parse_numeric(lo)?;
+            let hi_num = Self::parse_numeric(hi)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: Some(lo_num.clone()),
@@ -258,14 +258,14 @@ impl<'a> Parser<'a> {
         }
 
         // Default: term query
-        let json_value = self.parse_value(value);
+        let json_value = Self::parse_value(value);
         Ok(SearchQuery::Term(TermQuery {
             field: field.to_string(),
             value: json_value,
         }))
     }
 
-    fn parse_numeric(&self, s: &str) -> Result<serde_json::Value, CloudSearchError> {
+    fn parse_numeric(s: &str) -> Result<serde_json::Value, CloudSearchError> {
         // Try to parse as integer first
         if let Ok(i) = s.parse::<i64>() {
             return Ok(serde_json::json!(i));
@@ -276,7 +276,7 @@ impl<'a> Parser<'a> {
             .map_err(|_| CloudSearchError::InvalidSearchRequest(format!("invalid number '{s}'")))
     }
 
-    fn parse_value(&self, s: &str) -> serde_json::Value {
+    fn parse_value(s: &str) -> serde_json::Value {
         // Try to parse as JSON first (numbers, booleans)
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
             return v;
@@ -460,7 +460,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Combine two queries into a `BoolQuery` with must.
-    fn make_bool_must(&self, left: SearchQuery, right: SearchQuery) -> SearchQuery {
+    fn make_bool_must(left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let mut must = Vec::new();
         let mut must_not = Vec::new();
 
@@ -530,7 +530,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Combine two queries into a `BoolQuery` with should.
-    fn make_bool_should(&self, left: SearchQuery, right: SearchQuery) -> SearchQuery {
+    fn make_bool_should(left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let mut should = Vec::new();
         let mut must = Vec::new();
 
@@ -566,7 +566,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Combine left AND (NOT right) → must: [left's must + should], `must_not`: [right]
-    fn make_bool_must_not_and(&self, left: SearchQuery, right: SearchQuery) -> SearchQuery {
+    fn make_bool_must_not_and(left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let (must, should, filter) = match left {
             SearchQuery::Bool(BoolQuery {
                 must: m,
