@@ -7,6 +7,10 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::sleep;
 
+/// Waits for the node to become healthy.
+///
+/// # Panics
+/// Panics if the node does not become healthy within 5 seconds.
 pub async fn wait_for_health(client: &Client, base_url: &str) {
     let mut last_err = String::new();
     for _ in 0..50 {
@@ -79,6 +83,9 @@ impl Drop for TestNode {
 }
 
 /// Returns a port that is available for binding.
+///
+/// # Panics
+/// Panics if binding to any port fails.
 #[must_use]
 pub fn reserve_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind random port");
@@ -125,6 +132,10 @@ pub fn spawn_node_with_intervals(
     )
 }
 
+/// Spawns a node process with all interval configuration.
+///
+/// # Panics
+/// Panics if the process cannot be spawned.
 #[must_use]
 pub fn spawn_node_with_all_intervals(
     data_dir: &Path,
@@ -162,6 +173,10 @@ pub fn spawn_node_with_all_intervals(
     cmd.spawn().expect("spawn node")
 }
 
+/// Stops the managed node process.
+///
+/// # Panics
+/// Panics if killing the process fails.
 pub fn stop_node(child: &mut Child) {
     child.kill().expect("kill node");
     child.wait().expect("wait for node exit");

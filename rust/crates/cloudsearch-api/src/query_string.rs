@@ -145,7 +145,7 @@ impl<'a> Parser<'a> {
     fn parse_clause(&mut self) -> Result<SearchQuery, CloudSearchError> {
         // Check for a field:value pattern
         if let Some((field, value)) = self.try_parse_field_value()? {
-            self.classify_and_build_query(&field, &value)
+            Self::classify_and_build_query(&field, &value)
         } else {
             // Bare word: treat as tag:word
             let word = self.read_word();
@@ -188,7 +188,6 @@ impl<'a> Parser<'a> {
 
     /// Classify a field:value pair and build the appropriate `SearchQuery`.
     fn classify_and_build_query(
-        &self,
         field: &str,
         value: &str,
     ) -> Result<SearchQuery, CloudSearchError> {
