@@ -443,7 +443,7 @@ async fn search_index(
     Json(request): Json<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
     let started_at = Instant::now();
-    let mut request = parse_search_request(request)?;
+    let mut request = parse_search_request(&request)?;
     if let Some(q) = request.query.take() {
         request.query = Some(q);
     }
@@ -507,7 +507,7 @@ async fn search_index_get(
     ))
 }
 
-fn parse_search_request(value: Value) -> Result<SearchRequest, ApiError> {
+fn parse_search_request(value: &Value) -> Result<SearchRequest, ApiError> {
     let mut request = SearchRequest::default();
     let object = value.as_object().ok_or_else(|| {
         ApiError(CloudSearchError::InvalidSearchRequest(
@@ -1037,19 +1037,19 @@ fn to_compat_bulk_item_result(result: BulkItemResult) -> CompatBulkItemResult {
 
 fn aggregation_to_json(aggregation: AggregationResult) -> Value {
     match aggregation {
-        AggregationResult::Terms(result) => terms_aggregation_to_json(result),
-        AggregationResult::Stats(result) => stats_aggregation_to_json(result),
-        AggregationResult::DateHistogram(result) => date_histogram_aggregation_to_json(result),
+        AggregationResult::Terms(result) => terms_aggregation_to_json(&result),
+        AggregationResult::Stats(result) => stats_aggregation_to_json(&result),
+        AggregationResult::DateHistogram(result) => date_histogram_aggregation_to_json(&result),
     }
 }
 
-fn terms_aggregation_to_json(result: TermsAggregationResult) -> Value {
+fn terms_aggregation_to_json(result: &TermsAggregationResult) -> Value {
     serde_json::json!({
         "buckets": result.buckets
     })
 }
 
-fn stats_aggregation_to_json(result: StatsAggregationResult) -> Value {
+fn stats_aggregation_to_json(result: &StatsAggregationResult) -> Value {
     serde_json::json!({
         "count": result.count,
         "min": result.min,
@@ -1059,7 +1059,7 @@ fn stats_aggregation_to_json(result: StatsAggregationResult) -> Value {
     })
 }
 
-fn date_histogram_aggregation_to_json(result: DateHistogramAggregationResult) -> Value {
+fn date_histogram_aggregation_to_json(result: &DateHistogramAggregationResult) -> Value {
     serde_json::json!({
         "buckets": result.buckets
     })

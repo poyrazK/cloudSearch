@@ -16,7 +16,7 @@ pub fn parse_query_string(input: &str) -> Result<SearchQuery, CloudSearchError> 
 }
 
 /// Token produced by the tokenizer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Token {
     /// The colon separator between field and value
     Colon,
