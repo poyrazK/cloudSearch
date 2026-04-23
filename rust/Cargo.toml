@@ -3,7 +3,9 @@ members = [
     "crates/cloudsearch-api",
     "crates/cloudsearch-common",
     "crates/cloudsearch-index",
-    "crates/cloudsearch-node", "crates/cloudsearch-storage",
+    "crates/cloudsearch-node",
+    "crates/cloudsearch-storage",
+    "crates/cloudsearch-testing",
 ]
 resolver = "3"
 
@@ -26,3 +28,4 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
 regex = "1"
+cloudsearch-testing = { path = "crates/cloudsearch-testing" }
