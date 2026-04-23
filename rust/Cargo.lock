@@ -157,7 +157,6 @@ dependencies = [
  "axum",
  "cloudsearch-common",
  "cloudsearch-index",
- "cloudsearch-testing",
  "http-body-util",
  "serde",
  "serde_json",
@@ -204,7 +203,6 @@ dependencies = [
  "cloudsearch-api",
  "cloudsearch-common",
  "cloudsearch-index",
- "cloudsearch-testing",
  "reqwest",
  "serde_json",
  "tempfile",
@@ -225,22 +223,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "cloudsearch-testing"
-version = "0.1.0"
-dependencies = [
- "axum",
- "cloudsearch-api",
- "cloudsearch-common",
- "cloudsearch-index",
- "http-body-util",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tower",
 ]
 
 [[package]]

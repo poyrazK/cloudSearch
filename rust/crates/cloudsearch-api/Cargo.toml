@@ -15,7 +15,6 @@ tower-http = { version = "0.6", features = ["trace"] }
 tracing.workspace = true
 
 [dev-dependencies]
-cloudsearch-testing.workspace = true
 http-body-util.workspace = true
 tower.workspace = true
 tempfile.workspace = true
