@@ -1442,6 +1442,7 @@ fn score_query(document: &IndexDocument, query: &SearchQuery) -> Option<f32> {
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn score_match_query(document: &IndexDocument, query: &MatchQuery) -> Option<f32> {
     let field_str = document.source.get(&query.field)?.as_str()?;
     let field_tokens = tokenize(field_str);
@@ -1490,6 +1491,7 @@ fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
     Regex::new(&format!("^{regex_pattern}$")).ok()
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn score_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> Option<f32> {
     // Evaluate each clause group once and store the scores.
     let must_scores: Vec<Option<f32>> = bool_query
@@ -1552,6 +1554,7 @@ fn matches_terms_query(document: &IndexDocument, terms: &TermsQuery) -> bool {
         .is_some_and(|value| terms.values.iter().any(|candidate| candidate == value))
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn compute_aggregations(
     documents: &[IndexDocument],
     requests: Option<&BTreeMap<String, AggregationRequest>>,
@@ -1647,6 +1650,7 @@ fn compute_terms_aggregation(
     TermsAggregationResult { buckets }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn compute_stats_aggregation(
     documents: &[IndexDocument],
     field: &str,
