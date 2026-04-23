@@ -1,0 +1,16 @@
+[package]
+name = "cloudsearch-testing"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum.workspace = true
+cloudsearch-api = { path = "../cloudsearch-api" }
+cloudsearch-common = { path = "../cloudsearch-common" }
+cloudsearch-index = { path = "../cloudsearch-index" }
+http-body-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tower.workspace = true
