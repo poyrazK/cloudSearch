@@ -187,10 +187,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Classify a field:value pair and build the appropriate `SearchQuery`.
-    fn classify_and_build_query(
-        field: &str,
-        value: &str,
-    ) -> Result<SearchQuery, CloudSearchError> {
+    fn classify_and_build_query(field: &str, value: &str) -> Result<SearchQuery, CloudSearchError> {
         // Range operators: check >=, <= first before >, <
         if let Some(stripped) = value.strip_prefix(">=") {
             let num = Self::parse_numeric(stripped)?;
@@ -350,7 +347,8 @@ impl<'a> Parser<'a> {
         while self.pos < self.input.len()
             && self.input[self.pos..]
                 .chars()
-                .next().is_some_and(char::is_whitespace)
+                .next()
+                .is_some_and(char::is_whitespace)
         {
             self.pos += 1;
         }
@@ -444,7 +442,10 @@ impl<'a> Parser<'a> {
     fn ensure_exhausted(&self) -> Result<(), CloudSearchError> {
         let mut pos = self.pos;
         while pos < self.input.len()
-            && self.input[pos..].chars().next().is_some_and(char::is_whitespace)
+            && self.input[pos..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
         {
             pos += 1;
         }

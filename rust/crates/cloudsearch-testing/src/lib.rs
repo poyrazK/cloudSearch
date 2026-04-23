@@ -2,10 +2,13 @@
 //!
 //! Provides reusable helpers for integration testing.
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::Request;
-use axum::Router;
-use cloudsearch_common::{BulkIndexOperation, BulkOperation, BulkRequest, CreateIndexRequest, IndexDocumentRequest, IndexSettings, SearchRequest, SearchResponse};
+use cloudsearch_common::{
+    BulkIndexOperation, BulkOperation, BulkRequest, CreateIndexRequest, IndexDocumentRequest,
+    IndexSettings, SearchRequest, SearchResponse,
+};
 use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -62,11 +65,7 @@ pub async fn create_index_with_settings(
         ))
         .expect("request");
 
-    let _ = app
-        .clone()
-        .oneshot(request)
-        .await
-        .expect("create response");
+    let _ = app.clone().oneshot(request).await.expect("create response");
 
     Ok(())
 }
@@ -115,10 +114,12 @@ pub async fn bulk_index(
 ) -> Result<(), cloudsearch_api::ApiError> {
     let operations = docs
         .iter()
-        .map(|(id, source)| BulkOperation::Index(BulkIndexOperation {
-            id: id.clone().into(),
-            source: source.clone(),
-        }))
+        .map(|(id, source)| {
+            BulkOperation::Index(BulkIndexOperation {
+                id: id.clone().into(),
+                source: source.clone(),
+            })
+        })
         .collect();
 
     let request = Request::builder()
@@ -148,7 +149,11 @@ pub async fn refresh_index(app: &Router, index: &str) -> Result<(), cloudsearch_
         .body(Body::empty())
         .expect("request");
 
-    let _ = app.clone().oneshot(request).await.expect("refresh response");
+    let _ = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("refresh response");
     Ok(())
 }
 
@@ -174,13 +179,14 @@ pub async fn search(
         .body(Body::from(serde_json::to_string(&body).expect("serialize")))
         .expect("request");
 
-    let response = app
-        .clone()
-        .oneshot(request)
-        .await
-        .expect("search response");
+    let response = app.clone().oneshot(request).await.expect("search response");
 
-    let body = response.into_body().collect().await.expect("body").to_bytes();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     let body: SearchResponse = serde_json::from_slice(&body).expect("deserialize");
     Ok(body)
 }
@@ -202,16 +208,19 @@ pub async fn search_request(
         .method("POST")
         .uri(format!("/{index}/_search"))
         .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&search_request).expect("serialize")))
+        .body(Body::from(
+            serde_json::to_vec(&search_request).expect("serialize"),
+        ))
         .expect("request");
 
-    let response = app
-        .clone()
-        .oneshot(request)
-        .await
-        .expect("search response");
+    let response = app.clone().oneshot(request).await.expect("search response");
 
-    let body = response.into_body().collect().await.expect("body").to_bytes();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     let body: SearchResponse = serde_json::from_slice(&body).expect("deserialize");
     Ok(body)
 }
@@ -221,6 +230,11 @@ pub async fn search_request(
 /// # Panics
 /// Panics if the body cannot be collected or deserialized.
 pub async fn body_json<T: DeserializeOwned>(response: axum::response::Response<Body>) -> T {
-    let body = response.into_body().collect().await.expect("body").to_bytes();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     serde_json::from_slice(&body).expect("deserialize")
 }
