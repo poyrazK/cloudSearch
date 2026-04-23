@@ -7,6 +7,7 @@ pub mod helpers {
 
 use helpers::{reserve_port, spawn_node, stop_node, wait_for_health};
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn health_endpoint_returns_200() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -1075,6 +1076,7 @@ async fn prefix_query_matches_string_prefixes() {
     stop_node(&mut child);
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn wildcard_query_matches_string_patterns() {
     let temp_dir = TempDir::new().expect("temp dir");

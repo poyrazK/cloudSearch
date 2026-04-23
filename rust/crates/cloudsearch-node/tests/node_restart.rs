@@ -13,6 +13,7 @@ use helpers::{
     stop_node, wait_for_health,
 };
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn preserves_documents_and_search_results_across_node_restart() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -843,6 +844,7 @@ async fn merged_segments_survive_restart() {
     node.stop();
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn compaction_removes_overwrites_across_restart() {
     // Overwrite same doc 3 times with different values, merge, restart.

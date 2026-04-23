@@ -1242,7 +1242,7 @@ async fn restore_snapshot(
 }
 
 #[derive(Debug)]
-struct ApiError(CloudSearchError);
+pub struct ApiError(CloudSearchError);
 
 impl From<CloudSearchError> for ApiError {
     fn from(value: CloudSearchError) -> Self {
@@ -1335,6 +1335,7 @@ mod tests {
         assert_eq!(value, serde_json::json!({"status": "ok"}));
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn metrics_endpoint_exposes_request_and_operation_counters() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -1809,6 +1810,7 @@ mod tests {
         assert!(body_text.contains("hello from api"));
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn searches_documents_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -1975,6 +1977,7 @@ mod tests {
         assert_eq!(bool_json["hits"]["total"]["value"], 2);
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn refresh_and_range_queries_work_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -2116,6 +2119,7 @@ mod tests {
         assert_eq!(timestamp_json["hits"]["hits"][0]["_id"], "doc-2");
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn bulk_ingest_orders_operations_and_requires_refresh() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -2865,6 +2869,7 @@ mod tests {
         assert!(response.status().is_client_error());
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn terms_query_and_sorted_pagination_work_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -3132,6 +3137,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::too_many_lines)]
     #[allow(clippy::similar_names)]
     #[tokio::test]
     async fn supports_elasticsearch_style_query_shapes_over_http() {
@@ -3521,6 +3527,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn strict_mode_and_mapping_conflicts_return_bad_request() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -3770,6 +3777,7 @@ mod tests {
         assert!(value["errors"].as_bool().unwrap());
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn successful_search_response_shape_is_exact_for_paginated_sort() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -3892,6 +3900,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn terms_and_stats_aggregations_work_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -4015,6 +4024,7 @@ mod tests {
         assert_eq!(value["aggregations"]["latency_stats"]["avg"], 20.0);
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn date_histogram_aggregation_works_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
