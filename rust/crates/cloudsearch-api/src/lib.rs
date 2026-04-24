@@ -67,6 +67,8 @@ struct CompatSearchHit {
     score: Option<f32>,
     #[serde(rename = "_source")]
     source: Value,
+    #[serde(rename = "highlight", skip_serializing_if = "Option::is_none")]
+    highlight: Option<std::collections::BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(serde::Serialize)]
@@ -1007,6 +1009,7 @@ fn to_compat_search_hit(hit: SearchHit) -> CompatSearchHit {
         id: hit.id,
         score: hit.score,
         source: hit.source,
+        highlight: hit.highlight,
     }
 }
 
