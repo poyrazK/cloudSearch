@@ -14,7 +14,7 @@ use cloudsearch_storage::{
     read_doc_values, read_index_manifest, read_named_snapshot, read_segment_file,
     read_segment_snapshot, read_snapshot_metadata, segment_file_path,
     write_doc_values as storage_write_doc_values, write_index_manifest, write_named_snapshot,
-    write_segment_snapshot,
+    write_positions as storage_write_positions, write_segment_snapshot,
 };
 mod doc_values;
 mod doc_values_reader;
@@ -288,6 +288,8 @@ impl IndexCatalog {
             last_sequence_number,
             document_timestamps,
             doc_values_reader,
+            per_doc_inverted_index: BTreeMap::new(),
+            positions_reader: None,
         })
     }
 
@@ -453,6 +455,12 @@ pub struct IndexHandle {
     document_timestamps: BTreeMap<String, DateTime<Utc>>,
     /// Pre-extracted columnar doc values for aggregations, if available.
     doc_values_reader: Option<DocValuesReader>,
+    /// Per-document inverted indices (term -> byte offsets) for pending documents.
+    /// Cleared after each flush when documents are persisted.
+    per_doc_inverted_index: BTreeMap<String, BTreeMap<String, Vec<u32>>>,
+    /// Positions reader loaded from the most recent flush, if available.
+    #[allow(dead_code)]
+    positions_reader: Option<cloudsearch_storage::inverted_index::PositionsReader>,
 }
 
 #[derive(Debug, Clone)]
@@ -717,11 +725,13 @@ impl IndexHandle {
                     id: l.id.clone(),
                     source: l.source.clone(),
                     score: None,
+                    highlight: None,
                 };
                 let rh = SearchHit {
                     id: r.id.clone(),
                     source: r.source.clone(),
                     score: None,
+                    highlight: None,
                 };
                 compare_hits(&lh, &rh, sort)
             });
@@ -744,6 +754,7 @@ impl IndexHandle {
                 id: doc.id.clone(),
                 source: doc.source.clone(),
                 score: Some(score),
+                highlight: None,
             })
             .collect::<Vec<_>>();
 
@@ -857,10 +868,49 @@ impl IndexHandle {
                 },
             )
             .await?;
-        self.pending_operations
-            .insert(document.id.clone(), PendingOperation::Upsert(document));
+        self.pending_operations.insert(
+            document.id.clone(),
+            PendingOperation::Upsert(document.clone()),
+        );
         self.last_sequence_number = sequence_number;
+
+        // Build per-document inverted index (term -> byte offsets) for this document.
+        let doc_index = Self::extract_positions(&document);
+        if !doc_index.is_empty() {
+            self.per_doc_inverted_index
+                .insert(document.id.clone(), doc_index);
+        }
+
         Ok(sequence_number)
+    }
+
+    /// Extract term byte-offsets from a document's text fields for highlight support.
+    fn extract_positions(document: &IndexDocument) -> BTreeMap<String, Vec<u32>> {
+        let mut doc_index = BTreeMap::new();
+        if let Some(obj) = document.source.as_object() {
+            for (_, field_value) in obj {
+                if let Some(text) = field_value.as_str() {
+                    let tokens = tokenize(text);
+                    let field_text = text.to_string();
+                    let mut seen_offsets: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+                    for token in &tokens {
+                        let mut search_from = 0usize;
+                        while let Some(pos) = field_text[search_from..].find(token) {
+                            let byte_offset = u32::try_from(search_from + pos).unwrap_or(0);
+                            seen_offsets
+                                .entry(token.clone())
+                                .or_default()
+                                .push(byte_offset);
+                            search_from += pos + 1;
+                        }
+                    }
+                    for (term, positions) in seen_offsets {
+                        doc_index.insert(term, positions);
+                    }
+                }
+            }
+        }
+        doc_index
     }
 
     /// Soft-deletes a document by writing a delete record to the WAL.
@@ -1035,6 +1085,25 @@ impl IndexHandle {
             DocValuesWriter::build_from_documents(&snapshot.documents, &self.metadata.mappings);
         storage_write_doc_values(&self.segments_dir, &doc_values).await?;
         tracing::info!(index = %self.metadata.name, num_fields = doc_values.len(), "wrote doc values sidecar");
+
+        // Build and write positions sidecar for highlight support
+        let mut inverted_index = cloudsearch_storage::inverted_index::InvertedIndex::new();
+        for (doc_seq, doc) in snapshot.documents.iter().enumerate() {
+            if let Some(doc_index) = self.per_doc_inverted_index.get(&doc.id) {
+                for (term, positions) in doc_index {
+                    for pos in positions {
+                        let seq = u64::try_from(doc_seq).unwrap_or(0);
+                        inverted_index.insert(term.clone(), seq, vec![*pos]);
+                    }
+                }
+            }
+        }
+        if inverted_index.term_count() > 0 {
+            storage_write_positions(&self.segments_dir, segment_number, &inverted_index).await?;
+            tracing::info!(index = %self.metadata.name, terms = inverted_index.term_count(), "wrote positions sidecar");
+        }
+        // Clear per-doc indices now that they're persisted
+        self.per_doc_inverted_index.clear();
 
         self.wal.trim_through(snapshot.last_sequence_number).await?;
 

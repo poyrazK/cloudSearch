@@ -8,6 +8,9 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
 };
 
+pub mod inverted_index;
+pub mod positions_writer;
+
 const WAL_VERSION: u8 = 1;
 const HEADER_LEN: usize = 26;
 const DEFAULT_GENERATION: u64 = 1;
@@ -518,6 +521,18 @@ pub async fn write_doc_values(
     dir_file.sync_all().await?;
 
     Ok(())
+}
+
+/// Writes positions.bin sidecar file for a segment.
+///
+/// # Errors
+/// Returns an error if the file cannot be written or synced.
+pub async fn write_positions(
+    segments_dir: impl AsRef<Path>,
+    segment_num: u64,
+    index: &inverted_index::InvertedIndex,
+) -> std::io::Result<()> {
+    positions_writer::write_positions(segments_dir.as_ref(), segment_num, index).await
 }
 
 /// Reads all doc values fields from the sidecar directory.
