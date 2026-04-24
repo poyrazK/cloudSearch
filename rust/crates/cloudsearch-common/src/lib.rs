@@ -344,6 +344,8 @@ pub struct SearchHit {
     pub source: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "highlight")]
+    pub highlight: Option<std::collections::BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
