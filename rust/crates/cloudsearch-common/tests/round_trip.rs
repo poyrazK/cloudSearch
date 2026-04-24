@@ -893,7 +893,7 @@ fn test_create_snapshot_response() {
         created_at: chrono::Utc::now(),
         last_sequence_number: 42,
         document_count: 100,
-        checksum: 0xDEADBEEF,
+        checksum: 0xDEAD_BEEF,
     };
     round_trip(&original);
 }
@@ -907,14 +907,14 @@ fn test_list_snapshots_response() {
                 created_at: chrono::Utc::now(),
                 last_sequence_number: 10,
                 document_count: 50,
-                checksum: 0x12345678,
+                checksum: 0x1234_5678,
             },
             SnapshotMetadata {
                 name: "backup-2".to_string(),
                 created_at: chrono::Utc::now(),
                 last_sequence_number: 20,
                 document_count: 75,
-                checksum: 0x87654321,
+                checksum: 0x8765_4321,
             },
         ],
     };
@@ -928,7 +928,7 @@ fn test_snapshot_metadata() {
         created_at: chrono::Utc::now(),
         last_sequence_number: 100,
         document_count: 500,
-        checksum: 0xABCDEF01,
+        checksum: 0xABCD_EF01,
     };
     round_trip(&original);
 }

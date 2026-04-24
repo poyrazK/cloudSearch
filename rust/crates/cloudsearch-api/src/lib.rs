@@ -443,7 +443,7 @@ async fn search_index(
     Json(request): Json<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
     let started_at = Instant::now();
-    let mut request = parse_search_request(request)?;
+    let mut request = parse_search_request(&request)?;
     if let Some(q) = request.query.take() {
         request.query = Some(q);
     }
@@ -507,7 +507,7 @@ async fn search_index_get(
     ))
 }
 
-fn parse_search_request(value: Value) -> Result<SearchRequest, ApiError> {
+fn parse_search_request(value: &Value) -> Result<SearchRequest, ApiError> {
     let mut request = SearchRequest::default();
     let object = value.as_object().ok_or_else(|| {
         ApiError(CloudSearchError::InvalidSearchRequest(
@@ -1037,19 +1037,19 @@ fn to_compat_bulk_item_result(result: BulkItemResult) -> CompatBulkItemResult {
 
 fn aggregation_to_json(aggregation: AggregationResult) -> Value {
     match aggregation {
-        AggregationResult::Terms(result) => terms_aggregation_to_json(result),
-        AggregationResult::Stats(result) => stats_aggregation_to_json(result),
-        AggregationResult::DateHistogram(result) => date_histogram_aggregation_to_json(result),
+        AggregationResult::Terms(result) => terms_aggregation_to_json(&result),
+        AggregationResult::Stats(result) => stats_aggregation_to_json(&result),
+        AggregationResult::DateHistogram(result) => date_histogram_aggregation_to_json(&result),
     }
 }
 
-fn terms_aggregation_to_json(result: TermsAggregationResult) -> Value {
+fn terms_aggregation_to_json(result: &TermsAggregationResult) -> Value {
     serde_json::json!({
         "buckets": result.buckets
     })
 }
 
-fn stats_aggregation_to_json(result: StatsAggregationResult) -> Value {
+fn stats_aggregation_to_json(result: &StatsAggregationResult) -> Value {
     serde_json::json!({
         "count": result.count,
         "min": result.min,
@@ -1059,7 +1059,7 @@ fn stats_aggregation_to_json(result: StatsAggregationResult) -> Value {
     })
 }
 
-fn date_histogram_aggregation_to_json(result: DateHistogramAggregationResult) -> Value {
+fn date_histogram_aggregation_to_json(result: &DateHistogramAggregationResult) -> Value {
     serde_json::json!({
         "buckets": result.buckets
     })
@@ -1182,25 +1182,22 @@ async fn get_snapshot(
     let handle = state.registry.index_handle(&index).await?;
     let handle = handle.lock().await;
     let snapshot = handle.get_snapshot(&name).await?;
-    match snapshot {
-        Some(meta) => {
-            state.metrics().record_request(
-                "snapshot_get",
-                "GET",
-                StatusCode::OK,
-                started_at.elapsed().as_secs_f64(),
-            );
-            Ok((StatusCode::OK, Json(meta)))
-        }
-        None => {
-            state.metrics().record_request(
-                "snapshot_get",
-                "GET",
-                StatusCode::NOT_FOUND,
-                started_at.elapsed().as_secs_f64(),
-            );
-            Err(ApiError(CloudSearchError::SnapshotNotFound(name.clone())))
-        }
+    if let Some(meta) = snapshot {
+        state.metrics().record_request(
+            "snapshot_get",
+            "GET",
+            StatusCode::OK,
+            started_at.elapsed().as_secs_f64(),
+        );
+        Ok((StatusCode::OK, Json(meta)))
+    } else {
+        state.metrics().record_request(
+            "snapshot_get",
+            "GET",
+            StatusCode::NOT_FOUND,
+            started_at.elapsed().as_secs_f64(),
+        );
+        Err(ApiError(CloudSearchError::SnapshotNotFound(name.clone())))
     }
 }
 
@@ -1245,7 +1242,7 @@ async fn restore_snapshot(
 }
 
 #[derive(Debug)]
-struct ApiError(CloudSearchError);
+pub struct ApiError(CloudSearchError);
 
 impl From<CloudSearchError> for ApiError {
     fn from(value: CloudSearchError) -> Self {
@@ -1267,8 +1264,8 @@ impl IntoResponse for ApiError {
             | CloudSearchError::UnsupportedArrayField(_)
             | CloudSearchError::MappingLimitExceeded(_)
             | CloudSearchError::InvalidNamespace(_)
-            | CloudSearchError::ResourceLimitExceeded(_) => StatusCode::BAD_REQUEST,
-            CloudSearchError::Serde(_) => StatusCode::BAD_REQUEST,
+            | CloudSearchError::ResourceLimitExceeded(_)
+            | CloudSearchError::Serde(_) => StatusCode::BAD_REQUEST,
             CloudSearchError::InvalidWalRecord(_)
             | CloudSearchError::WalChecksumMismatch
             | CloudSearchError::Io(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -1338,6 +1335,7 @@ mod tests {
         assert_eq!(value, serde_json::json!({"status": "ok"}));
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn metrics_endpoint_exposes_request_and_operation_counters() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -1812,6 +1810,7 @@ mod tests {
         assert!(body_text.contains("hello from api"));
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn searches_documents_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -1978,6 +1977,7 @@ mod tests {
         assert_eq!(bool_json["hits"]["total"]["value"], 2);
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn refresh_and_range_queries_work_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -2119,6 +2119,7 @@ mod tests {
         assert_eq!(timestamp_json["hits"]["hits"][0]["_id"], "doc-2");
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn bulk_ingest_orders_operations_and_requires_refresh() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -2868,6 +2869,7 @@ mod tests {
         assert!(response.status().is_client_error());
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn terms_query_and_sorted_pagination_work_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -3135,6 +3137,8 @@ mod tests {
         );
     }
 
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::similar_names)]
     #[tokio::test]
     async fn supports_elasticsearch_style_query_shapes_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -3523,6 +3527,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn strict_mode_and_mapping_conflicts_return_bad_request() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -3772,6 +3777,7 @@ mod tests {
         assert!(value["errors"].as_bool().unwrap());
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn successful_search_response_shape_is_exact_for_paginated_sort() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -3894,6 +3900,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn terms_and_stats_aggregations_work_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -4017,6 +4024,7 @@ mod tests {
         assert_eq!(value["aggregations"]["latency_stats"]["avg"], 20.0);
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn date_histogram_aggregation_works_over_http() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");

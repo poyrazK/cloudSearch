@@ -1,13 +1,13 @@
 //! Query string parser for cloudSearch.
 //!
 //! Converts query strings like `"field:value AND (tag:foo OR tag:bar)"`
-//! into the existing SearchQuery AST.
+//! into the existing `SearchQuery` AST.
 
 use cloudsearch_common::{
     BoolQuery, CloudSearchError, RangeQuery, SearchQuery, TermQuery, WildcardQuery,
 };
 
-/// Parse a query string into a SearchQuery.
+/// Parse a query string into a `SearchQuery`.
 pub fn parse_query_string(input: &str) -> Result<SearchQuery, CloudSearchError> {
     let mut parser = Parser::new(input);
     let query = parser.parse_query()?;
@@ -16,7 +16,7 @@ pub fn parse_query_string(input: &str) -> Result<SearchQuery, CloudSearchError> 
 }
 
 /// Token produced by the tokenizer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Token {
     /// The colon separator between field and value
     Colon,
@@ -39,7 +39,7 @@ impl<'a> Parser<'a> {
         self.parse_or_expr()
     }
 
-    /// OR_EXPR ::= AND_EXPR ( "OR" AND_EXPR )*
+    /// `OR_EXPR` ::= `AND_EXPR` ( "OR" `AND_EXPR` )*
     fn parse_or_expr(&mut self) -> Result<SearchQuery, CloudSearchError> {
         let mut left = self.parse_and_expr()?;
 
@@ -53,14 +53,14 @@ impl<'a> Parser<'a> {
                 if after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
                     self.pos += 3;
                     let right = self.parse_and_expr()?;
-                    left = self.make_bool_must_not_and(left, right)?;
+                    left = Self::make_bool_must_not_and(left, right);
                     continue;
                 }
             }
 
             if self.skip_word("OR") {
                 let right = self.parse_and_expr()?;
-                left = self.make_bool_should(left, right)?;
+                left = Self::make_bool_should(left, right);
                 continue;
             }
 
@@ -70,7 +70,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// AND_EXPR ::= NOT_EXPR ( "AND" NOT_EXPR )*
+    /// `AND_EXPR` ::= `NOT_EXPR` ( "AND" `NOT_EXPR` )*
     fn parse_and_expr(&mut self) -> Result<SearchQuery, CloudSearchError> {
         let mut left = self.parse_not_expr()?;
 
@@ -93,7 +93,7 @@ impl<'a> Parser<'a> {
                 if after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
                     self.pos += 3;
                     let right = self.parse_not_expr()?;
-                    left = self.make_bool_must(left, right)?;
+                    left = Self::make_bool_must(left, right);
                     continue;
                 }
             }
@@ -115,7 +115,7 @@ impl<'a> Parser<'a> {
             // Implicit AND: bare clause following
             if !rest.starts_with(')') && !self.is_at_operator() {
                 let right = self.parse_not_expr()?;
-                left = self.make_bool_must(left, right)?;
+                left = Self::make_bool_must(left, right);
                 continue;
             }
 
@@ -125,7 +125,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// NOT_EXPR ::= PRIMARY (handles NOT in parse_and_expr)
+    /// `NOT_EXPR` ::= PRIMARY (handles NOT in `parse_and_expr`)
     fn parse_not_expr(&mut self) -> Result<SearchQuery, CloudSearchError> {
         self.parse_primary()
     }
@@ -145,7 +145,7 @@ impl<'a> Parser<'a> {
     fn parse_clause(&mut self) -> Result<SearchQuery, CloudSearchError> {
         // Check for a field:value pattern
         if let Some((field, value)) = self.try_parse_field_value()? {
-            self.classify_and_build_query(&field, &value)
+            Self::classify_and_build_query(&field, &value)
         } else {
             // Bare word: treat as tag:word
             let word = self.read_word();
@@ -186,15 +186,11 @@ impl<'a> Parser<'a> {
         Ok(Some((field, value.to_string())))
     }
 
-    /// Classify a field:value pair and build the appropriate SearchQuery.
-    fn classify_and_build_query(
-        &self,
-        field: &str,
-        value: &str,
-    ) -> Result<SearchQuery, CloudSearchError> {
+    /// Classify a field:value pair and build the appropriate `SearchQuery`.
+    fn classify_and_build_query(field: &str, value: &str) -> Result<SearchQuery, CloudSearchError> {
         // Range operators: check >=, <= first before >, <
         if let Some(stripped) = value.strip_prefix(">=") {
-            let num = self.parse_numeric(stripped)?;
+            let num = Self::parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: Some(num.clone()),
@@ -204,7 +200,7 @@ impl<'a> Parser<'a> {
             }));
         }
         if let Some(stripped) = value.strip_prefix("<=") {
-            let num = self.parse_numeric(stripped)?;
+            let num = Self::parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: None,
@@ -214,7 +210,7 @@ impl<'a> Parser<'a> {
             }));
         }
         if let Some(stripped) = value.strip_prefix('>') {
-            let num = self.parse_numeric(stripped)?;
+            let num = Self::parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: None,
@@ -224,7 +220,7 @@ impl<'a> Parser<'a> {
             }));
         }
         if let Some(stripped) = value.strip_prefix('<') {
-            let num = self.parse_numeric(stripped)?;
+            let num = Self::parse_numeric(stripped)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: None,
@@ -238,8 +234,8 @@ impl<'a> Parser<'a> {
         if let Some((lo, hi)) = value.split_once("..")
             && (!lo.is_empty() || !hi.is_empty())
         {
-            let lo_num = self.parse_numeric(lo)?;
-            let hi_num = self.parse_numeric(hi)?;
+            let lo_num = Self::parse_numeric(lo)?;
+            let hi_num = Self::parse_numeric(hi)?;
             return Ok(SearchQuery::Range(RangeQuery {
                 field: field.to_string(),
                 gte: Some(lo_num.clone()),
@@ -258,14 +254,14 @@ impl<'a> Parser<'a> {
         }
 
         // Default: term query
-        let json_value = self.parse_value(value)?;
+        let json_value = Self::parse_value(value);
         Ok(SearchQuery::Term(TermQuery {
             field: field.to_string(),
             value: json_value,
         }))
     }
 
-    fn parse_numeric(&self, s: &str) -> Result<serde_json::Value, CloudSearchError> {
+    fn parse_numeric(s: &str) -> Result<serde_json::Value, CloudSearchError> {
         // Try to parse as integer first
         if let Ok(i) = s.parse::<i64>() {
             return Ok(serde_json::json!(i));
@@ -276,13 +272,13 @@ impl<'a> Parser<'a> {
             .map_err(|_| CloudSearchError::InvalidSearchRequest(format!("invalid number '{s}'")))
     }
 
-    fn parse_value(&self, s: &str) -> Result<serde_json::Value, CloudSearchError> {
+    fn parse_value(s: &str) -> serde_json::Value {
         // Try to parse as JSON first (numbers, booleans)
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-            return Ok(v);
+            return v;
         }
         // Fall back to string
-        Ok(serde_json::Value::String(s.to_string()))
+        serde_json::Value::String(s.to_string())
     }
 
     /// Read a word (alphanumeric + underscore, non-empty)
@@ -352,8 +348,7 @@ impl<'a> Parser<'a> {
             && self.input[self.pos..]
                 .chars()
                 .next()
-                .map(char::is_whitespace)
-                == Some(true)
+                .is_some_and(char::is_whitespace)
         {
             self.pos += 1;
         }
@@ -447,7 +442,10 @@ impl<'a> Parser<'a> {
     fn ensure_exhausted(&self) -> Result<(), CloudSearchError> {
         let mut pos = self.pos;
         while pos < self.input.len()
-            && self.input[pos..].chars().next().map(char::is_whitespace) == Some(true)
+            && self.input[pos..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
         {
             pos += 1;
         }
@@ -461,12 +459,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Combine two queries into a BoolQuery with must.
-    fn make_bool_must(
-        &self,
-        left: SearchQuery,
-        right: SearchQuery,
-    ) -> Result<SearchQuery, CloudSearchError> {
+    /// Combine two queries into a `BoolQuery` with must.
+    fn make_bool_must(left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let mut must = Vec::new();
         let mut must_not = Vec::new();
 
@@ -527,20 +521,16 @@ impl<'a> Parser<'a> {
             other => must.push(other),
         }
 
-        Ok(SearchQuery::Bool(BoolQuery {
+        SearchQuery::Bool(BoolQuery {
             must,
             should: vec![],
             filter: vec![],
             must_not,
-        }))
+        })
     }
 
-    /// Combine two queries into a BoolQuery with should.
-    fn make_bool_should(
-        &self,
-        left: SearchQuery,
-        right: SearchQuery,
-    ) -> Result<SearchQuery, CloudSearchError> {
+    /// Combine two queries into a `BoolQuery` with should.
+    fn make_bool_should(left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let mut should = Vec::new();
         let mut must = Vec::new();
 
@@ -567,20 +557,16 @@ impl<'a> Parser<'a> {
             other => should.push(other),
         }
 
-        Ok(SearchQuery::Bool(BoolQuery {
+        SearchQuery::Bool(BoolQuery {
             must,
             should,
             filter: vec![],
             must_not: vec![],
-        }))
+        })
     }
 
-    /// Combine left AND (NOT right) → must: [left's must + should], must_not: [right]
-    fn make_bool_must_not_and(
-        &self,
-        left: SearchQuery,
-        right: SearchQuery,
-    ) -> Result<SearchQuery, CloudSearchError> {
+    /// Combine left AND (NOT right) → must: [left's must + should], `must_not`: [right]
+    fn make_bool_must_not_and(left: SearchQuery, right: SearchQuery) -> SearchQuery {
         let (must, should, filter) = match left {
             SearchQuery::Bool(BoolQuery {
                 must: m,
@@ -590,12 +576,12 @@ impl<'a> Parser<'a> {
             }) => (m, should, filter),
             other => (vec![other], vec![], vec![]),
         };
-        Ok(SearchQuery::Bool(BoolQuery {
+        SearchQuery::Bool(BoolQuery {
             must,
             should,
             filter,
             must_not: vec![right],
-        }))
+        })
     }
 }
 

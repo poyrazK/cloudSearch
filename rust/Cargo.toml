@@ -3,7 +3,8 @@ members = [
     "crates/cloudsearch-api",
     "crates/cloudsearch-common",
     "crates/cloudsearch-index",
-    "crates/cloudsearch-node", "crates/cloudsearch-storage",
+    "crates/cloudsearch-node",
+    "crates/cloudsearch-storage",
 ]
 resolver = "3"
 

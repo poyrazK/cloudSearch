@@ -116,7 +116,7 @@ pub struct SnapshotMetadata {
     pub checksum: u32,
 }
 
-/// DocValueType for columnar sidecar storage.
+/// `DocValueType` for columnar sidecar storage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DocValueType {
@@ -142,7 +142,7 @@ pub struct DocValuesField {
     pub field: String,
     pub value_type: DocValueType,
     pub doc_count: u64,
-    /// Packed binary data. Format depends on value_type:
+    /// Packed binary data. Format depends on `value_type`:
     /// - Keyword: (u32 offset, u32 len) pairs, then string pool
     /// - Integer/Long/Timestamp: packed i64 array
     /// - Double: packed f64 array
@@ -151,6 +151,10 @@ pub struct DocValuesField {
 }
 
 impl WalManager {
+    /// Opens or creates a WAL manager for the given directory.
+    ///
+    /// # Errors
+    /// Returns an error if directory creation fails or if no current generation exists.
     pub async fn open(wal_dir: impl Into<PathBuf>) -> Result<Self> {
         let wal_dir = wal_dir.into();
         fs::create_dir_all(&wal_dir).await?;
@@ -160,6 +164,13 @@ impl WalManager {
         Ok(manager)
     }
 
+    /// Appends a WAL record to the current generation.
+    ///
+    /// # Errors
+    /// Returns an error if file operations or serialization fails.
+    ///
+    /// # Panics
+    /// Panics if the payload exceeds 4 GB.
     pub async fn append(&self, sequence_number: u64, record: WalRecord) -> Result<()> {
         let generation = self.current_generation().await?;
         let path = self.generation_path(generation);
@@ -170,7 +181,7 @@ impl WalManager {
         let mut header = Vec::with_capacity(HEADER_LEN);
         header.push(WAL_VERSION);
         header.push(record_type(&record));
-        header.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        header.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
         header.extend_from_slice(&sequence_number.to_le_bytes());
         header.extend_from_slice(&timestamp.to_le_bytes());
         header.extend_from_slice(&checksum.to_le_bytes());
@@ -188,10 +199,18 @@ impl WalManager {
         Ok(())
     }
 
+    /// Replays all WAL entries from the beginning.
+    ///
+    /// # Errors
+    /// Returns an error if file reading or parsing fails.
     pub async fn replay(&self) -> Result<Vec<WalEntry>> {
         self.replay_from(0).await
     }
 
+    /// Replays WAL entries starting from the given sequence number (exclusive).
+    ///
+    /// # Errors
+    /// Returns an error if file reading or parsing fails.
     pub async fn replay_from(&self, sequence_number_exclusive: u64) -> Result<Vec<WalEntry>> {
         let mut entries = Vec::new();
         let current_generation = self.current_generation().await?;
@@ -270,6 +289,10 @@ impl WalManager {
         Ok(entries)
     }
 
+    /// Returns the next available sequence number.
+    ///
+    /// # Errors
+    /// Returns an error if replay fails.
     pub async fn next_sequence_number(&self) -> Result<u64> {
         let last = self
             .replay()
@@ -284,6 +307,10 @@ impl WalManager {
         &self.wal_dir
     }
 
+    /// Lists all WAL generation numbers.
+    ///
+    /// # Errors
+    /// Returns an error if directory reading fails.
     pub async fn list_generations(&self) -> Result<Vec<u64>> {
         let mut generations = Vec::new();
         let mut entries = fs::read_dir(&self.wal_dir).await?;
@@ -311,12 +338,20 @@ impl WalManager {
         Ok(generations)
     }
 
+    /// Creates a new WAL generation.
+    ///
+    /// # Errors
+    /// Returns an error if file writing fails.
     pub async fn rollover(&self) -> Result<u64> {
         let next_generation = self.current_generation().await? + 1;
         fs::write(self.current_path(), format!("{next_generation:06}\n")).await?;
         Ok(next_generation)
     }
 
+    /// Trims WAL entries up to and including the given sequence number.
+    ///
+    /// # Errors
+    /// Returns an error if file operations fail.
     pub async fn trim_through(&self, sequence_number_inclusive: u64) -> Result<usize> {
         let current_generation = self.current_generation().await?;
         let mut trimmed = 0;
@@ -402,6 +437,10 @@ impl WalManager {
     }
 }
 
+/// Reads the latest segment snapshot from the segments directory.
+///
+/// # Errors
+/// Returns an error if file operations or deserialization fails.
 pub async fn read_segment_snapshot(
     segments_dir: impl AsRef<Path>,
 ) -> Result<Option<SegmentSnapshot>> {
@@ -415,7 +454,10 @@ pub async fn read_segment_snapshot(
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
-/// Read a segment snapshot from a specific segment file path (absolute path).
+/// Reads a segment snapshot from a specific segment file path (absolute path).
+///
+/// # Errors
+/// Returns an error if file operations or deserialization fails.
 pub async fn read_segment_file(path: impl AsRef<Path>) -> Result<Option<SegmentSnapshot>> {
     if !fs::try_exists(path.as_ref()).await? {
         return Ok(None);
@@ -432,7 +474,13 @@ fn doc_values_path(segments_dir: &Path, field: &str) -> PathBuf {
     doc_values_dir(segments_dir).join(format!("{field}.bin"))
 }
 
-/// Write all doc values fields to the sidecar directory.
+/// Writes all doc values fields to the sidecar directory.
+///
+/// # Errors
+/// Returns an error if file operations or serialization fails.
+///
+/// # Panics
+/// Panics if any header exceeds 4 GB.
 pub async fn write_doc_values(
     segments_dir: impl AsRef<Path>,
     fields: &BTreeMap<String, DocValuesField>,
@@ -450,7 +498,7 @@ pub async fn write_doc_values(
             doc_count: f.doc_count,
         };
         let header_bytes = serde_json::to_vec(&header)?;
-        let len_bytes = (header_bytes.len() as u32).to_le_bytes();
+        let len_bytes = u32::try_from(header_bytes.len()).unwrap().to_le_bytes();
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -472,7 +520,10 @@ pub async fn write_doc_values(
     Ok(())
 }
 
-/// Read all doc values fields from the sidecar directory.
+/// Reads all doc values fields from the sidecar directory.
+///
+/// # Errors
+/// Returns an error if file operations or deserialization fails.
 pub async fn read_doc_values(
     segments_dir: impl AsRef<Path>,
 ) -> Result<BTreeMap<String, DocValuesField>> {
@@ -515,6 +566,10 @@ pub async fn read_doc_values(
     Ok(result)
 }
 
+/// Writes a segment snapshot to the segments directory.
+///
+/// # Errors
+/// Returns an error if file operations or serialization fails.
 pub async fn write_segment_snapshot(
     segments_dir: impl AsRef<Path>,
     snapshot: &SegmentSnapshot,
@@ -572,7 +627,10 @@ fn snapshot_meta_path(segments_dir: &Path, name: &str) -> PathBuf {
     snapshots_dir(segments_dir).join(format!("{name}.meta.json"))
 }
 
-/// Write a named snapshot and its metadata to disk.
+/// Writes a named snapshot and its metadata to disk.
+///
+/// # Errors
+/// Returns an error if validation fails, file operations fail, or checksums don't match.
 pub async fn write_named_snapshot(
     segments_dir: impl AsRef<Path>,
     name: &str,
@@ -613,7 +671,10 @@ pub async fn write_named_snapshot(
     Ok(())
 }
 
-/// Read a named snapshot from disk.
+/// Reads a named snapshot from disk.
+///
+/// # Errors
+/// Returns an error if validation fails or file operations fail.
 pub async fn read_named_snapshot(
     segments_dir: impl AsRef<Path>,
     name: &str,
@@ -627,7 +688,10 @@ pub async fn read_named_snapshot(
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
-/// Read metadata for a named snapshot.
+/// Reads metadata for a named snapshot.
+///
+/// # Errors
+/// Returns an error if validation fails or file operations fail.
 pub async fn read_snapshot_metadata(
     segments_dir: impl AsRef<Path>,
     name: &str,
@@ -641,7 +705,10 @@ pub async fn read_snapshot_metadata(
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
-/// List all named snapshots for an index.
+/// Lists all named snapshots for an index.
+///
+/// # Errors
+/// Returns an error if directory reading fails.
 pub async fn list_snapshots(segments_dir: impl AsRef<Path>) -> Result<Vec<SnapshotMetadata>> {
     let segments_dir = segments_dir.as_ref();
     let dir = snapshots_dir(segments_dir);
@@ -680,7 +747,10 @@ pub async fn list_snapshots(segments_dir: impl AsRef<Path>) -> Result<Vec<Snapsh
     Ok(snapshots)
 }
 
-/// Delete a named snapshot.
+/// Deletes a named snapshot.
+///
+/// # Errors
+/// Returns an error if validation fails or file operations fail.
 pub async fn delete_snapshot(segments_dir: impl AsRef<Path>, name: &str) -> Result<()> {
     validate_snapshot_name(name)?;
     let segments_dir = segments_dir.as_ref();
@@ -705,7 +775,10 @@ pub fn segment_file_path(segments_dir: &Path, segment_number: u64) -> PathBuf {
     segments_dir.join(format!("seg_{segment_number:06}.json"))
 }
 
-/// Write the index manifest atomically (rename + dir sync).
+/// Writes the index manifest atomically (rename + dir sync).
+///
+/// # Errors
+/// Returns an error if file operations or serialization fails.
 pub async fn write_index_manifest(
     segments_dir: impl AsRef<Path>,
     manifest: &IndexManifest,
@@ -722,7 +795,10 @@ pub async fn write_index_manifest(
     Ok(())
 }
 
-/// Read the index manifest, returning None if it doesn't exist.
+/// Reads the index manifest, returning None if it doesn't exist.
+///
+/// # Errors
+/// Returns an error if file operations or deserialization fails.
 pub async fn read_index_manifest(segments_dir: impl AsRef<Path>) -> Result<Option<IndexManifest>> {
     let path = manifest_path(segments_dir.as_ref());
     if !fs::try_exists(&path).await? {
@@ -732,7 +808,10 @@ pub async fn read_index_manifest(segments_dir: impl AsRef<Path>) -> Result<Optio
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
-/// Check if the legacy `current.json` exists (for migration).
+/// Checks if the legacy `current.json` exists (for migration).
+///
+/// # Errors
+/// Returns an error if file operations fail.
 pub async fn legacy_snapshot_exists(segments_dir: impl AsRef<Path>) -> Result<bool> {
     Ok(fs::try_exists(segment_snapshot_path(segments_dir.as_ref())).await?)
 }
@@ -1191,7 +1270,7 @@ mod tests {
         let mut header = Vec::with_capacity(HEADER_LEN);
         header.push(WAL_VERSION);
         header.push(1);
-        header.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        header.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
         header.extend_from_slice(&2u64.to_le_bytes());
         header.extend_from_slice(&Utc::now().timestamp_millis().to_le_bytes());
         header.extend_from_slice(&checksum.to_le_bytes());
