@@ -239,7 +239,7 @@ pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
             put(create_index).get(get_index).delete(delete_index),
         )
         .route("/{index}/_bulk", put(bulk_index).post(bulk_index))
-        .route("/{index}/_doc", put(index_document))
+        .route("/{index}/_doc", put(index_document).post(index_document))
         .route("/{index}/_doc/{id}", get(get_document))
         .route("/{index}/_flush", put(flush_index).post(flush_index))
         .route("/{index}/_merge", post(merge_index))
@@ -443,10 +443,7 @@ async fn search_index(
     Json(request): Json<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
     let started_at = Instant::now();
-    let mut request = parse_search_request(&request)?;
-    if let Some(q) = request.query.take() {
-        request.query = Some(q);
-    }
+    let request = parse_search_request(&request)?;
     let handle = state.registry.index_handle(&index).await?;
     let handle = handle.lock().await;
     handle.validate_search_request(&request)?;
