@@ -184,12 +184,25 @@ impl IndexCatalog {
         Ok(metadata)
     }
 
-    /// Load positions sidecar from a segment directory, if it exists.
-    async fn load_positions_reader(
+    /// Load all positions sidecars from a manifest's segments.
+    async fn load_all_positions_readers(
         segments_dir: &Path,
-        latest_seg: Option<&SegmentMeta>,
+        manifest: &IndexManifest,
+    ) -> Vec<cloudsearch_storage::inverted_index::PositionsReader> {
+        let mut readers = Vec::new();
+        for seg in &manifest.segments {
+            if let Some(reader) = Self::load_single_positions_reader(segments_dir, seg).await {
+                readers.push(reader);
+            }
+        }
+        readers
+    }
+
+    /// Load positions sidecar for a single segment, if it exists.
+    async fn load_single_positions_reader(
+        segments_dir: &Path,
+        seg: &SegmentMeta,
     ) -> Option<cloudsearch_storage::inverted_index::PositionsReader> {
-        let seg = latest_seg?;
         let path = segments_dir.join(format!("positions_{:020}.bin", seg.segment_number));
         let reader = cloudsearch_storage::inverted_index::PositionsReader::read(&path)
             .await
@@ -295,9 +308,14 @@ impl IndexCatalog {
             _ => None,
         };
 
-        // Load positions sidecar from the most recent segment if available
-        let positions_reader =
-            Self::load_positions_reader(&segments_dir, manifest.segments.last()).await;
+        // Load positions sidecar from all segments for multi-segment highlight support
+        let positions_readers = Self::load_all_positions_readers(&segments_dir, &manifest).await;
+        if !positions_readers.is_empty() {
+            tracing::info!(
+                count = positions_readers.len(),
+                "loaded positions sidecars for all segments"
+            );
+        }
 
         Ok(IndexHandle {
             metadata,
@@ -311,7 +329,7 @@ impl IndexCatalog {
             document_timestamps,
             doc_values_reader,
             per_doc_inverted_index: BTreeMap::new(),
-            positions_reader,
+            positions_readers,
         })
     }
 
@@ -480,9 +498,8 @@ pub struct IndexHandle {
     /// Per-document inverted indices (term -> byte offsets) for pending documents.
     /// Cleared after each flush when documents are persisted.
     per_doc_inverted_index: BTreeMap<String, BTreeMap<String, Vec<u32>>>,
-    /// Positions reader loaded from the most recent flush, if available.
-    #[allow(dead_code)]
-    positions_reader: Option<cloudsearch_storage::inverted_index::PositionsReader>,
+    /// Positions readers loaded from all segments, for multi-segment highlight extraction.
+    positions_readers: Vec<cloudsearch_storage::inverted_index::PositionsReader>,
 }
 
 #[derive(Debug, Clone)]
@@ -773,9 +790,9 @@ impl IndexHandle {
             .skip(from)
             .take(size)
             .map(|(score, doc)| {
-                let highlight = match &self.positions_reader {
-                    Some(r) => extract_highlight(doc, r, query),
-                    None => None,
+                let highlight = match &self.positions_readers {
+                    r if !r.is_empty() => extract_highlight(doc, r, query),
+                    _ => None,
                 };
                 SearchHit {
                     id: doc.id.clone(),
@@ -1563,7 +1580,7 @@ fn tokenize(text: &str) -> Vec<String> {
 #[allow(clippy::cast_possible_truncation)]
 fn extract_highlight(
     doc: &IndexDocument,
-    positions_reader: &cloudsearch_storage::inverted_index::PositionsReader,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
     query: &SearchQuery,
 ) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
     let query_terms = get_query_terms(query);
@@ -1581,26 +1598,28 @@ fn extract_highlight(
                 let mut fragments: Vec<(usize, String)> = Vec::new(); // (start_byte, fragment)
 
                 for term in &query_terms {
-                    if let Some(posting_list) = positions_reader.get(term) {
-                        // Find the posting for this document (by doc_id matching document index)
-                        // For simplicity, we use the first posting that has positions
-                        // In a multi-segment scenario, we'd merge across segments
-                        for posting in &posting_list.docs {
-                            for &byte_pos in &posting.positions {
-                                let pos = byte_pos as usize;
-                                if pos > text.len() {
-                                    continue;
-                                }
-                                // Extract window around match: 50 chars before, matched term, 30 after
-                                let pre_start = pos.saturating_sub(50);
-                                let pre = &text[pre_start..pos];
-                                let term_match =
-                                    &text[pos..pos.saturating_add(term.len()).min(text.len())];
-                                let post_end = pos.saturating_add(term.len() + 30).min(text.len());
-                                let post = &text[pos.saturating_add(term.len())..post_end];
+                    // Search all segment positions readers
+                    for positions_reader in positions_readers {
+                        if let Some(posting_list) = positions_reader.get(term) {
+                            // Find the posting for this document (by doc_id matching document index)
+                            for posting in &posting_list.docs {
+                                for &byte_pos in &posting.positions {
+                                    let pos = byte_pos as usize;
+                                    if pos > text.len() {
+                                        continue;
+                                    }
+                                    // Extract window around match: 50 chars before, matched term, 30 after
+                                    let pre_start = pos.saturating_sub(50);
+                                    let pre = &text[pre_start..pos];
+                                    let term_match =
+                                        &text[pos..pos.saturating_add(term.len()).min(text.len())];
+                                    let post_end =
+                                        pos.saturating_add(term.len() + 30).min(text.len());
+                                    let post = &text[pos.saturating_add(term.len())..post_end];
 
-                                let fragment = format!("{pre}<em>{term_match}</em>{post}");
-                                fragments.push((pre_start, fragment));
+                                    let fragment = format!("{pre}<em>{term_match}</em>{post}");
+                                    fragments.push((pre_start, fragment));
+                                }
                             }
                         }
                     }
