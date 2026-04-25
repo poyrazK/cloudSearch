@@ -9,8 +9,9 @@ use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkRequest,
     BulkResponse, CloudSearchError, CreateIndexRequest, CreateSnapshotResponse,
     DateHistogramAggregationResult, ErrorResponse, FlushResponse, HealthResponse, IndexDocument,
-    IndexDocumentRequest, ListSnapshotsResponse, MatchQuery, MergeResponse, PrefixQuery,
-    RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
+    IndexDocumentRequest, ListSnapshotsResponse, MatchQuery, MergeResponse,
+    MultiSearchItemResponse, MultiSearchRequest, MultiSearchResponse, PrefixQuery, RangeQuery,
+    RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
     StatsAggregationResult, TermQuery, TermsAggregationResult, TermsQuery, UpdateSettingsRequest,
     WildcardQuery,
 };
@@ -236,6 +237,7 @@ pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
     Router::new()
         .route("/_health", get(health))
         .route("/metrics", get(metrics))
+        .route("/_msearch", post(multi_search))
         .route(
             "/{index}",
             put(create_index).get(get_index).delete(delete_index),
@@ -470,6 +472,56 @@ async fn search_index(
         StatusCode::OK,
         Json(to_compat_search_response(handle.search(&request))),
     ))
+}
+
+async fn multi_search(
+    State(state): State<ApiState>,
+    Json(request): Json<MultiSearchRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
+    let mut responses = Vec::with_capacity(request.searches.len());
+
+    for item in request.searches {
+        let index_name = item.index.clone();
+        let handle = match state.registry.index_handle(&index_name).await {
+            Ok(h) => h,
+            Err(e) => {
+                responses.push(MultiSearchItemResponse {
+                    index: index_name,
+                    status: StatusCode::NOT_FOUND.as_u16(),
+                    response: None,
+                    error: Some(e.to_string()),
+                });
+                continue;
+            }
+        };
+        let handle = handle.lock().await;
+        match handle.validate_search_request(&item.request) {
+            Ok(()) => {}
+            Err(e) => {
+                responses.push(MultiSearchItemResponse {
+                    index: index_name,
+                    status: StatusCode::BAD_REQUEST.as_u16(),
+                    response: None,
+                    error: Some(e.to_string()),
+                });
+                continue;
+            }
+        }
+        let result = handle.search(&item.request);
+        responses.push(MultiSearchItemResponse {
+            index: index_name,
+            status: StatusCode::OK.as_u16(),
+            response: Some(result),
+            error: None,
+        });
+    }
+
+    let elapsed = started_at.elapsed();
+    if elapsed.as_millis() > 50 {
+        tracing::warn!(duration_ms = elapsed.as_millis(), "slow multi_search");
+    }
+    Ok((StatusCode::OK, Json(MultiSearchResponse { responses })))
 }
 
 async fn search_index_get(
