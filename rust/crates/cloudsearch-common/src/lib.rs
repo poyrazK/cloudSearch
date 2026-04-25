@@ -259,6 +259,7 @@ pub enum SearchQuery {
     Prefix(PrefixQuery),
     Wildcard(WildcardQuery),
     Match(MatchQuery),
+    Phrase(PhraseQuery),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -275,6 +276,12 @@ pub struct WildcardQuery {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatchQuery {
+    pub field: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PhraseQuery {
     pub field: String,
     pub value: String,
 }
