@@ -1750,8 +1750,8 @@ fn get_query_terms(query: &SearchQuery) -> Vec<String> {
             .chain(bool_query.filter.iter())
             .flat_map(get_query_terms)
             .collect(),
-        SearchQuery::Prefix(prefix) => vec![prefix.value.to_lowercase()],
-        SearchQuery::Wildcard(wc) => vec![wc.value.to_lowercase()],
+        SearchQuery::Prefix(prefix) => tokenize(&prefix.value),
+        SearchQuery::Wildcard(wc) => tokenize(&wc.value),
         SearchQuery::Match(mq) => tokenize(&mq.value),
         SearchQuery::Phrase(phrase) => tokenize(&phrase.value),
     }
