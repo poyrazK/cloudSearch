@@ -4,9 +4,9 @@ use cloudsearch_common::{
     BulkRequest, BulkResponse, CloudSearchError, CreateIndexRequest,
     DateHistogramAggregationResult, DateHistogramBucket, DateHistogramInterval, FieldMapping,
     FieldType, FlushResponse, HitsMetadata, IndexDocument, IndexMetadata, MappingMode, MatchQuery,
-    MergeResponse, PrefixQuery, RangeQuery, Result, SearchHit, SearchQuery, SearchRequest,
-    SearchResponse, SortOrder, SortSpec, StatsAggregationResult, TermsAggregationResult,
-    TermsBucket, TermsQuery, WildcardQuery,
+    MergeResponse, PhraseQuery, PrefixQuery, RangeQuery, Result, SearchHit, SearchQuery,
+    SearchRequest, SearchResponse, SortOrder, SortSpec, StatsAggregationResult,
+    TermsAggregationResult, TermsBucket, TermsQuery, WildcardQuery,
 };
 use cloudsearch_storage::{
     IndexManifest, SegmentMeta, SegmentSnapshot, SnapshotMetadata, WalManager, WalRecord,
@@ -745,7 +745,7 @@ impl IndexHandle {
             .searchable_documents
             .values()
             .filter(|doc| !self.is_expired(&doc.id, now))
-            .filter_map(|doc| score_query(doc, query).map(|s| (s, doc)))
+            .filter_map(|doc| score_query(doc, query, &self.positions_readers).map(|s| (s, doc)))
             .collect();
 
         let total = scored.len();
@@ -1431,6 +1431,7 @@ impl IndexHandle {
             SearchQuery::Prefix(prefix) => self.ensure_scalar_field(&prefix.field, &prefix.field),
             SearchQuery::Wildcard(wc) => self.ensure_scalar_field(&wc.field, &wc.field),
             SearchQuery::Match(mq) => self.ensure_text_field(&mq.field, &mq.field),
+            SearchQuery::Phrase(phrase) => self.ensure_text_field(&phrase.field, &phrase.field),
         }
     }
 
@@ -1539,7 +1540,11 @@ fn infer_field_type(field: &str, value: &serde_json::Value) -> Result<Option<Fie
     })
 }
 
-fn score_query(document: &IndexDocument, query: &SearchQuery) -> Option<f32> {
+fn score_query(
+    document: &IndexDocument,
+    query: &SearchQuery,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+) -> Option<f32> {
     match query {
         SearchQuery::MatchAll => Some(1.0),
         SearchQuery::Term(term) => document
@@ -1549,10 +1554,11 @@ fn score_query(document: &IndexDocument, query: &SearchQuery) -> Option<f32> {
             .map(|_| 1.0),
         SearchQuery::Terms(terms) => matches_terms_query(document, terms).then_some(1.0),
         SearchQuery::Range(range) => matches_range_query(document, range).then_some(1.0),
-        SearchQuery::Bool(bool_query) => score_bool_query(document, bool_query),
+        SearchQuery::Bool(bool_query) => score_bool_query(document, bool_query, positions_readers),
         SearchQuery::Prefix(prefix) => matches_prefix_query(document, prefix).then_some(1.0),
         SearchQuery::Wildcard(wc) => matches_wildcard_query(document, wc).then_some(1.0),
         SearchQuery::Match(mq) => score_match_query(document, mq),
+        SearchQuery::Phrase(phrase) => score_phrase_query(document, phrase, positions_readers),
     }
 }
 
@@ -1570,6 +1576,85 @@ fn score_match_query(document: &IndexDocument, query: &MatchQuery) -> Option<f32
         .filter(|t| field_set.contains(t))
         .count();
     (matched > 0).then(|| matched as f32 / query_tokens.len() as f32)
+}
+
+/// Score a phrase query by checking if query terms appear consecutively in document text.
+/// Uses positions data to verify proximity and score based on gap size.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn score_phrase_query(
+    document: &IndexDocument,
+    phrase: &PhraseQuery,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+) -> Option<f32> {
+    let field_str = document.source.get(&phrase.field)?.as_str()?;
+    let query_tokens = tokenize(&phrase.value);
+    if query_tokens.len() < 2 {
+        return None;
+    }
+
+    // For each segment's positions reader, find matching phrase occurrences
+    let mut best_score: Option<f32> = None;
+
+    for reader in positions_readers {
+        // Get positions of first term
+        let first_term = &query_tokens[0];
+        let Some(posting_list) = reader.get(first_term) else {
+            continue;
+        };
+
+        for posting in &posting_list.docs {
+            let first_positions = &posting.positions;
+            for &first_pos in first_positions {
+                let first_pos = first_pos as usize;
+                if first_pos >= field_str.len() {
+                    continue;
+                }
+
+                // Check if remaining terms appear consecutively after first_pos
+                let mut all_match = true;
+                let mut max_gap: u32 = 0;
+                let mut previous_pos = first_pos as u32;
+
+                for term in query_tokens.iter().skip(1) {
+                    let Some(next_list) = reader.get(term) else {
+                        all_match = false;
+                        break;
+                    };
+
+                    // Find the position of this term that is closest after previous_pos
+                    let mut found_pos: Option<u32> = None;
+                    for p in &next_list.docs.first()?.positions {
+                        if *p > previous_pos {
+                            found_pos = Some(*p);
+                            break;
+                        }
+                    }
+
+                    let Some(found_pos) = found_pos else {
+                        all_match = false;
+                        break;
+                    };
+
+                    // Calculate gap from previous term's position
+                    let gap = found_pos.saturating_sub(previous_pos);
+                    max_gap = max_gap.max(gap);
+                    previous_pos = found_pos;
+                }
+
+                if all_match {
+                    // Score based on gap: exact consecutive = 1.0, gaps decay score
+                    let score = if max_gap <= 10 {
+                        1.0
+                    } else {
+                        1.0 / (1.0 + max_gap as f32 * 0.1)
+                    };
+                    best_score = Some(best_score.map_or(score, |s| s.max(score)));
+                }
+            }
+        }
+    }
+
+    best_score
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -1668,6 +1753,7 @@ fn get_query_terms(query: &SearchQuery) -> Vec<String> {
         SearchQuery::Prefix(prefix) => vec![prefix.value.to_lowercase()],
         SearchQuery::Wildcard(wc) => vec![wc.value.to_lowercase()],
         SearchQuery::Match(mq) => tokenize(&mq.value),
+        SearchQuery::Phrase(phrase) => tokenize(&phrase.value),
     }
 }
 
@@ -1701,27 +1787,31 @@ fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn score_bool_query(document: &IndexDocument, bool_query: &BoolQuery) -> Option<f32> {
+fn score_bool_query(
+    document: &IndexDocument,
+    bool_query: &BoolQuery,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+) -> Option<f32> {
     // Evaluate each clause group once and store the scores.
     let must_scores: Vec<Option<f32>> = bool_query
         .must
         .iter()
-        .map(|q| score_query(document, q))
+        .map(|q| score_query(document, q, positions_readers))
         .collect();
     let filter_scores: Vec<Option<f32>> = bool_query
         .filter
         .iter()
-        .map(|q| score_query(document, q))
+        .map(|q| score_query(document, q, positions_readers))
         .collect();
     let must_not_scores: Vec<Option<f32>> = bool_query
         .must_not
         .iter()
-        .map(|q| score_query(document, q))
+        .map(|q| score_query(document, q, positions_readers))
         .collect();
     let should_scores: Vec<Option<f32>> = bool_query
         .should
         .iter()
-        .map(|q| score_query(document, q))
+        .map(|q| score_query(document, q, positions_readers))
         .collect();
 
     // All must clauses must match.
