@@ -184,6 +184,24 @@ impl IndexCatalog {
         Ok(metadata)
     }
 
+    /// Load positions sidecar from a segment directory, if it exists.
+    async fn load_positions_reader(
+        segments_dir: &Path,
+        latest_seg: Option<&SegmentMeta>,
+    ) -> Option<cloudsearch_storage::inverted_index::PositionsReader> {
+        let seg = latest_seg?;
+        let path = segments_dir.join(format!("positions_{:020}.bin", seg.segment_number));
+        let reader = cloudsearch_storage::inverted_index::PositionsReader::read(&path)
+            .await
+            .ok()?;
+        if reader.term_count() > 0 {
+            tracing::info!(terms = reader.term_count(), "loaded positions sidecar");
+            Some(reader)
+        } else {
+            None
+        }
+    }
+
     /// Opens an existing index for reading and writing.
     ///
     /// # Errors
@@ -277,6 +295,10 @@ impl IndexCatalog {
             _ => None,
         };
 
+        // Load positions sidecar from the most recent segment if available
+        let positions_reader =
+            Self::load_positions_reader(&segments_dir, manifest.segments.last()).await;
+
         Ok(IndexHandle {
             metadata,
             metadata_path,
@@ -289,7 +311,7 @@ impl IndexCatalog {
             document_timestamps,
             doc_values_reader,
             per_doc_inverted_index: BTreeMap::new(),
-            positions_reader: None,
+            positions_reader,
         })
     }
 
@@ -750,11 +772,17 @@ impl IndexHandle {
             .into_iter()
             .skip(from)
             .take(size)
-            .map(|(score, doc)| SearchHit {
-                id: doc.id.clone(),
-                source: doc.source.clone(),
-                score: Some(score),
-                highlight: None,
+            .map(|(score, doc)| {
+                let highlight = match &self.positions_reader {
+                    Some(r) => extract_highlight(doc, r, query),
+                    None => None,
+                };
+                SearchHit {
+                    id: doc.id.clone(),
+                    source: doc.source.clone(),
+                    score: Some(score),
+                    highlight,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -1529,6 +1557,99 @@ fn score_match_query(document: &IndexDocument, query: &MatchQuery) -> Option<f32
 
 fn tokenize(text: &str) -> Vec<String> {
     text.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// Extract highlight fragments from a document's text fields using position data.
+#[allow(clippy::cast_possible_truncation)]
+fn extract_highlight(
+    doc: &IndexDocument,
+    positions_reader: &cloudsearch_storage::inverted_index::PositionsReader,
+    query: &SearchQuery,
+) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
+    let query_terms = get_query_terms(query);
+    if query_terms.is_empty() {
+        return None;
+    }
+
+    let mut result: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+
+    // For each text field in the document, look up positions of matched terms
+    if let Some(obj) = doc.source.as_object() {
+        for (field_name, field_value) in obj {
+            if let Some(text) = field_value.as_str() {
+                let mut fragments: Vec<(usize, String)> = Vec::new(); // (start_byte, fragment)
+
+                for term in &query_terms {
+                    if let Some(posting_list) = positions_reader.get(term) {
+                        // Find the posting for this document (by doc_id matching document index)
+                        // For simplicity, we use the first posting that has positions
+                        // In a multi-segment scenario, we'd merge across segments
+                        for posting in &posting_list.docs {
+                            for &byte_pos in &posting.positions {
+                                let pos = byte_pos as usize;
+                                if pos > text.len() {
+                                    continue;
+                                }
+                                // Extract window around match: 50 chars before, matched term, 30 after
+                                let pre_start = pos.saturating_sub(50);
+                                let pre = &text[pre_start..pos];
+                                let term_match =
+                                    &text[pos..pos.saturating_add(term.len()).min(text.len())];
+                                let post_end = pos.saturating_add(term.len() + 30).min(text.len());
+                                let post = &text[pos.saturating_add(term.len())..post_end];
+
+                                let fragment = format!("{pre}<em>{term_match}</em>{post}");
+                                fragments.push((pre_start, fragment));
+                            }
+                        }
+                    }
+                }
+
+                // Deduplicate and limit to 3 fragments per field
+                fragments.sort_by_key(|(start, _)| *start);
+                let unique: Vec<String> = fragments.into_iter().map(|(_, f)| f).take(3).collect();
+
+                if !unique.is_empty() {
+                    result.insert(field_name.clone(), unique);
+                }
+            }
+        }
+    }
+
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Recursively extract all terms from a `SearchQuery` for highlighting.
+fn get_query_terms(query: &SearchQuery) -> Vec<String> {
+    match query {
+        SearchQuery::MatchAll | SearchQuery::Range(_) => Vec::new(),
+        SearchQuery::Term(term) => term
+            .value
+            .as_str()
+            .map(str::to_lowercase)
+            .into_iter()
+            .collect(),
+        SearchQuery::Terms(terms) => terms
+            .values
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_lowercase))
+            .collect(),
+        SearchQuery::Bool(bool_query) => bool_query
+            .must
+            .iter()
+            .chain(bool_query.should.iter())
+            .chain(bool_query.filter.iter())
+            .flat_map(get_query_terms)
+            .collect(),
+        SearchQuery::Prefix(prefix) => vec![prefix.value.to_lowercase()],
+        SearchQuery::Wildcard(wc) => vec![wc.value.to_lowercase()],
+        SearchQuery::Match(mq) => tokenize(&mq.value),
+    }
 }
 
 fn matches_prefix_query(document: &IndexDocument, prefix: &PrefixQuery) -> bool {
