@@ -10,8 +10,8 @@ use cloudsearch_common::{
     BulkResponse, CloudSearchError, CreateIndexRequest, CreateSnapshotResponse,
     DateHistogramAggregationResult, ErrorResponse, FlushResponse, HealthResponse, IndexDocument,
     IndexDocumentRequest, ListSnapshotsResponse, MatchQuery, MergeResponse,
-    MultiSearchItemResponse, MultiSearchRequest, MultiSearchResponse, PrefixQuery, RangeQuery,
-    RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
+    MultiSearchItemResponse, MultiSearchRequest, MultiSearchResponse, PhraseQuery, PrefixQuery,
+    RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
     StatsAggregationResult, TermQuery, TermsAggregationResult, TermsQuery, UpdateSettingsRequest,
     WildcardQuery,
 };
@@ -468,9 +468,10 @@ async fn search_index(
     if elapsed.as_millis() > 50 {
         tracing::warn!(index = %index, duration_ms = elapsed.as_millis(), "slow query");
     }
+    let result = handle.search(&request);
     Ok((
         StatusCode::OK,
-        Json(to_compat_search_response(handle.search(&request))),
+        Json(to_compat_search_response(result)),
     ))
 }
 
@@ -625,6 +626,7 @@ fn parse_query(value: &Value) -> Result<SearchQuery, ApiError> {
         "prefix" => Ok(SearchQuery::Prefix(parse_prefix_query(body)?)),
         "wildcard" => Ok(SearchQuery::Wildcard(parse_wildcard_query(body)?)),
         "match" => Ok(SearchQuery::Match(parse_match_query(body)?)),
+        "phrase" => Ok(SearchQuery::Phrase(parse_phrase_query(body)?)),
         other => Err(ApiError(CloudSearchError::InvalidSearchRequest(format!(
             "unsupported query clause '{other}'"
         )))),
@@ -922,6 +924,61 @@ fn parse_match_query(value: &Value) -> Result<MatchQuery, ApiError> {
         ))
     })?;
     Ok(MatchQuery {
+        field: field.clone(),
+        value: value.to_string(),
+    })
+}
+
+fn parse_phrase_query(value: &Value) -> Result<PhraseQuery, ApiError> {
+    let object = value.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "phrase query must be a JSON object".to_string(),
+        ))
+    })?;
+
+    if object.contains_key("field") && object.contains_key("value") {
+        if object.len() != 2 {
+            return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+                "phrase query explicit form must contain only 'field' and 'value'".to_string(),
+            )));
+        }
+        let field = object.get("field").and_then(Value::as_str).ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "phrase query requires string 'field'".to_string(),
+            ))
+        })?;
+        let value = object.get("value").and_then(Value::as_str).ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "phrase query requires string 'value'".to_string(),
+            ))
+        })?;
+        return Ok(PhraseQuery {
+            field: field.to_string(),
+            value: value.to_string(),
+        });
+    }
+
+    let has_field = object.contains_key("field");
+    let has_value = object.contains_key("value");
+    if has_field != has_value {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "phrase query explicit form requires both 'field' and 'value'".to_string(),
+        )));
+    }
+
+    if object.len() != 1 {
+        return Err(ApiError(CloudSearchError::InvalidSearchRequest(
+            "phrase query must contain exactly one field".to_string(),
+        )));
+    }
+
+    let (field, raw_value) = object.iter().next().expect("single phrase field");
+    let value = raw_value.as_str().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "phrase query value must be a string".to_string(),
+        ))
+    })?;
+    Ok(PhraseQuery {
         field: field.clone(),
         value: value.to_string(),
     })

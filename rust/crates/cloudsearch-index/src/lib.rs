@@ -709,9 +709,49 @@ impl IndexHandle {
         // Atomic manifest swap
         write_index_manifest(&self.segments_dir, &new_manifest).await?;
 
+        // Build and write positions sidecar for the merged segment by extracting
+        // positions from each merged document (rebuilds from primary data).
+        // This must happen before we move `merged` into searchable_documents.
+        let merged_docs: Vec<IndexDocument> = merged.values().cloned().collect();
+        let mut merged_positions =
+            cloudsearch_storage::inverted_index::InvertedIndex::new();
+        for (doc_seq, doc) in merged_docs.iter().enumerate() {
+            let doc_positions = Self::extract_positions(doc);
+            for (term, positions) in doc_positions {
+                let seq = u64::try_from(doc_seq).unwrap_or(0);
+                for pos in positions {
+                    merged_positions.insert(term.clone(), seq, vec![pos]);
+                }
+            }
+        }
+        if merged_positions.term_count() > 0 {
+            storage_write_positions(
+                &self.segments_dir,
+                new_segment_number,
+                &merged_positions,
+            )
+            .await
+            .ok();
+        }
+
         // Update in-memory state
         self.manifest = new_manifest;
         self.searchable_documents = merged;
+
+        // Reload positions reader for the new merged segment only, since
+        // the old segment sidecars were invalidated by the merge.
+        self.positions_readers.clear();
+        let positions_path = self.segments_dir.join(format!("positions_{:020}.bin", new_segment_number));
+        if let Ok(reader) =
+            cloudsearch_storage::inverted_index::PositionsReader::read(&positions_path).await
+        {
+            tracing::info!(terms = reader.term_count(), "loaded positions for merged segment");
+            if reader.term_count() > 0 {
+                self.positions_readers.push(reader);
+            }
+        } else {
+            tracing::warn!(path = %positions_path.display(), "no positions file found for merged segment");
+        }
 
         tracing::info!(index = %self.metadata.name, docs = merged_documents, "apply_merge_plan complete");
         Ok(())
@@ -743,9 +783,11 @@ impl IndexHandle {
 
         let mut scored: Vec<(f32, &IndexDocument)> = self
             .searchable_documents
-            .values()
-            .filter(|doc| !self.is_expired(&doc.id, now))
-            .filter_map(|doc| score_query(doc, query, &self.positions_readers).map(|s| (s, doc)))
+            .iter()
+            .enumerate()
+            .map(|(idx, (_, doc))| (idx, doc))
+            .filter(|(_, doc)| !self.is_expired(&doc.id, now))
+            .filter_map(|(idx, doc)| score_query(doc, query, idx, &self.positions_readers).map(|s| (s, doc)))
             .collect();
 
         let total = scored.len();
@@ -1143,10 +1185,24 @@ impl IndexHandle {
                 }
             }
         }
+
         if inverted_index.term_count() > 0 {
             storage_write_positions(&self.segments_dir, segment_number, &inverted_index).await?;
             tracing::info!(index = %self.metadata.name, terms = inverted_index.term_count(), "wrote positions sidecar");
+            // Update positions_readers to include the newly written segment's positions
+            let positions_path = self.segments_dir.join(format!("positions_{:020}.bin", segment_number));
+            match cloudsearch_storage::inverted_index::PositionsReader::read(&positions_path).await {
+                Ok(reader) if reader.term_count() > 0 => {
+                    self.positions_readers.push(reader);
+                    tracing::info!(count = self.positions_readers.len(), "added new positions reader after flush");
+                }
+                Err(e) => {
+                    tracing::warn!(path = %positions_path.as_path().display(), error = %e, "failed to read positions file after flush");
+                }
+                _ => {}
+            }
         }
+
         // Clear per-doc indices now that they're persisted
         self.per_doc_inverted_index.clear();
 
@@ -1183,12 +1239,52 @@ impl IndexHandle {
 
         let merged_documents = merged.len();
 
+        // Rebuild positions sidecar for the merged segment by extracting
+        // positions from each merged document.
+        let merged_docs: Vec<IndexDocument> = merged.values().cloned().collect();
+        let mut merged_positions =
+            cloudsearch_storage::inverted_index::InvertedIndex::new();
+        for (doc_seq, doc) in merged_docs.iter().enumerate() {
+            let doc_positions = Self::extract_positions(doc);
+            for (term, positions) in doc_positions {
+                let seq = u64::try_from(doc_seq).unwrap_or(0);
+                for pos in positions {
+                    merged_positions.insert(term.clone(), seq, vec![pos]);
+                }
+            }
+        }
+        let new_segment_number = self.manifest.next_segment_number();
+        if merged_positions.term_count() > 0 {
+            storage_write_positions(
+                &self.segments_dir,
+                new_segment_number,
+                &merged_positions,
+            )
+            .await
+            .ok();
+        }
+
         let snapshot = SegmentSnapshot {
             last_sequence_number: self.last_sequence_number,
-            documents: merged.into_values().collect(),
+            documents: merged_docs,
         };
 
         write_segment_snapshot(&self.segments_dir, &snapshot).await?;
+
+        // Update searchable_documents so subsequent searches see the merged state.
+        // Also update positions_readers to point to the new merged segment.
+        self.searchable_documents = merged;
+        let positions_path =
+            self.segments_dir.join(format!("positions_{:020}.bin", new_segment_number));
+        self.positions_readers.clear();
+        if let Ok(reader) =
+            cloudsearch_storage::inverted_index::PositionsReader::read(&positions_path).await
+        {
+            if reader.term_count() > 0 {
+                self.positions_readers.push(reader);
+            }
+        }
+
         tracing::info!(index = %self.metadata.name, docs = merged_documents, seq = self.last_sequence_number, "merge complete");
 
         Ok(MergeResponse {
@@ -1543,6 +1639,7 @@ fn infer_field_type(field: &str, value: &serde_json::Value) -> Result<Option<Fie
 fn score_query(
     document: &IndexDocument,
     query: &SearchQuery,
+    doc_id: usize,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
 ) -> Option<f32> {
     match query {
@@ -1554,11 +1651,11 @@ fn score_query(
             .map(|_| 1.0),
         SearchQuery::Terms(terms) => matches_terms_query(document, terms).then_some(1.0),
         SearchQuery::Range(range) => matches_range_query(document, range).then_some(1.0),
-        SearchQuery::Bool(bool_query) => score_bool_query(document, bool_query, positions_readers),
+        SearchQuery::Bool(bool_query) => score_bool_query(document, bool_query, doc_id, positions_readers),
         SearchQuery::Prefix(prefix) => matches_prefix_query(document, prefix).then_some(1.0),
         SearchQuery::Wildcard(wc) => matches_wildcard_query(document, wc).then_some(1.0),
         SearchQuery::Match(mq) => score_match_query(document, mq),
-        SearchQuery::Phrase(phrase) => score_phrase_query(document, phrase, positions_readers),
+        SearchQuery::Phrase(phrase) => score_phrase_query(document, phrase, doc_id, positions_readers),
     }
 }
 
@@ -1580,10 +1677,10 @@ fn score_match_query(document: &IndexDocument, query: &MatchQuery) -> Option<f32
 
 /// Score a phrase query by checking if query terms appear consecutively in document text.
 /// Uses positions data to verify proximity and score based on gap size.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn score_phrase_query(
     document: &IndexDocument,
     phrase: &PhraseQuery,
+    doc_id: usize,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
 ) -> Option<f32> {
     let field_str = document.source.get(&phrase.field)?.as_str()?;
@@ -1603,6 +1700,10 @@ fn score_phrase_query(
         };
 
         for posting in &posting_list.docs {
+            // Only consider postings for THIS document (matched by doc_id)
+            if posting.doc_id != doc_id as u64 {
+                continue;
+            }
             let first_positions = &posting.positions;
             for &first_pos in first_positions {
                 let first_pos = first_pos as usize;
@@ -1621,11 +1722,21 @@ fn score_phrase_query(
                         break;
                     };
 
-                    // Find the position of this term that is closest after previous_pos
+                    // Find a position of this term that is after previous_pos
+                    // Must check ALL documents in the posting list, filtering by doc_id
                     let mut found_pos: Option<u32> = None;
-                    for p in &next_list.docs.first()?.positions {
-                        if *p > previous_pos {
-                            found_pos = Some(*p);
+                    for posting in &next_list.docs {
+                        // Only consider postings for THIS document
+                        if posting.doc_id != doc_id as u64 {
+                            continue;
+                        }
+                        for p in &posting.positions {
+                            if *p > previous_pos {
+                                found_pos = Some(*p);
+                                break;
+                            }
+                        }
+                        if found_pos.is_some() {
                             break;
                         }
                     }
@@ -1690,7 +1801,7 @@ fn extract_highlight(
                             for posting in &posting_list.docs {
                                 for &byte_pos in &posting.positions {
                                     let pos = byte_pos as usize;
-                                    if pos > text.len() {
+                                    if pos >= text.len() {
                                         continue;
                                     }
                                     // Extract window around match: 50 chars before, matched term, 30 after
@@ -1700,7 +1811,11 @@ fn extract_highlight(
                                         &text[pos..pos.saturating_add(term.len()).min(text.len())];
                                     let post_end =
                                         pos.saturating_add(term.len() + 30).min(text.len());
-                                    let post = &text[pos.saturating_add(term.len())..post_end];
+                                    let post = if pos.saturating_add(term.len()) < post_end {
+                                        &text[pos.saturating_add(term.len())..post_end]
+                                    } else {
+                                        &text[post_end..post_end]
+                                    };
 
                                     let fragment = format!("{pre}<em>{term_match}</em>{post}");
                                     fragments.push((pre_start, fragment));
@@ -1790,28 +1905,29 @@ fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
 fn score_bool_query(
     document: &IndexDocument,
     bool_query: &BoolQuery,
+    doc_id: usize,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
 ) -> Option<f32> {
     // Evaluate each clause group once and store the scores.
     let must_scores: Vec<Option<f32>> = bool_query
         .must
         .iter()
-        .map(|q| score_query(document, q, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers))
         .collect();
     let filter_scores: Vec<Option<f32>> = bool_query
         .filter
         .iter()
-        .map(|q| score_query(document, q, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers))
         .collect();
     let must_not_scores: Vec<Option<f32>> = bool_query
         .must_not
         .iter()
-        .map(|q| score_query(document, q, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers))
         .collect();
     let should_scores: Vec<Option<f32>> = bool_query
         .should
         .iter()
-        .map(|q| score_query(document, q, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers))
         .collect();
 
     // All must clauses must match.
