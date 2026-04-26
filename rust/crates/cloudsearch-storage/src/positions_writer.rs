@@ -45,10 +45,12 @@ impl PositionsWriter {
         let mut result = Vec::new();
 
         // Header
-        result.extend_from_slice(&0x50_4F_53_49u32.to_le_bytes()); // MAGIC
-        result.push(1); // VERSION
+        result.extend_from_slice(&0x50_4F_53_49u32.to_le_bytes()); // MAGIC (bytes 0-3)
+        result.push(1); // VERSION (byte 4)
+        // 3 bytes padding (bytes 5-7) to align term_count at byte 8
+        result.extend_from_slice(&[0u8, 0u8, 0u8]);
         let term_count = u32::try_from(self.terms.len()).unwrap();
-        result.extend_from_slice(&term_count.to_le_bytes());
+        result.extend_from_slice(&term_count.to_le_bytes()); // term_count at bytes 8-11
 
         // Collect body offsets by scanning terms in sorted order
         // We build the term dict entries and body in one pass
