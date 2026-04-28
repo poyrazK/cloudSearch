@@ -1296,3 +1296,291 @@ async fn match_query_finds_text_in_documents() {
 
     stop_node(&mut child);
 }
+
+#[tokio::test]
+async fn multi_search_returns_results_from_multiple_indexes() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    // Create two indexes
+    client
+        .put(format!("{base_url}/index-a"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index-a")
+        .error_for_status()
+        .expect("create index-a status");
+
+    client
+        .put(format!("{base_url}/index-b"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index-b")
+        .error_for_status()
+        .expect("create index-b status");
+
+    // Index docs
+    client
+        .put(format!("{base_url}/index-a/_doc"))
+        .json(&serde_json::json!({"id": "doc1", "source": {"content": "hello world"}}))
+        .send()
+        .await
+        .expect("index doc1")
+        .error_for_status()
+        .expect("index doc1 status");
+
+    client
+        .put(format!("{base_url}/index-b/_doc"))
+        .json(&serde_json::json!({"id": "doc2", "source": {"content": "foo bar"}}))
+        .send()
+        .await
+        .expect("index doc2")
+        .error_for_status()
+        .expect("index doc2 status");
+
+    // Refresh both
+    client
+        .post(format!("{base_url}/index-a/_refresh"))
+        .send()
+        .await
+        .expect("refresh index-a")
+        .error_for_status()
+        .expect("refresh index-a status");
+
+    client
+        .post(format!("{base_url}/index-b/_refresh"))
+        .send()
+        .await
+        .expect("refresh index-b")
+        .error_for_status()
+        .expect("refresh index-b status");
+
+    // Call _msearch
+    let resp = client
+        .post(format!("{base_url}/_msearch"))
+        .json(&serde_json::json!({
+            "searches": [
+                { "index": "index-a", "request": { "query": { "match": { "field": "content", "value": "hello" } } } },
+                { "index": "index-b", "request": { "query": { "match": { "field": "content", "value": "foo" } } } }
+            ]
+        }))
+        .send()
+        .await
+        .expect("msearch request")
+        .error_for_status()
+        .expect("msearch status");
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    let responses = body["responses"].as_array().expect("responses array");
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["index"], "index-a");
+    assert_eq!(responses[1]["index"], "index-b");
+    assert_eq!(responses[0]["status"], 200);
+    assert_eq!(responses[1]["status"], 200);
+
+    // First search found doc1
+    let hits_a = &responses[0]["response"]["hits"]["hits"];
+    assert_eq!(hits_a.as_array().expect("hits array").len(), 1);
+    assert_eq!(hits_a[0]["id"], "doc1");
+
+    // Second search found doc2
+    let hits_b = &responses[1]["response"]["hits"]["hits"];
+    assert_eq!(hits_b.as_array().expect("hits array").len(), 1);
+    assert_eq!(hits_b[0]["id"], "doc2");
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn multi_search_handles_missing_index_gracefully() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    // Create only index-a
+    client
+        .put(format!("{base_url}/index-a"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index-a")
+        .error_for_status()
+        .expect("create index-a status");
+
+    let resp = client
+        .post(format!("{base_url}/_msearch"))
+        .json(&serde_json::json!({
+            "searches": [
+                { "index": "index-a", "request": { "query": null } },
+                { "index": "nonexistent", "request": { "query": null } }
+            ]
+        }))
+        .send()
+        .await
+        .expect("msearch request")
+        .error_for_status()
+        .expect("msearch status");
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    let responses = body["responses"].as_array().expect("responses array");
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["index"], "index-a");
+    assert_eq!(responses[0]["status"], 200);
+    assert_eq!(responses[1]["index"], "nonexistent");
+    assert_eq!(responses[1]["status"], 404);
+    assert!(responses[1]["error"].is_string());
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn phrase_query_matches_consecutive_terms() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create index status");
+
+    // Index two docs with similar content but different ordering
+    client
+        .put(format!("{base_url}/test/_doc"))
+        .json(&serde_json::json!({"id": "doc1", "source": {"message": "the quick brown fox"}}))
+        .send()
+        .await
+        .expect("index doc1")
+        .error_for_status()
+        .expect("index doc1 status");
+
+    client
+        .put(format!("{base_url}/test/_doc"))
+        .json(&serde_json::json!({"id": "doc2", "source": {"message": "the quick red fox"}}))
+        .send()
+        .await
+        .expect("index doc2")
+        .error_for_status()
+        .expect("index doc2 status");
+
+    client
+        .post(format!("{base_url}/test/_refresh"))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    // Flush to ensure positions are written to disk
+    client
+        .post(format!("{base_url}/test/_flush"))
+        .send()
+        .await
+        .expect("flush")
+        .error_for_status()
+        .expect("flush status");
+
+    // Exact phrase "quick brown fox" — should match doc1 only
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": { "phrase": { "field": "message", "value": "quick brown fox" } }
+        }))
+        .send()
+        .await
+        .expect("phrase search request")
+        .error_for_status()
+        .expect("phrase search status");
+
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    let hits = body["hits"]["hits"].as_array().expect("hits array");
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly 1 hit for exact phrase match"
+    );
+    assert_eq!(hits[0]["_id"], "doc1");
+
+    stop_node(&mut child);
+}
+
+#[tokio::test]
+async fn phrase_query_with_no_consecutive_match() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = Client::new();
+
+    let mut child = spawn_node(temp_dir.path(), port);
+    wait_for_health(&client, &base_url).await;
+
+    client
+        .put(format!("{base_url}/test"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create index status");
+
+    // Index a doc where "brown" comes before "quick"
+    client
+        .put(format!("{base_url}/test/_doc"))
+        .json(&serde_json::json!({"id": "doc1", "source": {"message": "the brown quick fox"}}))
+        .send()
+        .await
+        .expect("index doc1")
+        .error_for_status()
+        .expect("index doc1 status");
+
+    client
+        .post(format!("{base_url}/test/_refresh"))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    // Search for "quick brown fox" (consecutive in source) — should NOT match
+    let resp = client
+        .post(format!("{base_url}/test/_search"))
+        .json(&serde_json::json!({
+            "query": { "phrase": { "field": "message", "value": "quick brown fox" } }
+        }))
+        .send()
+        .await
+        .expect("phrase search request")
+        .error_for_status()
+        .expect("phrase search status");
+
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    let hits = body["hits"]["hits"].as_array().expect("hits array");
+    assert_eq!(
+        hits.len(),
+        0,
+        "expected 0 hits when terms are not consecutive"
+    );
+
+    stop_node(&mut child);
+}

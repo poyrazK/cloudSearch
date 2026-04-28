@@ -709,9 +709,49 @@ impl IndexHandle {
         // Atomic manifest swap
         write_index_manifest(&self.segments_dir, &new_manifest).await?;
 
+        // Build and write positions sidecar for the merged segment by extracting
+        // positions from each merged document (rebuilds from primary data).
+        // This must happen before we move `merged` into searchable_documents.
+        let merged_docs: Vec<IndexDocument> = merged.values().cloned().collect();
+        let mut merged_positions = cloudsearch_storage::inverted_index::InvertedIndex::new();
+        for doc in &merged_docs {
+            let doc_positions = Self::extract_positions(doc);
+            for (term, positions) in doc_positions {
+                let doc_id_hash = hash_doc_id(&doc.id);
+                for pos in positions {
+                    merged_positions.insert(term.clone(), doc_id_hash, vec![pos]);
+                }
+            }
+        }
+        if merged_positions.term_count() > 0 {
+            storage_write_positions(&self.segments_dir, new_segment_number, &merged_positions)
+                .await
+                .ok();
+        }
+
         // Update in-memory state
         self.manifest = new_manifest;
         self.searchable_documents = merged;
+
+        // Reload positions reader for the new merged segment only, since
+        // the old segment sidecars were invalidated by the merge.
+        self.positions_readers.clear();
+        let positions_path = self
+            .segments_dir
+            .join(format!("positions_{new_segment_number:020}.bin"));
+        if let Ok(reader) =
+            cloudsearch_storage::inverted_index::PositionsReader::read(&positions_path).await
+        {
+            tracing::info!(
+                terms = reader.term_count(),
+                "loaded positions for merged segment"
+            );
+            if reader.term_count() > 0 {
+                self.positions_readers.push(reader);
+            }
+        } else {
+            tracing::warn!(path = %positions_path.display(), "no positions file found for merged segment");
+        }
 
         tracing::info!(index = %self.metadata.name, docs = merged_documents, "apply_merge_plan complete");
         Ok(())
@@ -743,9 +783,12 @@ impl IndexHandle {
 
         let mut scored: Vec<(f32, &IndexDocument)> = self
             .searchable_documents
-            .values()
-            .filter(|doc| !self.is_expired(&doc.id, now))
-            .filter_map(|doc| score_query(doc, query, &self.positions_readers).map(|s| (s, doc)))
+            .iter()
+            .filter(|(_, doc)| !self.is_expired(&doc.id, now))
+            .filter_map(|(_, doc)| {
+                let doc_id_hash = hash_doc_id(&doc.id);
+                score_query(doc, query, doc_id_hash, &self.positions_readers).map(|s| (s, doc))
+            })
             .collect();
 
         let total = scored.len();
@@ -790,8 +833,9 @@ impl IndexHandle {
             .skip(from)
             .take(size)
             .map(|(score, doc)| {
+                let doc_id_hash = hash_doc_id(&doc.id);
                 let highlight = match &self.positions_readers {
-                    r if !r.is_empty() => extract_highlight(doc, r, query),
+                    r if !r.is_empty() => extract_highlight(doc, doc_id_hash, r, query),
                     _ => None,
                 };
                 SearchHit {
@@ -1133,20 +1177,40 @@ impl IndexHandle {
 
         // Build and write positions sidecar for highlight support
         let mut inverted_index = cloudsearch_storage::inverted_index::InvertedIndex::new();
-        for (doc_seq, doc) in snapshot.documents.iter().enumerate() {
+        for doc in &snapshot.documents {
             if let Some(doc_index) = self.per_doc_inverted_index.get(&doc.id) {
                 for (term, positions) in doc_index {
+                    let doc_id_hash = hash_doc_id(&doc.id);
                     for pos in positions {
-                        let seq = u64::try_from(doc_seq).unwrap_or(0);
-                        inverted_index.insert(term.clone(), seq, vec![*pos]);
+                        inverted_index.insert(term.clone(), doc_id_hash, vec![*pos]);
                     }
                 }
             }
         }
+
         if inverted_index.term_count() > 0 {
             storage_write_positions(&self.segments_dir, segment_number, &inverted_index).await?;
             tracing::info!(index = %self.metadata.name, terms = inverted_index.term_count(), "wrote positions sidecar");
+            // Update positions_readers to include the newly written segment's positions
+            let positions_path = self
+                .segments_dir
+                .join(format!("positions_{segment_number:020}.bin"));
+            match cloudsearch_storage::inverted_index::PositionsReader::read(&positions_path).await
+            {
+                Ok(reader) if reader.term_count() > 0 => {
+                    self.positions_readers.push(reader);
+                    tracing::info!(
+                        count = self.positions_readers.len(),
+                        "added new positions reader after flush"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(path = %positions_path.as_path().display(), error = %e, "failed to read positions file after flush");
+                }
+                _ => {}
+            }
         }
+
         // Clear per-doc indices now that they're persisted
         self.per_doc_inverted_index.clear();
 
@@ -1183,12 +1247,47 @@ impl IndexHandle {
 
         let merged_documents = merged.len();
 
+        // Rebuild positions sidecar for the merged segment by extracting
+        // positions from each merged document.
+        let merged_docs: Vec<IndexDocument> = merged.values().cloned().collect();
+        let mut merged_positions = cloudsearch_storage::inverted_index::InvertedIndex::new();
+        for doc in &merged_docs {
+            let doc_positions = Self::extract_positions(doc);
+            for (term, positions) in doc_positions {
+                let doc_id_hash = hash_doc_id(&doc.id);
+                for pos in positions {
+                    merged_positions.insert(term.clone(), doc_id_hash, vec![pos]);
+                }
+            }
+        }
+        let new_segment_number = self.manifest.next_segment_number();
+        if merged_positions.term_count() > 0 {
+            storage_write_positions(&self.segments_dir, new_segment_number, &merged_positions)
+                .await
+                .ok();
+        }
+
         let snapshot = SegmentSnapshot {
             last_sequence_number: self.last_sequence_number,
-            documents: merged.into_values().collect(),
+            documents: merged_docs,
         };
 
         write_segment_snapshot(&self.segments_dir, &snapshot).await?;
+
+        // Update searchable_documents so subsequent searches see the merged state.
+        // Also update positions_readers to point to the new merged segment.
+        self.searchable_documents = merged;
+        let positions_path = self
+            .segments_dir
+            .join(format!("positions_{new_segment_number:020}.bin"));
+        self.positions_readers.clear();
+        if let Ok(reader) =
+            cloudsearch_storage::inverted_index::PositionsReader::read(&positions_path).await
+            && reader.term_count() > 0
+        {
+            self.positions_readers.push(reader);
+        }
+
         tracing::info!(index = %self.metadata.name, docs = merged_documents, seq = self.last_sequence_number, "merge complete");
 
         Ok(MergeResponse {
@@ -1543,6 +1642,7 @@ fn infer_field_type(field: &str, value: &serde_json::Value) -> Result<Option<Fie
 fn score_query(
     document: &IndexDocument,
     query: &SearchQuery,
+    doc_id: u64,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
 ) -> Option<f32> {
     match query {
@@ -1554,11 +1654,15 @@ fn score_query(
             .map(|_| 1.0),
         SearchQuery::Terms(terms) => matches_terms_query(document, terms).then_some(1.0),
         SearchQuery::Range(range) => matches_range_query(document, range).then_some(1.0),
-        SearchQuery::Bool(bool_query) => score_bool_query(document, bool_query, positions_readers),
+        SearchQuery::Bool(bool_query) => {
+            score_bool_query(document, bool_query, doc_id, positions_readers)
+        }
         SearchQuery::Prefix(prefix) => matches_prefix_query(document, prefix).then_some(1.0),
         SearchQuery::Wildcard(wc) => matches_wildcard_query(document, wc).then_some(1.0),
         SearchQuery::Match(mq) => score_match_query(document, mq),
-        SearchQuery::Phrase(phrase) => score_phrase_query(document, phrase, positions_readers),
+        SearchQuery::Phrase(phrase) => {
+            score_phrase_query(document, phrase, doc_id, positions_readers)
+        }
     }
 }
 
@@ -1580,10 +1684,11 @@ fn score_match_query(document: &IndexDocument, query: &MatchQuery) -> Option<f32
 
 /// Score a phrase query by checking if query terms appear consecutively in document text.
 /// Uses positions data to verify proximity and score based on gap size.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 fn score_phrase_query(
     document: &IndexDocument,
     phrase: &PhraseQuery,
+    doc_id: u64,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
 ) -> Option<f32> {
     let field_str = document.source.get(&phrase.field)?.as_str()?;
@@ -1603,6 +1708,10 @@ fn score_phrase_query(
         };
 
         for posting in &posting_list.docs {
+            // Only consider postings for THIS document (matched by doc_id)
+            if posting.doc_id != doc_id {
+                continue;
+            }
             let first_positions = &posting.positions;
             for &first_pos in first_positions {
                 let first_pos = first_pos as usize;
@@ -1621,11 +1730,21 @@ fn score_phrase_query(
                         break;
                     };
 
-                    // Find the position of this term that is closest after previous_pos
+                    // Find a position of this term that is after previous_pos
+                    // Must check ALL documents in the posting list, filtering by doc_id
                     let mut found_pos: Option<u32> = None;
-                    for p in &next_list.docs.first()?.positions {
-                        if *p > previous_pos {
-                            found_pos = Some(*p);
+                    for posting in &next_list.docs {
+                        // Only consider postings for THIS document
+                        if posting.doc_id != doc_id {
+                            continue;
+                        }
+                        for p in &posting.positions {
+                            if *p > previous_pos {
+                                found_pos = Some(*p);
+                                break;
+                            }
+                        }
+                        if found_pos.is_some() {
                             break;
                         }
                     }
@@ -1661,10 +1780,22 @@ fn tokenize(text: &str) -> Vec<String> {
     text.split_whitespace().map(str::to_lowercase).collect()
 }
 
+/// Stable hash of a document ID string for use as a persistent `doc_id` in postings.
+/// Using the string directly ensures the same ID always produces the same hash,
+/// independent of enumeration order or segment boundaries.
+fn hash_doc_id(id: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Extract highlight fragments from a document's text fields using position data.
 #[allow(clippy::cast_possible_truncation)]
 fn extract_highlight(
     doc: &IndexDocument,
+    doc_id: u64,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
     query: &SearchQuery,
 ) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
@@ -1686,11 +1817,14 @@ fn extract_highlight(
                     // Search all segment positions readers
                     for positions_reader in positions_readers {
                         if let Some(posting_list) = positions_reader.get(term) {
-                            // Find the posting for this document (by doc_id matching document index)
+                            // Find the posting for this document (by doc_id)
                             for posting in &posting_list.docs {
+                                if posting.doc_id != doc_id {
+                                    continue;
+                                }
                                 for &byte_pos in &posting.positions {
                                     let pos = byte_pos as usize;
-                                    if pos > text.len() {
+                                    if pos >= text.len() {
                                         continue;
                                     }
                                     // Extract window around match: 50 chars before, matched term, 30 after
@@ -1700,7 +1834,11 @@ fn extract_highlight(
                                         &text[pos..pos.saturating_add(term.len()).min(text.len())];
                                     let post_end =
                                         pos.saturating_add(term.len() + 30).min(text.len());
-                                    let post = &text[pos.saturating_add(term.len())..post_end];
+                                    let post = if pos.saturating_add(term.len()) < post_end {
+                                        &text[pos.saturating_add(term.len())..post_end]
+                                    } else {
+                                        &text[post_end..post_end]
+                                    };
 
                                     let fragment = format!("{pre}<em>{term_match}</em>{post}");
                                     fragments.push((pre_start, fragment));
@@ -1790,28 +1928,29 @@ fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
 fn score_bool_query(
     document: &IndexDocument,
     bool_query: &BoolQuery,
+    doc_id: u64,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
 ) -> Option<f32> {
     // Evaluate each clause group once and store the scores.
     let must_scores: Vec<Option<f32>> = bool_query
         .must
         .iter()
-        .map(|q| score_query(document, q, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers))
         .collect();
     let filter_scores: Vec<Option<f32>> = bool_query
         .filter
         .iter()
-        .map(|q| score_query(document, q, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers))
         .collect();
     let must_not_scores: Vec<Option<f32>> = bool_query
         .must_not
         .iter()
-        .map(|q| score_query(document, q, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers))
         .collect();
     let should_scores: Vec<Option<f32>> = bool_query
         .should
         .iter()
-        .map(|q| score_query(document, q, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers))
         .collect();
 
     // All must clauses must match.

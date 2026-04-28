@@ -1055,3 +1055,110 @@ async fn paginated_search_returns_correct_total_across_pages() {
 
     node.stop();
 }
+
+#[tokio::test]
+async fn highlights_work_across_multiple_segments() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    node.client
+        .put(format!("{}/test", node.base_url))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create status");
+
+    // Index first batch and flush (creates segment 1)
+    for i in 0..3 {
+        node.client
+            .put(format!("{}/test/_doc", node.base_url))
+            .json(&serde_json::json!({
+                "id": format!("doc-{}", i),
+                "source": {"content": format!("hello world term{}", i)}
+            }))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    node.client
+        .post(format!("{}/test/_flush", node.base_url))
+        .send()
+        .await
+        .expect("flush")
+        .error_for_status()
+        .expect("flush status");
+
+    // Index second batch and flush (creates segment 2)
+    for i in 3..6 {
+        node.client
+            .put(format!("{}/test/_doc", node.base_url))
+            .json(&serde_json::json!({
+                "id": format!("doc-{}", i),
+                "source": {"content": format!("hello world term{}", i)}
+            }))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    node.client
+        .post(format!("{}/test/_flush", node.base_url))
+        .send()
+        .await
+        .expect("flush")
+        .error_for_status()
+        .expect("flush status");
+
+    // Merge to combine segments
+    node.client
+        .post(format!("{}/test/_merge", node.base_url))
+        .send()
+        .await
+        .expect("merge request")
+        .error_for_status()
+        .expect("merge status");
+
+    node.client
+        .post(format!("{}/test/_refresh", node.base_url))
+        .send()
+        .await
+        .expect("refresh")
+        .error_for_status()
+        .expect("refresh status");
+
+    // Search with term that should find highlights in docs from BOTH pre-merge segments
+    let response = node
+        .client
+        .post(format!("{}/test/_search", node.base_url))
+        .json(&serde_json::json!({
+            "query": {"match": {"field": "content", "value": "hello"}}
+        }))
+        .send()
+        .await
+        .expect("search request")
+        .error_for_status()
+        .expect("search status")
+        .json::<serde_json::Value>()
+        .await
+        .expect("search body");
+
+    let hits = response["hits"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 6, "should find all 6 documents");
+
+    // At least some hits should have highlights
+    let with_highlights = hits.iter().filter(|h| h.get("highlight").is_some()).count();
+    assert!(
+        with_highlights > 0,
+        "expected some hits to have highlight fragments, got {with_highlights}"
+    );
+
+    node.stop();
+}

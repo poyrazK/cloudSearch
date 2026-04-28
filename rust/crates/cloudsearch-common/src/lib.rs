@@ -339,6 +339,31 @@ pub struct SearchResponse {
     pub aggregations: BTreeMap<String, AggregationResult>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MultiSearchRequest {
+    pub searches: Vec<MultiSearchItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultiSearchItem {
+    pub index: String,
+    pub request: SearchRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MultiSearchResponse {
+    pub responses: Vec<MultiSearchItemResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MultiSearchItemResponse {
+    pub index: String,
+    pub status: u16,
+    pub response: Option<SearchResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HitsMetadata {
     pub total: usize,
