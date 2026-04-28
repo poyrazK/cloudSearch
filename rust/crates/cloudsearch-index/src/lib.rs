@@ -715,12 +715,12 @@ impl IndexHandle {
         let merged_docs: Vec<IndexDocument> = merged.values().cloned().collect();
         let mut merged_positions =
             cloudsearch_storage::inverted_index::InvertedIndex::new();
-        for (doc_seq, doc) in merged_docs.iter().enumerate() {
+        for (_doc_seq, doc) in merged_docs.iter().enumerate() {
             let doc_positions = Self::extract_positions(doc);
             for (term, positions) in doc_positions {
-                let seq = u64::try_from(doc_seq).unwrap_or(0);
+                let doc_id_hash = hash_doc_id(&doc.id);
                 for pos in positions {
-                    merged_positions.insert(term.clone(), seq, vec![pos]);
+                    merged_positions.insert(term.clone(), doc_id_hash, vec![pos]);
                 }
             }
         }
@@ -784,10 +784,11 @@ impl IndexHandle {
         let mut scored: Vec<(f32, &IndexDocument)> = self
             .searchable_documents
             .iter()
-            .enumerate()
-            .map(|(idx, (_, doc))| (idx, doc))
             .filter(|(_, doc)| !self.is_expired(&doc.id, now))
-            .filter_map(|(idx, doc)| score_query(doc, query, idx, &self.positions_readers).map(|s| (s, doc)))
+            .filter_map(|(_, doc)| {
+                let doc_id_hash = hash_doc_id(&doc.id);
+                score_query(doc, query, doc_id_hash, &self.positions_readers).map(|s| (s, doc))
+            })
             .collect();
 
         let total = scored.len();
@@ -832,8 +833,9 @@ impl IndexHandle {
             .skip(from)
             .take(size)
             .map(|(score, doc)| {
+                let doc_id_hash = hash_doc_id(&doc.id);
                 let highlight = match &self.positions_readers {
-                    r if !r.is_empty() => extract_highlight(doc, r, query),
+                    r if !r.is_empty() => extract_highlight(doc, doc_id_hash, r, query),
                     _ => None,
                 };
                 SearchHit {
@@ -1175,12 +1177,12 @@ impl IndexHandle {
 
         // Build and write positions sidecar for highlight support
         let mut inverted_index = cloudsearch_storage::inverted_index::InvertedIndex::new();
-        for (doc_seq, doc) in snapshot.documents.iter().enumerate() {
+        for (_doc_seq, doc) in snapshot.documents.iter().enumerate() {
             if let Some(doc_index) = self.per_doc_inverted_index.get(&doc.id) {
                 for (term, positions) in doc_index {
+                    let doc_id_hash = hash_doc_id(&doc.id);
                     for pos in positions {
-                        let seq = u64::try_from(doc_seq).unwrap_or(0);
-                        inverted_index.insert(term.clone(), seq, vec![*pos]);
+                        inverted_index.insert(term.clone(), doc_id_hash, vec![*pos]);
                     }
                 }
             }
@@ -1244,12 +1246,12 @@ impl IndexHandle {
         let merged_docs: Vec<IndexDocument> = merged.values().cloned().collect();
         let mut merged_positions =
             cloudsearch_storage::inverted_index::InvertedIndex::new();
-        for (doc_seq, doc) in merged_docs.iter().enumerate() {
+        for (_doc_seq, doc) in merged_docs.iter().enumerate() {
             let doc_positions = Self::extract_positions(doc);
             for (term, positions) in doc_positions {
-                let seq = u64::try_from(doc_seq).unwrap_or(0);
+                let doc_id_hash = hash_doc_id(&doc.id);
                 for pos in positions {
-                    merged_positions.insert(term.clone(), seq, vec![pos]);
+                    merged_positions.insert(term.clone(), doc_id_hash, vec![pos]);
                 }
             }
         }
@@ -1639,7 +1641,7 @@ fn infer_field_type(field: &str, value: &serde_json::Value) -> Result<Option<Fie
 fn score_query(
     document: &IndexDocument,
     query: &SearchQuery,
-    doc_id: usize,
+    doc_id: u64,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
 ) -> Option<f32> {
     match query {
@@ -1680,7 +1682,7 @@ fn score_match_query(document: &IndexDocument, query: &MatchQuery) -> Option<f32
 fn score_phrase_query(
     document: &IndexDocument,
     phrase: &PhraseQuery,
-    doc_id: usize,
+    doc_id: u64,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
 ) -> Option<f32> {
     let field_str = document.source.get(&phrase.field)?.as_str()?;
@@ -1701,7 +1703,7 @@ fn score_phrase_query(
 
         for posting in &posting_list.docs {
             // Only consider postings for THIS document (matched by doc_id)
-            if posting.doc_id != doc_id as u64 {
+            if posting.doc_id != doc_id {
                 continue;
             }
             let first_positions = &posting.positions;
@@ -1772,10 +1774,22 @@ fn tokenize(text: &str) -> Vec<String> {
     text.split_whitespace().map(str::to_lowercase).collect()
 }
 
+/// Stable hash of a document ID string for use as a persistent doc_id in postings.
+/// Using the string directly ensures the same ID always produces the same hash,
+/// independent of enumeration order or segment boundaries.
+fn hash_doc_id(id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Extract highlight fragments from a document's text fields using position data.
 #[allow(clippy::cast_possible_truncation)]
 fn extract_highlight(
     doc: &IndexDocument,
+    doc_id: u64,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
     query: &SearchQuery,
 ) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
@@ -1797,8 +1811,11 @@ fn extract_highlight(
                     // Search all segment positions readers
                     for positions_reader in positions_readers {
                         if let Some(posting_list) = positions_reader.get(term) {
-                            // Find the posting for this document (by doc_id matching document index)
+                            // Find the posting for this document (by doc_id)
                             for posting in &posting_list.docs {
+                                if posting.doc_id != doc_id {
+                                    continue;
+                                }
                                 for &byte_pos in &posting.positions {
                                     let pos = byte_pos as usize;
                                     if pos >= text.len() {
@@ -1905,7 +1922,7 @@ fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
 fn score_bool_query(
     document: &IndexDocument,
     bool_query: &BoolQuery,
-    doc_id: usize,
+    doc_id: u64,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
 ) -> Option<f32> {
     // Evaluate each clause group once and store the scores.
