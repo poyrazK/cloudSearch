@@ -1154,10 +1154,7 @@ async fn highlights_work_across_multiple_segments() {
     assert_eq!(hits.len(), 6, "should find all 6 documents");
 
     // At least some hits should have highlights
-    let with_highlights = hits
-        .iter()
-        .filter(|h| h.get("highlight").is_some())
-        .count();
+    let with_highlights = hits.iter().filter(|h| h.get("highlight").is_some()).count();
     assert!(
         with_highlights > 0,
         "expected some hits to have highlight fragments, got {with_highlights}"

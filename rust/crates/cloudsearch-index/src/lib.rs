@@ -713,9 +713,8 @@ impl IndexHandle {
         // positions from each merged document (rebuilds from primary data).
         // This must happen before we move `merged` into searchable_documents.
         let merged_docs: Vec<IndexDocument> = merged.values().cloned().collect();
-        let mut merged_positions =
-            cloudsearch_storage::inverted_index::InvertedIndex::new();
-        for (_doc_seq, doc) in merged_docs.iter().enumerate() {
+        let mut merged_positions = cloudsearch_storage::inverted_index::InvertedIndex::new();
+        for doc in &merged_docs {
             let doc_positions = Self::extract_positions(doc);
             for (term, positions) in doc_positions {
                 let doc_id_hash = hash_doc_id(&doc.id);
@@ -725,13 +724,9 @@ impl IndexHandle {
             }
         }
         if merged_positions.term_count() > 0 {
-            storage_write_positions(
-                &self.segments_dir,
-                new_segment_number,
-                &merged_positions,
-            )
-            .await
-            .ok();
+            storage_write_positions(&self.segments_dir, new_segment_number, &merged_positions)
+                .await
+                .ok();
         }
 
         // Update in-memory state
@@ -741,11 +736,16 @@ impl IndexHandle {
         // Reload positions reader for the new merged segment only, since
         // the old segment sidecars were invalidated by the merge.
         self.positions_readers.clear();
-        let positions_path = self.segments_dir.join(format!("positions_{:020}.bin", new_segment_number));
+        let positions_path = self
+            .segments_dir
+            .join(format!("positions_{new_segment_number:020}.bin"));
         if let Ok(reader) =
             cloudsearch_storage::inverted_index::PositionsReader::read(&positions_path).await
         {
-            tracing::info!(terms = reader.term_count(), "loaded positions for merged segment");
+            tracing::info!(
+                terms = reader.term_count(),
+                "loaded positions for merged segment"
+            );
             if reader.term_count() > 0 {
                 self.positions_readers.push(reader);
             }
@@ -1177,7 +1177,7 @@ impl IndexHandle {
 
         // Build and write positions sidecar for highlight support
         let mut inverted_index = cloudsearch_storage::inverted_index::InvertedIndex::new();
-        for (_doc_seq, doc) in snapshot.documents.iter().enumerate() {
+        for doc in &snapshot.documents {
             if let Some(doc_index) = self.per_doc_inverted_index.get(&doc.id) {
                 for (term, positions) in doc_index {
                     let doc_id_hash = hash_doc_id(&doc.id);
@@ -1192,11 +1192,17 @@ impl IndexHandle {
             storage_write_positions(&self.segments_dir, segment_number, &inverted_index).await?;
             tracing::info!(index = %self.metadata.name, terms = inverted_index.term_count(), "wrote positions sidecar");
             // Update positions_readers to include the newly written segment's positions
-            let positions_path = self.segments_dir.join(format!("positions_{:020}.bin", segment_number));
-            match cloudsearch_storage::inverted_index::PositionsReader::read(&positions_path).await {
+            let positions_path = self
+                .segments_dir
+                .join(format!("positions_{segment_number:020}.bin"));
+            match cloudsearch_storage::inverted_index::PositionsReader::read(&positions_path).await
+            {
                 Ok(reader) if reader.term_count() > 0 => {
                     self.positions_readers.push(reader);
-                    tracing::info!(count = self.positions_readers.len(), "added new positions reader after flush");
+                    tracing::info!(
+                        count = self.positions_readers.len(),
+                        "added new positions reader after flush"
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(path = %positions_path.as_path().display(), error = %e, "failed to read positions file after flush");
@@ -1244,9 +1250,8 @@ impl IndexHandle {
         // Rebuild positions sidecar for the merged segment by extracting
         // positions from each merged document.
         let merged_docs: Vec<IndexDocument> = merged.values().cloned().collect();
-        let mut merged_positions =
-            cloudsearch_storage::inverted_index::InvertedIndex::new();
-        for (_doc_seq, doc) in merged_docs.iter().enumerate() {
+        let mut merged_positions = cloudsearch_storage::inverted_index::InvertedIndex::new();
+        for doc in &merged_docs {
             let doc_positions = Self::extract_positions(doc);
             for (term, positions) in doc_positions {
                 let doc_id_hash = hash_doc_id(&doc.id);
@@ -1257,13 +1262,9 @@ impl IndexHandle {
         }
         let new_segment_number = self.manifest.next_segment_number();
         if merged_positions.term_count() > 0 {
-            storage_write_positions(
-                &self.segments_dir,
-                new_segment_number,
-                &merged_positions,
-            )
-            .await
-            .ok();
+            storage_write_positions(&self.segments_dir, new_segment_number, &merged_positions)
+                .await
+                .ok();
         }
 
         let snapshot = SegmentSnapshot {
@@ -1276,15 +1277,15 @@ impl IndexHandle {
         // Update searchable_documents so subsequent searches see the merged state.
         // Also update positions_readers to point to the new merged segment.
         self.searchable_documents = merged;
-        let positions_path =
-            self.segments_dir.join(format!("positions_{:020}.bin", new_segment_number));
+        let positions_path = self
+            .segments_dir
+            .join(format!("positions_{new_segment_number:020}.bin"));
         self.positions_readers.clear();
         if let Ok(reader) =
             cloudsearch_storage::inverted_index::PositionsReader::read(&positions_path).await
+            && reader.term_count() > 0
         {
-            if reader.term_count() > 0 {
-                self.positions_readers.push(reader);
-            }
+            self.positions_readers.push(reader);
         }
 
         tracing::info!(index = %self.metadata.name, docs = merged_documents, seq = self.last_sequence_number, "merge complete");
@@ -1653,11 +1654,15 @@ fn score_query(
             .map(|_| 1.0),
         SearchQuery::Terms(terms) => matches_terms_query(document, terms).then_some(1.0),
         SearchQuery::Range(range) => matches_range_query(document, range).then_some(1.0),
-        SearchQuery::Bool(bool_query) => score_bool_query(document, bool_query, doc_id, positions_readers),
+        SearchQuery::Bool(bool_query) => {
+            score_bool_query(document, bool_query, doc_id, positions_readers)
+        }
         SearchQuery::Prefix(prefix) => matches_prefix_query(document, prefix).then_some(1.0),
         SearchQuery::Wildcard(wc) => matches_wildcard_query(document, wc).then_some(1.0),
         SearchQuery::Match(mq) => score_match_query(document, mq),
-        SearchQuery::Phrase(phrase) => score_phrase_query(document, phrase, doc_id, positions_readers),
+        SearchQuery::Phrase(phrase) => {
+            score_phrase_query(document, phrase, doc_id, positions_readers)
+        }
     }
 }
 
@@ -1679,6 +1684,7 @@ fn score_match_query(document: &IndexDocument, query: &MatchQuery) -> Option<f32
 
 /// Score a phrase query by checking if query terms appear consecutively in document text.
 /// Uses positions data to verify proximity and score based on gap size.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 fn score_phrase_query(
     document: &IndexDocument,
     phrase: &PhraseQuery,
@@ -1729,7 +1735,7 @@ fn score_phrase_query(
                     let mut found_pos: Option<u32> = None;
                     for posting in &next_list.docs {
                         // Only consider postings for THIS document
-                        if posting.doc_id != doc_id as u64 {
+                        if posting.doc_id != doc_id {
                             continue;
                         }
                         for p in &posting.positions {
@@ -1774,12 +1780,12 @@ fn tokenize(text: &str) -> Vec<String> {
     text.split_whitespace().map(str::to_lowercase).collect()
 }
 
-/// Stable hash of a document ID string for use as a persistent doc_id in postings.
+/// Stable hash of a document ID string for use as a persistent `doc_id` in postings.
 /// Using the string directly ensures the same ID always produces the same hash,
 /// independent of enumeration order or segment boundaries.
 fn hash_doc_id(id: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     id.hash(&mut hasher);
     hasher.finish()

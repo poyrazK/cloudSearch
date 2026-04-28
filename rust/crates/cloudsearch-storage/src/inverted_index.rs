@@ -241,7 +241,7 @@ impl PositionsReader {
 
 #[cfg(test)]
 mod tests {
-    use super::{Posting, PostingList, PositionsReader};
+    use super::PositionsReader;
 
     #[test]
     fn positions_reader_parses_valid_positions_file() {
@@ -372,7 +372,10 @@ mod tests {
         let result = PositionsReader::from_bytes(&data);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("invalid magic"), "expected magic error, got: {err}");
+        assert!(
+            err.contains("invalid magic"),
+            "expected magic error, got: {err}"
+        );
     }
 
     #[test]

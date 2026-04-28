@@ -469,10 +469,7 @@ async fn search_index(
         tracing::warn!(index = %index, duration_ms = elapsed.as_millis(), "slow query");
     }
     let result = handle.search(&request);
-    Ok((
-        StatusCode::OK,
-        Json(to_compat_search_response(result)),
-    ))
+    Ok((StatusCode::OK, Json(to_compat_search_response(result))))
 }
 
 async fn multi_search(

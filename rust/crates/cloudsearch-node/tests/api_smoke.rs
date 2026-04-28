@@ -1515,7 +1515,11 @@ async fn phrase_query_matches_consecutive_terms() {
 
     let body: serde_json::Value = resp.json().await.expect("parse body");
     let hits = body["hits"]["hits"].as_array().expect("hits array");
-    assert_eq!(hits.len(), 1, "expected exactly 1 hit for exact phrase match");
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly 1 hit for exact phrase match"
+    );
     assert_eq!(hits[0]["_id"], "doc1");
 
     stop_node(&mut child);
@@ -1572,7 +1576,11 @@ async fn phrase_query_with_no_consecutive_match() {
 
     let body: serde_json::Value = resp.json().await.expect("parse body");
     let hits = body["hits"]["hits"].as_array().expect("hits array");
-    assert_eq!(hits.len(), 0, "expected 0 hits when terms are not consecutive");
+    assert_eq!(
+        hits.len(),
+        0,
+        "expected 0 hits when terms are not consecutive"
+    );
 
     stop_node(&mut child);
 }
