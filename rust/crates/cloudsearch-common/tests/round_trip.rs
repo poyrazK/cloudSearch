@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use cloudsearch_common::*;
+use uuid::Uuid;
 
 // Serialize to a serde_json::Value, then deserialize back to T.
 // This avoids the HRTB inference issues that arise with from_slice on types
@@ -935,4 +936,206 @@ fn test_snapshot_metadata() {
         checksum: 0xABCD_EF01,
     };
     round_trip(&original);
+}
+
+// AppConfig normalize_intervals
+
+#[test]
+fn test_normalize_intervals_resets_zeros() {
+    let mut config = AppConfig {
+        refresh_interval_secs: 0,
+        flush_interval_secs: 0,
+        merge_interval_secs: 0,
+        retention_interval_secs: 0,
+        ..Default::default()
+    };
+    config.normalize_intervals();
+    assert_eq!(config.refresh_interval_secs, 1);
+    assert_eq!(config.flush_interval_secs, 30);
+    assert_eq!(config.merge_interval_secs, 60);
+    assert_eq!(config.retention_interval_secs, 60);
+}
+
+#[test]
+fn test_normalize_intervals_preserves_nonzero() {
+    let mut config = AppConfig {
+        refresh_interval_secs: 2,
+        flush_interval_secs: 15,
+        merge_interval_secs: 90,
+        retention_interval_secs: 120,
+        ..Default::default()
+    };
+    config.normalize_intervals();
+    assert_eq!(config.refresh_interval_secs, 2);
+    assert_eq!(config.flush_interval_secs, 15);
+    assert_eq!(config.merge_interval_secs, 90);
+    assert_eq!(config.retention_interval_secs, 120);
+}
+
+// CloudSearchError
+
+#[test]
+fn test_cloudsearch_error_display() {
+    assert_eq!(
+        format!(
+            "{}",
+            CloudSearchError::IndexAlreadyExists("my-index".to_string())
+        ),
+        "index 'my-index' already exists"
+    );
+    assert_eq!(
+        format!("{}", CloudSearchError::IndexNotFound("logs".to_string())),
+        "index 'logs' not found"
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            CloudSearchError::DocumentNotFound("doc-123".to_string())
+        ),
+        "document 'doc-123' not found"
+    );
+}
+
+#[test]
+fn test_error_from_io_error() {
+    let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+    let cs_err: CloudSearchError = io_err.into();
+    assert!(matches!(cs_err, CloudSearchError::Io(_)));
+}
+
+#[test]
+fn test_error_from_serde_error() {
+    let serde_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
+    let cs_err: CloudSearchError = serde_err.into();
+    assert!(matches!(cs_err, CloudSearchError::Serde(_)));
+}
+
+// IndexMetadata::new
+
+#[test]
+fn test_index_metadata_new_generates_uuid_and_timestamps() {
+    let before = chrono::Utc::now();
+    let meta = IndexMetadata::new("test-index", IndexSettings::default());
+    let after = chrono::Utc::now();
+
+    assert_eq!(meta.name, "test-index");
+    assert!(meta.created_at >= before && meta.created_at <= after);
+    assert!(meta.updated_at >= before && meta.updated_at <= after);
+    assert_ne!(meta.id, Uuid::nil());
+    assert!(meta.mappings.is_empty());
+}
+
+// UpdateSettingsRequest and RestoreResponse
+
+#[test]
+fn test_update_settings_request_roundtrip() {
+    round_trip(&UpdateSettingsRequest {
+        retention_secs: Some(86400),
+    });
+}
+
+#[test]
+fn test_update_settings_request_none() {
+    round_trip(&UpdateSettingsRequest {
+        retention_secs: None,
+    });
+}
+
+#[test]
+fn test_restore_response() {
+    let original = RestoreResponse {
+        result: "restored".to_string(),
+        restored_documents: 42,
+        sequence_number: 100,
+    };
+    round_trip(&original);
+}
+
+// BoolQuery with should and filter
+
+#[test]
+fn test_bool_query_with_should_and_filter() {
+    round_trip(&SearchQuery::Bool(BoolQuery {
+        must: vec![],
+        should: vec![SearchQuery::Term(TermQuery {
+            field: "tag".to_string(),
+            value: serde_json::json!("featured"),
+        })],
+        filter: vec![SearchQuery::Range(RangeQuery {
+            field: "price".to_string(),
+            gte: Some(serde_json::json!(10)),
+            gt: None,
+            lte: None,
+            lt: None,
+        })],
+        must_not: vec![],
+    }));
+}
+
+// SearchHit highlight field
+
+#[test]
+fn test_search_hit_with_highlight() {
+    use std::collections::BTreeMap;
+    round_trip(&SearchHit {
+        id: "doc1".to_string(),
+        source: serde_json::json!({"message": "hello world"}),
+        score: Some(1.5),
+        highlight: Some(BTreeMap::from([(
+            "message".to_string(),
+            vec!["<em>hello</em> world".to_string()],
+        )])),
+    });
+}
+
+#[test]
+fn test_skip_serializing_none_for_highlight() {
+    // Verify highlight is omitted when None using the static_str helper
+    let hit = SearchHit {
+        id: "doc1".to_string(),
+        source: serde_json::json!({"x": 1}),
+        score: None,
+        highlight: None,
+    };
+    round_trip_static_str(&hit, |value| {
+        // highlight field should not appear in JSON when None
+        assert!(
+            value.get("highlight").is_none(),
+            "highlight should be omitted when None"
+        );
+    });
+}
+
+// PrefixQuery, WildcardQuery, MatchQuery, PhraseQuery
+
+#[test]
+fn test_prefix_query_roundtrip() {
+    round_trip(&SearchQuery::Prefix(PrefixQuery {
+        field: "name".to_string(),
+        value: "pref".to_string(),
+    }));
+}
+
+#[test]
+fn test_wildcard_query_roundtrip() {
+    round_trip(&SearchQuery::Wildcard(WildcardQuery {
+        field: "name".to_string(),
+        value: "foo*bar?".to_string(),
+    }));
+}
+
+#[test]
+fn test_match_query_roundtrip() {
+    round_trip(&SearchQuery::Match(MatchQuery {
+        field: "message".to_string(),
+        value: "hello world".to_string(),
+    }));
+}
+
+#[test]
+fn test_phrase_query_roundtrip() {
+    round_trip(&SearchQuery::Phrase(PhraseQuery {
+        field: "message".to_string(),
+        value: "hello world".to_string(),
+    }));
 }

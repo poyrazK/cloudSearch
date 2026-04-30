@@ -5,7 +5,7 @@ pub mod helpers {
     include!("helpers.rs");
 }
 
-use helpers::{reserve_port, spawn_node, stop_node, wait_for_health};
+use helpers::{TestNode, reserve_port, spawn_node, stop_node, wait_for_health};
 
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
@@ -1450,14 +1450,10 @@ async fn multi_search_handles_missing_index_gracefully() {
 async fn phrase_query_matches_consecutive_terms() {
     let temp_dir = TempDir::new().expect("temp dir");
     let port = reserve_port();
-    let base_url = format!("http://127.0.0.1:{port}");
-    let client = Client::new();
+    let mut node = TestNode::spawn(temp_dir, port).await;
 
-    let mut child = spawn_node(temp_dir.path(), port);
-    wait_for_health(&client, &base_url).await;
-
-    client
-        .put(format!("{base_url}/test"))
+    node.client
+        .put(format!("{}/test", node.base_url))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -1466,8 +1462,8 @@ async fn phrase_query_matches_consecutive_terms() {
         .expect("create index status");
 
     // Index two docs with similar content but different ordering
-    client
-        .put(format!("{base_url}/test/_doc"))
+    node.client
+        .put(format!("{}/test/_doc", node.base_url))
         .json(&serde_json::json!({"id": "doc1", "source": {"message": "the quick brown fox"}}))
         .send()
         .await
@@ -1475,8 +1471,8 @@ async fn phrase_query_matches_consecutive_terms() {
         .error_for_status()
         .expect("index doc1 status");
 
-    client
-        .put(format!("{base_url}/test/_doc"))
+    node.client
+        .put(format!("{}/test/_doc", node.base_url))
         .json(&serde_json::json!({"id": "doc2", "source": {"message": "the quick red fox"}}))
         .send()
         .await
@@ -1484,8 +1480,8 @@ async fn phrase_query_matches_consecutive_terms() {
         .error_for_status()
         .expect("index doc2 status");
 
-    client
-        .post(format!("{base_url}/test/_refresh"))
+    node.client
+        .post(format!("{}/test/_refresh", node.base_url))
         .send()
         .await
         .expect("refresh")
@@ -1493,8 +1489,8 @@ async fn phrase_query_matches_consecutive_terms() {
         .expect("refresh status");
 
     // Flush to ensure positions are written to disk
-    client
-        .post(format!("{base_url}/test/_flush"))
+    node.client
+        .post(format!("{}/test/_flush", node.base_url))
         .send()
         .await
         .expect("flush")
@@ -1502,8 +1498,9 @@ async fn phrase_query_matches_consecutive_terms() {
         .expect("flush status");
 
     // Exact phrase "quick brown fox" — should match doc1 only
-    let resp = client
-        .post(format!("{base_url}/test/_search"))
+    let resp = node
+        .client
+        .post(format!("{}/test/_search", node.base_url))
         .json(&serde_json::json!({
             "query": { "phrase": { "field": "message", "value": "quick brown fox" } }
         }))
@@ -1522,21 +1519,17 @@ async fn phrase_query_matches_consecutive_terms() {
     );
     assert_eq!(hits[0]["_id"], "doc1");
 
-    stop_node(&mut child);
+    node.stop();
 }
 
 #[tokio::test]
 async fn phrase_query_with_no_consecutive_match() {
     let temp_dir = TempDir::new().expect("temp dir");
     let port = reserve_port();
-    let base_url = format!("http://127.0.0.1:{port}");
-    let client = Client::new();
+    let mut node = TestNode::spawn(temp_dir, port).await;
 
-    let mut child = spawn_node(temp_dir.path(), port);
-    wait_for_health(&client, &base_url).await;
-
-    client
-        .put(format!("{base_url}/test"))
+    node.client
+        .put(format!("{}/test", node.base_url))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -1545,8 +1538,8 @@ async fn phrase_query_with_no_consecutive_match() {
         .expect("create index status");
 
     // Index a doc where "brown" comes before "quick"
-    client
-        .put(format!("{base_url}/test/_doc"))
+    node.client
+        .put(format!("{}/test/_doc", node.base_url))
         .json(&serde_json::json!({"id": "doc1", "source": {"message": "the brown quick fox"}}))
         .send()
         .await
@@ -1554,8 +1547,8 @@ async fn phrase_query_with_no_consecutive_match() {
         .error_for_status()
         .expect("index doc1 status");
 
-    client
-        .post(format!("{base_url}/test/_refresh"))
+    node.client
+        .post(format!("{}/test/_refresh", node.base_url))
         .send()
         .await
         .expect("refresh")
@@ -1563,8 +1556,9 @@ async fn phrase_query_with_no_consecutive_match() {
         .expect("refresh status");
 
     // Search for "quick brown fox" (consecutive in source) — should NOT match
-    let resp = client
-        .post(format!("{base_url}/test/_search"))
+    let resp = node
+        .client
+        .post(format!("{}/test/_search", node.base_url))
         .json(&serde_json::json!({
             "query": { "phrase": { "field": "message", "value": "quick brown fox" } }
         }))
@@ -1582,5 +1576,276 @@ async fn phrase_query_with_no_consecutive_match() {
         "expected 0 hits when terms are not consecutive"
     );
 
-    stop_node(&mut child);
+    node.stop();
+}
+
+#[tokio::test]
+async fn create_and_list_snapshots() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    node.client
+        .put(format!("{}/test", node.base_url))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create index status");
+
+    for i in 1..=3 {
+        node.client
+            .put(format!("{}/test/_doc", node.base_url))
+            .json(&serde_json::json!({
+                "id": format!("doc-{i}"),
+                "source": {"field": format!("value{i}")}
+            }))
+            .send()
+            .await
+            .expect("index doc")
+            .error_for_status()
+            .expect("index status");
+    }
+
+    node.client
+        .post(format!("{}/test/_snapshot/snap1", node.base_url))
+        .send()
+        .await
+        .expect("create snapshot")
+        .error_for_status()
+        .expect("create snapshot status");
+
+    let resp = node
+        .client
+        .get(format!("{}/test/_snapshot", node.base_url))
+        .send()
+        .await
+        .expect("list snapshots")
+        .error_for_status()
+        .expect("list snapshots status");
+
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    let snapshots = body["snapshots"].as_array().expect("snapshots array");
+    assert_eq!(snapshots.len(), 1, "expected 1 snapshot");
+    assert_eq!(snapshots[0]["name"], "snap1");
+
+    node.stop();
+}
+
+#[tokio::test]
+async fn create_and_get_snapshot() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    node.client
+        .put(format!("{}/test", node.base_url))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create index status");
+
+    node.client
+        .put(format!("{}/test/_doc", node.base_url))
+        .json(&serde_json::json!({
+            "id": "doc-1",
+            "source": {"field": "value1"}
+        }))
+        .send()
+        .await
+        .expect("index doc")
+        .error_for_status()
+        .expect("index status");
+
+    node.client
+        .post(format!("{}/test/_snapshot/mysnap", node.base_url))
+        .send()
+        .await
+        .expect("create snapshot")
+        .error_for_status()
+        .expect("create snapshot status");
+
+    let resp = node
+        .client
+        .get(format!("{}/test/_snapshot/mysnap", node.base_url))
+        .send()
+        .await
+        .expect("get snapshot")
+        .error_for_status()
+        .expect("get snapshot status");
+
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["name"], "mysnap");
+
+    node.stop();
+}
+
+#[tokio::test]
+async fn delete_snapshot_removes_from_list() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    node.client
+        .put(format!("{}/test", node.base_url))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create index")
+        .error_for_status()
+        .expect("create index status");
+
+    node.client
+        .post(format!("{}/test/_snapshot/to-delete", node.base_url))
+        .send()
+        .await
+        .expect("create snapshot")
+        .error_for_status()
+        .expect("create snapshot status");
+
+    let resp = node
+        .client
+        .get(format!("{}/test/_snapshot", node.base_url))
+        .send()
+        .await
+        .expect("list snapshots")
+        .error_for_status()
+        .expect("list snapshots status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(body["snapshots"].as_array().unwrap().len(), 1);
+
+    node.client
+        .delete(format!("{}/test/_snapshot/to-delete", node.base_url))
+        .send()
+        .await
+        .expect("delete snapshot")
+        .error_for_status()
+        .expect("delete snapshot status");
+
+    let resp = node
+        .client
+        .get(format!("{}/test/_snapshot", node.base_url))
+        .send()
+        .await
+        .expect("list snapshots")
+        .error_for_status()
+        .expect("list snapshots status");
+    let body: serde_json::Value = resp.json().await.expect("parse body");
+    assert_eq!(
+        body["snapshots"].as_array().unwrap().len(),
+        0,
+        "expected 0 snapshots after delete"
+    );
+
+    node.stop();
+}
+
+#[tokio::test]
+async fn restore_snapshot_recovers_documents() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    node.create_index("test")
+        .await
+        .error_for_status()
+        .expect("create index status");
+
+    // Index documents
+    for i in 1..=2 {
+        node.index_doc(
+            "test",
+            &format!("doc-{i}"),
+            serde_json::json!({"field": format!("value{i}")}),
+        )
+        .await
+        .error_for_status()
+        .expect("index doc status");
+    }
+
+    node.refresh("test")
+        .await
+        .error_for_status()
+        .expect("refresh status");
+    node.client
+        .post(format!("{}/test/_snapshot/backup1", node.base_url))
+        .send()
+        .await
+        .expect("create snapshot")
+        .error_for_status()
+        .expect("create snapshot status");
+
+    // Delete all documents via bulk
+    node.bulk(
+        "test",
+        serde_json::json!([
+            {"delete": {"id": "doc-1"}},
+            {"delete": {"id": "doc-2"}}
+        ]),
+    )
+    .await
+    .error_for_status()
+    .expect("bulk delete status");
+
+    node.refresh("test")
+        .await
+        .error_for_status()
+        .expect("refresh status");
+
+    // Verify docs are gone
+    let body = node
+        .search("test", serde_json::json!({"query": {"match_all": {}}}))
+        .await;
+    assert_eq!(
+        TestNode::hits_total(&body),
+        0,
+        "expected 0 docs after delete"
+    );
+
+    // Restore snapshot
+    node.client
+        .post(format!("{}/test/_snapshot/backup1/_restore", node.base_url))
+        .send()
+        .await
+        .expect("restore snapshot")
+        .error_for_status()
+        .expect("restore status");
+
+    node.refresh("test")
+        .await
+        .error_for_status()
+        .expect("refresh status");
+
+    // Verify docs are back
+    let body = node
+        .search("test", serde_json::json!({"query": {"match_all": {}}}))
+        .await;
+    assert_eq!(
+        TestNode::hits_total(&body),
+        2,
+        "expected 2 docs after restore"
+    );
+
+    node.stop();
+}
+
+#[tokio::test]
+async fn snapshot_returns_404_for_missing_index() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    let resp = node
+        .client
+        .post(format!("{}/nonexistent/_snapshot/snap1", node.base_url))
+        .send()
+        .await
+        .expect("create snapshot request");
+
+    assert_eq!(resp.status(), 404, "expected 404 for missing index");
+
+    node.stop();
 }

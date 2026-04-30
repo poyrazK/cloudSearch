@@ -126,3 +126,290 @@ fn encode_boolean(documents: &[IndexDocument], field: &str) -> Vec<u8> {
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cloudsearch_common::{FieldMapping, FieldType, IndexDocument};
+
+    fn keyword_mapping() -> BTreeMap<String, FieldMapping> {
+        BTreeMap::from([(
+            "field".to_string(),
+            FieldMapping {
+                field_type: FieldType::Keyword,
+            },
+        )])
+    }
+
+    fn i64_mapping(ft: FieldType) -> BTreeMap<String, FieldMapping> {
+        BTreeMap::from([("field".to_string(), FieldMapping { field_type: ft })])
+    }
+
+    fn docs(values: &[serde_json::Value]) -> Vec<IndexDocument> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| IndexDocument {
+                id: format!("doc-{i}"),
+                source: v.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_encode_keyword_roundtrip() {
+        let mappings = keyword_mapping();
+        let documents = docs(&[
+            serde_json::json!({"field": "apple"}),
+            serde_json::json!({"field": "banana"}),
+            serde_json::json!({"field": "cherry"}),
+        ]);
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        assert_eq!(field.doc_count, 3);
+        assert_eq!(field.value_type, DocValueType::Keyword);
+
+        // First 12 bytes (3 * 4) are the offset table
+        let offsets = &field.data[..12];
+        let pool = &field.data[12..];
+
+        // Parse offsets and decode strings from pool
+        let off0 = u32::from_le_bytes(offsets[0..4].try_into().unwrap()) as usize;
+        let off1 = u32::from_le_bytes(offsets[4..8].try_into().unwrap()) as usize;
+        let off2 = u32::from_le_bytes(offsets[8..12].try_into().unwrap()) as usize;
+        let end2 = pool.len();
+
+        let s0 = std::str::from_utf8(&pool[off0..off1]).unwrap();
+        let s1 = std::str::from_utf8(&pool[off1..off2]).unwrap();
+        let s2 = std::str::from_utf8(&pool[off2..end2]).unwrap();
+
+        assert_eq!(s0, "apple");
+        assert_eq!(s1, "banana");
+        assert_eq!(s2, "cherry");
+    }
+
+    #[test]
+    fn test_encode_keyword_missing() {
+        let mappings = keyword_mapping();
+        let documents = docs(&[
+            serde_json::json!({"field": "present"}),
+            serde_json::json!({}), // missing field
+            serde_json::json!({"field": "also-present"}),
+        ]);
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        // Verify doc_count is 3
+        assert_eq!(field.doc_count, 3);
+
+        // First offset should be > 0 (some string in pool after null byte)
+        let off0 = u32::from_le_bytes(field.data[0..4].try_into().unwrap());
+        assert!(
+            off0 > 0,
+            "first offset should be > 0 since 'present' is non-empty"
+        );
+
+        // Second offset (missing doc) should be 0
+        let off1 = u32::from_le_bytes(field.data[4..8].try_into().unwrap());
+        assert_eq!(off1, 0, "missing field should have offset 0");
+
+        // Third offset should be > off0 (the pool grew after adding "also-present")
+        let off2 = u32::from_le_bytes(field.data[8..12].try_into().unwrap());
+        assert!(
+            off2 > off0,
+            "third string should be stored after the second in pool"
+        );
+    }
+
+    #[test]
+    fn test_encode_i64_roundtrip() {
+        let mappings = i64_mapping(FieldType::Long);
+        let documents = docs(&[
+            serde_json::json!({"field": 42_i64}),
+            serde_json::json!({"field": -10_i64}),
+            serde_json::json!({"field": i64::MAX}),
+            serde_json::json!({"field": i64::MIN}),
+        ]);
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        assert_eq!(field.doc_count, 4);
+        assert_eq!(field.value_type, DocValueType::Long);
+        assert_eq!(field.data.len(), 32); // 4 docs * 8 bytes
+
+        let values: Vec<i64> = field
+            .data
+            .chunks(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, [42, -10, i64::MAX, i64::MIN]);
+    }
+
+    #[test]
+    fn test_encode_i64_missing() {
+        let mappings = i64_mapping(FieldType::Long);
+        let documents = docs(&[
+            serde_json::json!({"field": 5_i64}),
+            serde_json::json!({}), // missing → 0
+            serde_json::json!({"field": 99_i64}),
+        ]);
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        let values: Vec<i64> = field
+            .data
+            .chunks(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, [5, 0, 99]);
+    }
+
+    #[test]
+    fn test_encode_f64_roundtrip() {
+        let mappings = i64_mapping(FieldType::Double);
+        let documents = docs(&[
+            serde_json::json!({"field": 0.0}),
+            serde_json::json!({"field": 2.5}),
+            serde_json::json!({"field": -2.5e-10}),
+        ]);
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        assert_eq!(field.doc_count, 3);
+        assert_eq!(field.value_type, DocValueType::Double);
+
+        let values: Vec<f64> = field
+            .data
+            .chunks(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, [0.0, 2.5, -2.5e-10]);
+    }
+
+    #[test]
+    fn test_encode_f64_missing() {
+        let mappings = i64_mapping(FieldType::Double);
+        let documents = docs(&[
+            serde_json::json!({}), // missing → 0.0
+            serde_json::json!({"field": 1.5}),
+        ]);
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        let values: Vec<f64> = field
+            .data
+            .chunks(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, [0.0, 1.5]);
+    }
+
+    #[test]
+    fn test_encode_boolean_roundtrip() {
+        let mappings = i64_mapping(FieldType::Boolean);
+        let documents = docs(&[
+            serde_json::json!({"field": true}),
+            serde_json::json!({"field": false}),
+            serde_json::json!({"field": true}),
+            serde_json::json!({"field": false}),
+        ]);
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        assert_eq!(field.doc_count, 4);
+        assert_eq!(field.value_type, DocValueType::Boolean);
+        assert_eq!(field.data.len(), 1); // 4 docs / 8 = 1 byte
+
+        // Bit packing: doc0=true → bit0, doc1=false → bit1 clear, doc2=true → bit2, doc3=false → bit3 clear
+        // byte 0 = 0b0000_0101 = 5
+        assert_eq!(field.data[0], 0b0000_0101);
+    }
+
+    #[test]
+    fn test_encode_boolean_all_true() {
+        let mappings = i64_mapping(FieldType::Boolean);
+        let documents = docs(&[
+            serde_json::json!({"field": true}),
+            serde_json::json!({"field": true}),
+            serde_json::json!({"field": true}),
+            serde_json::json!({"field": true}),
+        ]);
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        assert_eq!(field.data[0], 0b0000_1111); // all 4 bits set
+    }
+
+    #[test]
+    fn test_encode_boolean_all_false() {
+        let mappings = i64_mapping(FieldType::Boolean);
+        let documents = docs(&[
+            serde_json::json!({"field": false}),
+            serde_json::json!({"field": false}),
+            serde_json::json!({"field": false}),
+            serde_json::json!({"field": false}),
+        ]);
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        assert_eq!(field.data[0], 0b0000_0000); // all bits clear
+    }
+
+    #[test]
+    fn test_encode_empty_documents() {
+        let mappings = keyword_mapping();
+        let documents: Vec<IndexDocument> = vec![];
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        assert_eq!(field.doc_count, 0);
+        // Pool has 1 byte (null offset), offset table is empty
+        assert_eq!(field.data.len(), 1);
+        assert_eq!(field.data[0], 0); // null offset
+    }
+
+    #[test]
+    fn test_encode_timestamp() {
+        let mappings = i64_mapping(FieldType::Timestamp);
+        let ts = 1_600_000_000_000_i64; // ~2020-09-28
+        let documents = docs(&[serde_json::json!({"field": ts})]);
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        assert_eq!(field.value_type, DocValueType::Timestamp);
+        let val = i64::from_le_bytes(field.data.as_slice().try_into().unwrap());
+        assert_eq!(val, ts);
+    }
+
+    #[test]
+    fn test_encode_integer() {
+        let mappings = i64_mapping(FieldType::Integer);
+        let documents = docs(&[
+            serde_json::json!({"field": 100_i64}),
+            serde_json::json!({"field": -50_i64}),
+        ]);
+
+        let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
+        let field = fields.get("field").expect("field exists");
+
+        assert_eq!(field.value_type, DocValueType::Integer);
+        let values: Vec<i64> = field
+            .data
+            .chunks(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, [100, -50]);
+    }
+}

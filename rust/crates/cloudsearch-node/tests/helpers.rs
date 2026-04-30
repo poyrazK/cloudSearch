@@ -71,6 +71,100 @@ impl TestNode {
             stop_node(&mut child);
         }
     }
+
+    /// Creates an index with empty settings.
+    ///
+    /// # Panics
+    /// Panics if the request fails to send.
+    pub async fn create_index(&self, name: &str) -> reqwest::Response {
+        self.client
+            .put(format!("{}/{}", self.base_url, name))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("create index request")
+    }
+
+    /// Indexes a document.
+    ///
+    /// # Panics
+    /// Panics if the request fails to send.
+    pub async fn index_doc(
+        &self,
+        index: &str,
+        id: &str,
+        source: serde_json::Value,
+    ) -> reqwest::Response {
+        self.client
+            .put(format!("{}/{}/_doc", self.base_url, index))
+            .json(&serde_json::json!({"id": id, "source": source}))
+            .send()
+            .await
+            .expect("index doc request")
+    }
+
+    /// Refreshes an index.
+    ///
+    /// # Panics
+    /// Panics if the request fails to send.
+    pub async fn refresh(&self, index: &str) -> reqwest::Response {
+        self.client
+            .post(format!("{}/{}/_refresh", self.base_url, index))
+            .send()
+            .await
+            .expect("refresh request")
+    }
+
+    /// Flushes an index.
+    ///
+    /// # Panics
+    /// Panics if the request fails to send.
+    pub async fn flush(&self, index: &str) -> reqwest::Response {
+        self.client
+            .post(format!("{}/{}/_flush", self.base_url, index))
+            .send()
+            .await
+            .expect("flush request")
+    }
+
+    /// Searches an index.
+    ///
+    /// # Panics
+    /// Panics if the request fails to send or response cannot be parsed.
+    pub async fn search(&self, index: &str, query: serde_json::Value) -> serde_json::Value {
+        let resp = self
+            .client
+            .post(format!("{}/{}/_search", self.base_url, index))
+            .json(&query)
+            .send()
+            .await
+            .expect("search request");
+        resp.json().await.expect("parse search response")
+    }
+
+    /// Returns the total hits count from a search response.
+    ///
+    /// # Panics
+    /// Panics if the response does not contain a valid hits.total field.
+    #[must_use]
+    pub fn hits_total(body: &serde_json::Value) -> u64 {
+        body["hits"]["total"]
+            .as_u64()
+            .unwrap_or_else(|| body["hits"]["total"]["value"].as_u64().unwrap())
+    }
+
+    /// Performs a bulk operation.
+    ///
+    /// # Panics
+    /// Panics if the request fails to send.
+    pub async fn bulk(&self, index: &str, operations: serde_json::Value) -> reqwest::Response {
+        self.client
+            .post(format!("{}/{}/_bulk", self.base_url, index))
+            .json(&serde_json::json!({"operations": operations}))
+            .send()
+            .await
+            .expect("bulk request")
+    }
 }
 
 impl Drop for TestNode {
