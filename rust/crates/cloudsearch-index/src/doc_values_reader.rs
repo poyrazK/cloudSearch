@@ -27,25 +27,35 @@ impl DocValuesReader {
     }
 
     /// Get keyword values as a Vec of string slices.
-    /// Returns None if field doesn't exist or has wrong type.
+    /// Returns None if field doesn't exist, has wrong type, or data is malformed.
     pub fn keywords(&self, field: &str) -> Option<Vec<&str>> {
         let f = self.fields.get(field)?;
         if f.value_type != DocValueType::Keyword {
             return None;
         }
 
-        let num_docs = usize::try_from(f.doc_count).unwrap();
-        let offset_table_end = num_docs * 4;
+        let num_docs = usize::try_from(f.doc_count).ok()?;
+        let offset_table_end = num_docs.checked_mul(4)?;
+        if offset_table_end > f.data.len() {
+            return None;
+        }
         let pool = &f.data[offset_table_end..];
 
         let mut result = Vec::with_capacity(num_docs);
         for i in 0..num_docs {
-            let offset = u32::from_le_bytes(f.data[i * 4..][..4].try_into().unwrap()) as usize;
+            let offset = u32::from_le_bytes(
+                f.data[i * 4..][..4].try_into().ok()?
+            ) as usize;
             let end = if i + 1 < num_docs {
-                u32::from_le_bytes(f.data[(i + 1) * 4..][..4].try_into().unwrap()) as usize
+                u32::from_le_bytes(
+                    f.data[(i + 1) * 4..][..4].try_into().ok()?
+                ) as usize
             } else {
                 pool.len()
             };
+            if offset > pool.len() || end > pool.len() {
+                return None;
+            }
             let s = std::str::from_utf8(&pool[offset..end]).unwrap_or("");
             result.push(s);
         }
@@ -53,7 +63,7 @@ impl DocValuesReader {
     }
 
     /// Get i64 values for integer/long/timestamp fields.
-    /// Returns None if field doesn't exist or has wrong type.
+    /// Returns None if field doesn't exist, has wrong type, or data is malformed.
     pub fn i64_values(&self, field: &str) -> Option<Vec<i64>> {
         let f = self.fields.get(field)?;
         if !matches!(
@@ -63,32 +73,42 @@ impl DocValuesReader {
             return None;
         }
 
-        let num_docs = usize::try_from(f.doc_count).unwrap();
+        let num_docs = usize::try_from(f.doc_count).ok()?;
+        let expected_len = num_docs.checked_mul(8)?;
+        if f.data.len() != expected_len {
+            return None;
+        }
+
         let mut result = Vec::with_capacity(num_docs);
-        for chunk in f.data.chunks(8) {
+        for chunk in f.data.chunks_exact(8) {
             result.push(i64::from_le_bytes(chunk.try_into().unwrap()));
         }
         Some(result)
     }
 
     /// Get f64 values for double fields.
-    /// Returns None if field doesn't exist or has wrong type.
+    /// Returns None if field doesn't exist, has wrong type, or data is malformed.
     pub fn f64_values(&self, field: &str) -> Option<Vec<f64>> {
         let f = self.fields.get(field)?;
         if f.value_type != DocValueType::Double {
             return None;
         }
 
-        let num_docs = usize::try_from(f.doc_count).unwrap();
+        let num_docs = usize::try_from(f.doc_count).ok()?;
+        let expected_len = num_docs.checked_mul(8)?;
+        if f.data.len() != expected_len {
+            return None;
+        }
+
         let mut result = Vec::with_capacity(num_docs);
-        for chunk in f.data.chunks(8) {
+        for chunk in f.data.chunks_exact(8) {
             result.push(f64::from_le_bytes(chunk.try_into().unwrap()));
         }
         Some(result)
     }
 
     /// Get bool values for boolean fields.
-    /// Returns None if field doesn't exist or has wrong type.
+    /// Returns None if field doesn't exist, has wrong type, or data is malformed.
     #[allow(dead_code)]
     pub fn bool_values(&self, field: &str) -> Option<Vec<bool>> {
         let f = self.fields.get(field)?;
@@ -96,7 +116,12 @@ impl DocValuesReader {
             return None;
         }
 
-        let num_docs = usize::try_from(f.doc_count).unwrap();
+        let num_docs = usize::try_from(f.doc_count).ok()?;
+        let required_bytes = num_docs.div_ceil(8);
+        if required_bytes > f.data.len() {
+            return None;
+        }
+
         let mut result = Vec::with_capacity(num_docs);
         for i in 0..num_docs {
             result.push((f.data[i / 8] >> (i % 8)) & 1 != 0);
