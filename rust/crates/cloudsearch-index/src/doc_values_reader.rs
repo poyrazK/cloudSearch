@@ -27,25 +27,36 @@ impl DocValuesReader {
     }
 
     /// Get keyword values as a Vec of string slices.
-    /// Returns None if field doesn't exist or has wrong type.
+    /// Returns None if field doesn't exist, has wrong type, or data is malformed.
     pub fn keywords(&self, field: &str) -> Option<Vec<&str>> {
         let f = self.fields.get(field)?;
         if f.value_type != DocValueType::Keyword {
             return None;
         }
 
-        let num_docs = usize::try_from(f.doc_count).unwrap();
-        let offset_table_end = num_docs * 4;
+        let num_docs = usize::try_from(f.doc_count).ok()?;
+        let offset_table_end = num_docs.checked_mul(4)?;
+        if offset_table_end > f.data.len() {
+            return None;
+        }
         let pool = &f.data[offset_table_end..];
 
         let mut result = Vec::with_capacity(num_docs);
         for i in 0..num_docs {
-            let offset = u32::from_le_bytes(f.data[i * 4..][..4].try_into().unwrap()) as usize;
+            let offset = u32::from_le_bytes(
+                f.data[i * 4..][..4].try_into().ok()?
+            ) as usize;
             let end = if i + 1 < num_docs {
-                u32::from_le_bytes(f.data[(i + 1) * 4..][..4].try_into().unwrap()) as usize
+                u32::from_le_bytes(
+                    f.data[(i + 1) * 4..][..4].try_into().ok()?
+                ) as usize
             } else {
                 pool.len()
             };
+            // Malformed offset (points past pool) or truncated slice
+            if offset > pool.len() || end > pool.len() {
+                return None;
+            }
             let s = std::str::from_utf8(&pool[offset..end]).unwrap_or("");
             result.push(s);
         }
@@ -53,7 +64,7 @@ impl DocValuesReader {
     }
 
     /// Get i64 values for integer/long/timestamp fields.
-    /// Returns None if field doesn't exist or has wrong type.
+    /// Returns None if field doesn't exist, has wrong type, or data is malformed.
     pub fn i64_values(&self, field: &str) -> Option<Vec<i64>> {
         let f = self.fields.get(field)?;
         if !matches!(
@@ -63,32 +74,42 @@ impl DocValuesReader {
             return None;
         }
 
-        let num_docs = usize::try_from(f.doc_count).unwrap();
+        let num_docs = usize::try_from(f.doc_count).ok()?;
+        let expected_len = num_docs.checked_mul(8)?;
+        if f.data.len() != expected_len {
+            return None;
+        }
+
         let mut result = Vec::with_capacity(num_docs);
-        for chunk in f.data.chunks(8) {
+        for chunk in f.data.chunks_exact(8) {
             result.push(i64::from_le_bytes(chunk.try_into().unwrap()));
         }
         Some(result)
     }
 
     /// Get f64 values for double fields.
-    /// Returns None if field doesn't exist or has wrong type.
+    /// Returns None if field doesn't exist, has wrong type, or data is malformed.
     pub fn f64_values(&self, field: &str) -> Option<Vec<f64>> {
         let f = self.fields.get(field)?;
         if f.value_type != DocValueType::Double {
             return None;
         }
 
-        let num_docs = usize::try_from(f.doc_count).unwrap();
+        let num_docs = usize::try_from(f.doc_count).ok()?;
+        let expected_len = num_docs.checked_mul(8)?;
+        if f.data.len() != expected_len {
+            return None;
+        }
+
         let mut result = Vec::with_capacity(num_docs);
-        for chunk in f.data.chunks(8) {
+        for chunk in f.data.chunks_exact(8) {
             result.push(f64::from_le_bytes(chunk.try_into().unwrap()));
         }
         Some(result)
     }
 
     /// Get bool values for boolean fields.
-    /// Returns None if field doesn't exist or has wrong type.
+    /// Returns None if field doesn't exist, has wrong type, or data is malformed.
     #[allow(dead_code)]
     pub fn bool_values(&self, field: &str) -> Option<Vec<bool>> {
         let f = self.fields.get(field)?;
@@ -96,7 +117,13 @@ impl DocValuesReader {
             return None;
         }
 
-        let num_docs = usize::try_from(f.doc_count).unwrap();
+        let num_docs = usize::try_from(f.doc_count).ok()?;
+        // num_docs bits require ceil(num_docs / 8) bytes
+        let required_bytes = num_docs.div_ceil(8);
+        if required_bytes > f.data.len() {
+            return None;
+        }
+
         let mut result = Vec::with_capacity(num_docs);
         for i in 0..num_docs {
             result.push((f.data[i / 8] >> (i % 8)) & 1 != 0);
@@ -299,5 +326,87 @@ mod tests {
 
         let field_names: Vec<_> = reader.fields().collect();
         assert_eq!(field_names, vec!["a", "b"]);
+    }
+
+    // ─── Truncated/malformed data tests ───────────────────────────────────────
+
+    #[test]
+    fn test_keywords_truncated_offset_table() {
+        // doc_count=3 but data only has 8 bytes (needs 12 for 3 offsets)
+        let data = vec![1u8, 0, 0, 0, 6, 0, 0, 0]; // only 2 offsets, not 3
+        let field = DocValuesField {
+            field: "field".to_string(),
+            value_type: DocValueType::Keyword,
+            doc_count: 3,
+            data,
+        };
+        let reader = reader_with_field(field);
+        assert!(reader.keywords("field").is_none());
+    }
+
+    #[test]
+    fn test_i64_values_truncated_data() {
+        // 3 values need 24 bytes, but only 20 bytes provided
+        let mut data = vec![0u8; 20];
+        // Fill with some valid i64 values
+        data[0..8].copy_from_slice(&0_i64.to_le_bytes());
+        data[8..16].copy_from_slice(&1_i64.to_le_bytes());
+        let field = DocValuesField {
+            field: "field".to_string(),
+            value_type: DocValueType::Long,
+            doc_count: 3,
+            data,
+        };
+        let reader = reader_with_field(field);
+        assert!(reader.i64_values("field").is_none());
+    }
+
+    #[test]
+    fn test_f64_values_truncated_data() {
+        // 3 f64 values need 24 bytes, but only 16 bytes
+        let mut data = vec![0u8; 16];
+        data[..8].copy_from_slice(&1.0_f64.to_le_bytes());
+        data[8..16].copy_from_slice(&2.0_f64.to_le_bytes());
+        let field = DocValuesField {
+            field: "field".to_string(),
+            value_type: DocValueType::Double,
+            doc_count: 3,
+            data,
+        };
+        let reader = reader_with_field(field);
+        assert!(reader.f64_values("field").is_none());
+    }
+
+    #[test]
+    fn test_bool_values_truncated_data() {
+        // 10 docs need 2 bytes, but only 1 byte provided
+        let field = DocValuesField {
+            field: "field".to_string(),
+            value_type: DocValueType::Boolean,
+            doc_count: 10,
+            data: vec![0b0000_0101],
+        };
+        let reader = reader_with_field(field);
+        assert!(reader.bool_values("field").is_none());
+    }
+
+    #[test]
+    fn test_keywords_malformed_offset_past_pool() {
+        // Offset table says doc0 starts at byte 100, but pool is only 10 bytes
+        let pool = b"\x00abcdefghi"; // 11 bytes total (0-10)
+        let offsets = [100u32, 0, 0]; // doc0 offset way past pool
+        let mut data = Vec::new();
+        for off in offsets {
+            data.extend_from_slice(&off.to_le_bytes());
+        }
+        data.extend_from_slice(pool);
+        let field = DocValuesField {
+            field: "field".to_string(),
+            value_type: DocValueType::Keyword,
+            doc_count: 3,
+            data,
+        };
+        let reader = reader_with_field(field);
+        assert!(reader.keywords("field").is_none());
     }
 }
