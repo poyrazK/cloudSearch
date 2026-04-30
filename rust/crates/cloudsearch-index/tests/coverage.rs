@@ -133,3 +133,61 @@ async fn validate_search_request_rejects_nested_bool_with_object_field() {
         "nested bool with object sort field should be rejected"
     );
 }
+
+#[tokio::test]
+async fn validate_search_request_rejects_size_exceeding_max() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    let _metadata = catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let handle = catalog.open_index("test").await.expect("open index");
+
+    let request = SearchRequest {
+        size: Some(100_000),
+        ..Default::default()
+    };
+
+    let result = handle.validate_search_request(&request);
+    assert!(
+        result.is_err(),
+        "size exceeding MAX_SEARCH_SIZE should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn validate_search_request_rejects_from_exceeding_max() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    let _metadata = catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let handle = catalog.open_index("test").await.expect("open index");
+
+    let request = SearchRequest {
+        from: Some(2_000_000),
+        ..Default::default()
+    };
+
+    let result = handle.validate_search_request(&request);
+    assert!(
+        result.is_err(),
+        "from exceeding MAX_SEARCH_OFFSET should be rejected"
+    );
+}

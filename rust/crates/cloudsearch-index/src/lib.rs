@@ -33,6 +33,8 @@ use tokio::{
 
 const MAX_FIELDS_PER_INDEX: usize = 1000;
 const MERGE_TRIGGER_DOCUMENT_COUNT: usize = 8;
+const MAX_SEARCH_SIZE: usize = 10_000;
+const MAX_SEARCH_OFFSET: usize = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergePlan {
@@ -825,8 +827,8 @@ impl IndexHandle {
             });
         }
 
-        let from = request.from.unwrap_or(0);
-        let size = request.size.unwrap_or(total);
+        let from = request.from.unwrap_or(0).min(MAX_SEARCH_OFFSET);
+        let size = request.size.unwrap_or(total).min(MAX_SEARCH_SIZE);
 
         let hits = scored
             .into_iter()
@@ -912,6 +914,22 @@ impl IndexHandle {
             return Err(CloudSearchError::InvalidSearchRequest(format!(
                 "field '{}' cannot be used for sorting",
                 sort.field
+            )));
+        }
+
+        if let Some(size) = request.size
+            && size > MAX_SEARCH_SIZE
+        {
+            return Err(CloudSearchError::InvalidSearchRequest(format!(
+                "size ({size}) exceeds maximum allowed value ({MAX_SEARCH_SIZE})"
+            )));
+        }
+
+        if let Some(from) = request.from
+            && from > MAX_SEARCH_OFFSET
+        {
+            return Err(CloudSearchError::InvalidSearchRequest(format!(
+                "from ({from}) exceeds maximum allowed value ({MAX_SEARCH_OFFSET})"
             )));
         }
 
