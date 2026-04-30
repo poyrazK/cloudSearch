@@ -43,13 +43,9 @@ impl DocValuesReader {
 
         let mut result = Vec::with_capacity(num_docs);
         for i in 0..num_docs {
-            let offset = u32::from_le_bytes(
-                f.data[i * 4..][..4].try_into().ok()?
-            ) as usize;
+            let offset = u32::from_le_bytes(f.data[i * 4..][..4].try_into().ok()?) as usize;
             let end = if i + 1 < num_docs {
-                u32::from_le_bytes(
-                    f.data[(i + 1) * 4..][..4].try_into().ok()?
-                ) as usize
+                u32::from_le_bytes(f.data[(i + 1) * 4..][..4].try_into().ok()?) as usize
             } else {
                 pool.len()
             };
