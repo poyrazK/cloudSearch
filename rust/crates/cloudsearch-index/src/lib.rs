@@ -917,13 +917,17 @@ impl IndexHandle {
             )));
         }
 
-        if let Some(size) = request.size && size > MAX_SEARCH_SIZE {
+        if let Some(size) = request.size
+            && size > MAX_SEARCH_SIZE
+        {
             return Err(CloudSearchError::InvalidSearchRequest(format!(
                 "size ({size}) exceeds maximum allowed value ({MAX_SEARCH_SIZE})"
             )));
         }
 
-        if let Some(from) = request.from && from > MAX_SEARCH_OFFSET {
+        if let Some(from) = request.from
+            && from > MAX_SEARCH_OFFSET
+        {
             return Err(CloudSearchError::InvalidSearchRequest(format!(
                 "from ({from}) exceeds maximum allowed value ({MAX_SEARCH_OFFSET})"
             )));
