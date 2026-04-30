@@ -5,7 +5,7 @@ pub mod helpers {
     include!("helpers.rs");
 }
 
-use helpers::{reserve_port, spawn_node, stop_node, wait_for_health, TestNode};
+use helpers::{TestNode, reserve_port, spawn_node, stop_node, wait_for_health};
 
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
@@ -1749,17 +1749,27 @@ async fn restore_snapshot_recovers_documents() {
     let port = reserve_port();
     let mut node = TestNode::spawn(temp_dir, port).await;
 
-    node.create_index("test").await.error_for_status().expect("create index status");
+    node.create_index("test")
+        .await
+        .error_for_status()
+        .expect("create index status");
 
     // Index documents
     for i in 1..=2 {
-        node.index_doc("test", &format!("doc-{i}"), serde_json::json!({"field": format!("value{i}")}))
-            .await
-            .error_for_status()
-            .expect("index doc status");
+        node.index_doc(
+            "test",
+            &format!("doc-{i}"),
+            serde_json::json!({"field": format!("value{i}")}),
+        )
+        .await
+        .error_for_status()
+        .expect("index doc status");
     }
 
-    node.refresh("test").await.error_for_status().expect("refresh status");
+    node.refresh("test")
+        .await
+        .error_for_status()
+        .expect("refresh status");
     node.client
         .post(format!("{}/test/_snapshot/backup1", node.base_url))
         .send()
@@ -1769,19 +1779,31 @@ async fn restore_snapshot_recovers_documents() {
         .expect("create snapshot status");
 
     // Delete all documents via bulk
-    node.bulk("test", serde_json::json!([
-        {"delete": {"id": "doc-1"}},
-        {"delete": {"id": "doc-2"}}
-    ]))
+    node.bulk(
+        "test",
+        serde_json::json!([
+            {"delete": {"id": "doc-1"}},
+            {"delete": {"id": "doc-2"}}
+        ]),
+    )
     .await
     .error_for_status()
     .expect("bulk delete status");
 
-    node.refresh("test").await.error_for_status().expect("refresh status");
+    node.refresh("test")
+        .await
+        .error_for_status()
+        .expect("refresh status");
 
     // Verify docs are gone
-    let body = node.search("test", serde_json::json!({"query": {"match_all": {}}})).await;
-    assert_eq!(TestNode::hits_total(&body), 0, "expected 0 docs after delete");
+    let body = node
+        .search("test", serde_json::json!({"query": {"match_all": {}}}))
+        .await;
+    assert_eq!(
+        TestNode::hits_total(&body),
+        0,
+        "expected 0 docs after delete"
+    );
 
     // Restore snapshot
     node.client
@@ -1792,11 +1814,20 @@ async fn restore_snapshot_recovers_documents() {
         .error_for_status()
         .expect("restore status");
 
-    node.refresh("test").await.error_for_status().expect("refresh status");
+    node.refresh("test")
+        .await
+        .error_for_status()
+        .expect("refresh status");
 
     // Verify docs are back
-    let body = node.search("test", serde_json::json!({"query": {"match_all": {}}})).await;
-    assert_eq!(TestNode::hits_total(&body), 2, "expected 2 docs after restore");
+    let body = node
+        .search("test", serde_json::json!({"query": {"match_all": {}}}))
+        .await;
+    assert_eq!(
+        TestNode::hits_total(&body),
+        2,
+        "expected 2 docs after restore"
+    );
 
     node.stop();
 }

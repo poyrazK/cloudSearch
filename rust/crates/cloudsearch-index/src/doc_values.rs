@@ -133,9 +133,12 @@ mod tests {
     use cloudsearch_common::{FieldMapping, FieldType, IndexDocument};
 
     fn keyword_mapping() -> BTreeMap<String, FieldMapping> {
-        BTreeMap::from([("field".to_string(), FieldMapping {
-            field_type: FieldType::Keyword,
-        })])
+        BTreeMap::from([(
+            "field".to_string(),
+            FieldMapping {
+                field_type: FieldType::Keyword,
+            },
+        )])
     }
 
     fn i64_mapping(ft: FieldType) -> BTreeMap<String, FieldMapping> {
@@ -204,7 +207,10 @@ mod tests {
 
         // First offset should be > 0 (some string in pool after null byte)
         let off0 = u32::from_le_bytes(field.data[0..4].try_into().unwrap());
-        assert!(off0 > 0, "first offset should be > 0 since 'present' is non-empty");
+        assert!(
+            off0 > 0,
+            "first offset should be > 0 since 'present' is non-empty"
+        );
 
         // Second offset (missing doc) should be 0
         let off1 = u32::from_le_bytes(field.data[4..8].try_into().unwrap());
@@ -212,7 +218,10 @@ mod tests {
 
         // Third offset should be > off0 (the pool grew after adding "also-present")
         let off2 = u32::from_le_bytes(field.data[8..12].try_into().unwrap());
-        assert!(off2 > off0, "third string should be stored after the second in pool");
+        assert!(
+            off2 > off0,
+            "third string should be stored after the second in pool"
+        );
     }
 
     #[test]
@@ -232,7 +241,11 @@ mod tests {
         assert_eq!(field.value_type, DocValueType::Long);
         assert_eq!(field.data.len(), 32); // 4 docs * 8 bytes
 
-        let values: Vec<i64> = field.data.chunks(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect();
+        let values: Vec<i64> = field
+            .data
+            .chunks(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         assert_eq!(values, [42, -10, i64::MAX, i64::MIN]);
     }
 
@@ -248,7 +261,11 @@ mod tests {
         let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
         let field = fields.get("field").expect("field exists");
 
-        let values: Vec<i64> = field.data.chunks(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect();
+        let values: Vec<i64> = field
+            .data
+            .chunks(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         assert_eq!(values, [5, 0, 99]);
     }
 
@@ -267,7 +284,11 @@ mod tests {
         assert_eq!(field.doc_count, 3);
         assert_eq!(field.value_type, DocValueType::Double);
 
-        let values: Vec<f64> = field.data.chunks(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect();
+        let values: Vec<f64> = field
+            .data
+            .chunks(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         assert_eq!(values, [0.0, 2.5, -2.5e-10]);
     }
 
@@ -282,7 +303,11 @@ mod tests {
         let fields = DocValuesWriter::build_from_documents(&documents, &mappings);
         let field = fields.get("field").expect("field exists");
 
-        let values: Vec<f64> = field.data.chunks(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect();
+        let values: Vec<f64> = field
+            .data
+            .chunks(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         assert_eq!(values, [0.0, 1.5]);
     }
 
@@ -380,7 +405,11 @@ mod tests {
         let field = fields.get("field").expect("field exists");
 
         assert_eq!(field.value_type, DocValueType::Integer);
-        let values: Vec<i64> = field.data.chunks(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect();
+        let values: Vec<i64> = field
+            .data
+            .chunks(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         assert_eq!(values, [100, -50]);
     }
 }

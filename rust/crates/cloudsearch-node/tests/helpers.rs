@@ -131,11 +131,7 @@ impl TestNode {
     ///
     /// # Panics
     /// Panics if the request fails to send or response cannot be parsed.
-    pub async fn search(
-        &self,
-        index: &str,
-        query: serde_json::Value,
-    ) -> serde_json::Value {
+    pub async fn search(&self, index: &str, query: serde_json::Value) -> serde_json::Value {
         let resp = self
             .client
             .post(format!("{}/{}/_search", self.base_url, index))
@@ -152,9 +148,9 @@ impl TestNode {
     /// Panics if the response does not contain a valid hits.total field.
     #[must_use]
     pub fn hits_total(body: &serde_json::Value) -> u64 {
-        body["hits"]["total"].as_u64().unwrap_or_else(|| {
-            body["hits"]["total"]["value"].as_u64().unwrap()
-        })
+        body["hits"]["total"]
+            .as_u64()
+            .unwrap_or_else(|| body["hits"]["total"]["value"].as_u64().unwrap())
     }
 
     /// Performs a bulk operation.

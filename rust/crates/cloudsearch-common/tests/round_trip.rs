@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use uuid::Uuid;
 use cloudsearch_common::*;
+use uuid::Uuid;
 
 // Serialize to a serde_json::Value, then deserialize back to T.
 // This avoids the HRTB inference issues that arise with from_slice on types
@@ -977,7 +977,10 @@ fn test_normalize_intervals_preserves_nonzero() {
 #[test]
 fn test_cloudsearch_error_display() {
     assert_eq!(
-        format!("{}", CloudSearchError::IndexAlreadyExists("my-index".to_string())),
+        format!(
+            "{}",
+            CloudSearchError::IndexAlreadyExists("my-index".to_string())
+        ),
         "index 'my-index' already exists"
     );
     assert_eq!(
@@ -985,7 +988,10 @@ fn test_cloudsearch_error_display() {
         "index 'logs' not found"
     );
     assert_eq!(
-        format!("{}", CloudSearchError::DocumentNotFound("doc-123".to_string())),
+        format!(
+            "{}",
+            CloudSearchError::DocumentNotFound("doc-123".to_string())
+        ),
         "document 'doc-123' not found"
     );
 }
@@ -1051,21 +1057,17 @@ fn test_restore_response() {
 fn test_bool_query_with_should_and_filter() {
     round_trip(&SearchQuery::Bool(BoolQuery {
         must: vec![],
-        should: vec![
-            SearchQuery::Term(TermQuery {
-                field: "tag".to_string(),
-                value: serde_json::json!("featured"),
-            }),
-        ],
-        filter: vec![
-            SearchQuery::Range(RangeQuery {
-                field: "price".to_string(),
-                gte: Some(serde_json::json!(10)),
-                gt: None,
-                lte: None,
-                lt: None,
-            }),
-        ],
+        should: vec![SearchQuery::Term(TermQuery {
+            field: "tag".to_string(),
+            value: serde_json::json!("featured"),
+        })],
+        filter: vec![SearchQuery::Range(RangeQuery {
+            field: "price".to_string(),
+            gte: Some(serde_json::json!(10)),
+            gt: None,
+            lte: None,
+            lt: None,
+        })],
         must_not: vec![],
     }));
 }
@@ -1097,7 +1099,10 @@ fn test_skip_serializing_none_for_highlight() {
     };
     round_trip_static_str(&hit, |value| {
         // highlight field should not appear in JSON when None
-        assert!(value.get("highlight").is_none(), "highlight should be omitted when None");
+        assert!(
+            value.get("highlight").is_none(),
+            "highlight should be omitted when None"
+        );
     });
 }
 
