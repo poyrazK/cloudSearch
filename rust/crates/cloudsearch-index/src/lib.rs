@@ -998,11 +998,11 @@ impl IndexHandle {
             for (_, field_value) in obj {
                 if let Some(text) = field_value.as_str() {
                     let tokens = tokenize(text);
-                    let field_text = text.to_string();
+                    let lower_text = text.to_ascii_lowercase();
                     let mut seen_offsets: BTreeMap<String, Vec<u32>> = BTreeMap::new();
                     for token in &tokens {
                         let mut search_from = 0usize;
-                        while let Some(pos) = field_text[search_from..].find(token) {
+                        while let Some(pos) = lower_text[search_from..].find(token) {
                             let byte_offset = u32::try_from(search_from + pos).unwrap_or(0);
                             seen_offsets
                                 .entry(token.clone())
@@ -1795,7 +1795,7 @@ fn score_phrase_query(
 }
 
 fn tokenize(text: &str) -> Vec<String> {
-    text.split_whitespace().map(str::to_lowercase).collect()
+    text.split_whitespace().map(str::to_ascii_lowercase).collect()
 }
 
 /// Stable hash of a document ID string for use as a persistent `doc_id` in postings.
