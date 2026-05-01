@@ -1795,7 +1795,9 @@ fn score_phrase_query(
 }
 
 fn tokenize(text: &str) -> Vec<String> {
-    text.split_whitespace().map(str::to_ascii_lowercase).collect()
+    text.split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 /// Stable hash of a document ID string for use as a persistent `doc_id` in postings.
