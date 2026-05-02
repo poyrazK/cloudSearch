@@ -213,7 +213,10 @@ async fn highlight_positions_case_insensitive() {
     let mut handle = catalog.open_index("test").await.expect("open index");
 
     handle
-        .index_document(doc("1", serde_json::json!({"content": "ERROR log ERROR message"})))
+        .index_document(doc(
+            "1",
+            serde_json::json!({"content": "ERROR log ERROR message"}),
+        ))
         .await
         .expect("index");
     handle.refresh().await.expect("refresh");
@@ -253,7 +256,10 @@ async fn highlight_positions_multiple_occurrences() {
     let mut handle = catalog.open_index("test").await.expect("open index");
 
     handle
-        .index_document(doc("1", serde_json::json!({"content": "info error info error"})))
+        .index_document(doc(
+            "1",
+            serde_json::json!({"content": "info error info error"}),
+        ))
         .await
         .expect("index");
     handle.refresh().await.expect("refresh");
