@@ -998,17 +998,26 @@ impl IndexHandle {
             for (_, field_value) in obj {
                 if let Some(text) = field_value.as_str() {
                     let tokens = tokenize(text);
-                    let field_text = text.to_string();
+                    let lower_text = text.to_ascii_lowercase();
                     let mut seen_offsets: BTreeMap<String, Vec<u32>> = BTreeMap::new();
                     for token in &tokens {
                         let mut search_from = 0usize;
-                        while let Some(pos) = field_text[search_from..].find(token) {
-                            let byte_offset = u32::try_from(search_from + pos).unwrap_or(0);
+                        while let Some(pos) = lower_text[search_from..].find(token) {
+                            let Ok(byte_offset) = u32::try_from(search_from + pos) else {
+                                tracing::warn!(
+                                    offset = search_from + pos,
+                                    "byte offset exceeds u32::MAX, skipping position for term '{}' in doc '{}'",
+                                    token,
+                                    document.id
+                                );
+                                search_from += pos + 1;
+                                continue;
+                            };
                             seen_offsets
                                 .entry(token.clone())
                                 .or_default()
                                 .push(byte_offset);
-                            search_from += pos + 1;
+                            search_from += pos + token.len();
                         }
                     }
                     for (term, positions) in seen_offsets {
@@ -1795,7 +1804,9 @@ fn score_phrase_query(
 }
 
 fn tokenize(text: &str) -> Vec<String> {
-    text.split_whitespace().map(str::to_lowercase).collect()
+    text.split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 /// Stable hash of a document ID string for use as a persistent `doc_id` in postings.
@@ -5310,5 +5321,29 @@ mod tests {
             error,
             CloudSearchError::WalChecksumMismatch | CloudSearchError::InvalidWalRecord(_)
         ));
+    }
+
+    #[test]
+    fn tokenize_lowercase_converts_correctly() {
+        let result = tokenize("Hello World");
+        assert_eq!(result, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn tokenize_preserves_single_tokens() {
+        let result = tokenize("test");
+        assert_eq!(result, vec!["test"]);
+    }
+
+    #[test]
+    fn tokenize_multiple_whitespace_collapsed() {
+        let result = tokenize("a   b");
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn tokenize_empty_string() {
+        let result = tokenize("");
+        assert!(result.is_empty());
     }
 }
