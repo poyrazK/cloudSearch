@@ -1820,6 +1820,11 @@ fn hash_doc_id(id: &str) -> u64 {
     hasher.finish()
 }
 
+/// Number of characters to include before the matched term in a highlight fragment.
+const HIGHLIGHT_PRE_CONTEXT_CHARS: usize = 50;
+/// Number of characters to include after the matched term in a highlight fragment.
+const HIGHLIGHT_POST_CONTEXT_CHARS: usize = 30;
+
 /// Extract highlight fragments from a document's text fields using position data.
 #[allow(clippy::cast_possible_truncation)]
 fn extract_highlight(
@@ -1856,13 +1861,14 @@ fn extract_highlight(
                                     if pos >= text.len() {
                                         continue;
                                     }
-                                    // Extract window around match: 50 chars before, matched term, 30 after
-                                    let pre_start = pos.saturating_sub(50);
+                                    // Extract window around match: pre chars before, matched term, post chars after
+                                    let pre_start = pos.saturating_sub(HIGHLIGHT_PRE_CONTEXT_CHARS);
                                     let pre = &text[pre_start..pos];
                                     let term_match =
                                         &text[pos..pos.saturating_add(term.len()).min(text.len())];
-                                    let post_end =
-                                        pos.saturating_add(term.len() + 30).min(text.len());
+                                    let post_end = pos
+                                        .saturating_add(term.len() + HIGHLIGHT_POST_CONTEXT_CHARS)
+                                        .min(text.len());
                                     let post = if pos.saturating_add(term.len()) < post_end {
                                         &text[pos.saturating_add(term.len())..post_end]
                                     } else {
