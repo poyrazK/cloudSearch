@@ -1866,8 +1866,9 @@ fn extract_highlight(
                                     let pre = &text[pre_start..pos];
                                     let term_match =
                                         &text[pos..pos.saturating_add(term.len()).min(text.len())];
-                                    let post_end =
-                                        pos.saturating_add(term.len() + HIGHLIGHT_POST_CONTEXT_CHARS).min(text.len());
+                                    let post_end = pos
+                                        .saturating_add(term.len() + HIGHLIGHT_POST_CONTEXT_CHARS)
+                                        .min(text.len());
                                     let post = if pos.saturating_add(term.len()) < post_end {
                                         &text[pos.saturating_add(term.len())..post_end]
                                     } else {
