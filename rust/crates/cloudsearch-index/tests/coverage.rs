@@ -312,7 +312,11 @@ async fn highlight_positions_no_match() {
         ..Default::default()
     });
 
-    let hit = result.hits.hits.first().expect("doc should be found with MatchAll");
+    let hit = result
+        .hits
+        .hits
+        .first()
+        .expect("doc should be found with MatchAll");
     assert!(
         hit.highlight.is_none(),
         "MatchAll query should produce no highlight (no query terms to highlight)"
