@@ -5322,4 +5322,28 @@ mod tests {
             CloudSearchError::WalChecksumMismatch | CloudSearchError::InvalidWalRecord(_)
         ));
     }
+
+    #[test]
+    fn tokenize_lowercase_converts_correctly() {
+        let result = tokenize("Hello World");
+        assert_eq!(result, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn tokenize_preserves_single_tokens() {
+        let result = tokenize("test");
+        assert_eq!(result, vec!["test"]);
+    }
+
+    #[test]
+    fn tokenize_multiple_whitespace_collapsed() {
+        let result = tokenize("a   b");
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn tokenize_empty_string() {
+        let result = tokenize("");
+        assert!(result.is_empty());
+    }
 }
