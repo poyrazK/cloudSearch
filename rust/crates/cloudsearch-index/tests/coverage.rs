@@ -307,8 +307,7 @@ async fn highlight_positions_no_match() {
     });
 
     assert!(
-        result.hits.hits.is_empty()
-            || result.hits.hits.iter().all(|h| h.highlight.is_none()),
+        result.hits.hits.is_empty() || result.hits.hits.iter().all(|h| h.highlight.is_none()),
         "no highlight for term not in document"
     );
 }
@@ -346,8 +345,7 @@ async fn highlight_positions_empty_field() {
     });
 
     assert!(
-        result.hits.hits.is_empty()
-            || result.hits.hits.iter().all(|h| h.highlight.is_none()),
+        result.hits.hits.is_empty() || result.hits.hits.iter().all(|h| h.highlight.is_none()),
         "no highlight for empty text field"
     );
 }
