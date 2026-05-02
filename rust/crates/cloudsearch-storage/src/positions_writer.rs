@@ -49,7 +49,8 @@ impl PositionsWriter {
         result.push(1); // VERSION (byte 4)
         // 3 bytes padding (bytes 5-7) to align term_count at byte 8
         result.extend_from_slice(&[0u8, 0u8, 0u8]);
-        let term_count = u32::try_from(self.terms.len()).unwrap();
+        let term_count = u32::try_from(self.terms.len())
+            .expect("term count exceeds u32::MAX, file format cannot represent this");
         result.extend_from_slice(&term_count.to_le_bytes()); // term_count at bytes 8-11
 
         // Collect body offsets by scanning terms in sorted order
@@ -60,12 +61,14 @@ impl PositionsWriter {
         for (term, posting_list) in &self.terms {
             body_offsets.push((term.clone(), body.len() as u64));
             // Serialize posting list to body
-            let doc_count = u32::try_from(posting_list.docs.len()).unwrap();
+            let doc_count = u32::try_from(posting_list.docs.len())
+                .expect("doc count for term exceeds u32::MAX, file format cannot represent this");
             body.extend_from_slice(&doc_count.to_le_bytes());
             for posting in &posting_list.docs {
                 body.extend_from_slice(&posting.doc_id.to_le_bytes());
                 body.extend_from_slice(&posting.term_freq.to_le_bytes());
-                let pos_count = u32::try_from(posting.positions.len()).unwrap();
+                let pos_count = u32::try_from(posting.positions.len())
+                    .expect("position count exceeds u32::MAX, file format cannot represent this");
                 body.extend_from_slice(&pos_count.to_le_bytes());
                 for p in &posting.positions {
                     body.extend_from_slice(&p.to_le_bytes());
@@ -76,7 +79,11 @@ impl PositionsWriter {
         // Term dictionary: (str_len[4], str[bytes], body_offset[8])
         for (term, body_offset) in &body_offsets {
             let term_bytes = term.as_bytes();
-            result.extend_from_slice(&u32::try_from(term_bytes.len()).unwrap().to_le_bytes());
+            result.extend_from_slice(
+                &u32::try_from(term_bytes.len())
+                    .expect("term length exceeds u32::MAX, file format cannot represent this")
+                    .to_le_bytes(),
+            );
             result.extend_from_slice(term_bytes);
             result.extend_from_slice(&(*body_offset).to_le_bytes());
         }
