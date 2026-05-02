@@ -1017,7 +1017,7 @@ impl IndexHandle {
                                 .entry(token.clone())
                                 .or_default()
                                 .push(byte_offset);
-                            search_from += pos + 1;
+                            search_from += pos + token.len();
                         }
                     }
                     for (term, positions) in seen_offsets {

@@ -302,6 +302,7 @@ async fn highlight_positions_no_match() {
         .index_document(doc("1", serde_json::json!({"content": "hello world"})))
         .await
         .expect("index");
+    handle.refresh().await.expect("refresh");
     handle.flush().await.expect("flush");
 
     let result = handle.search(&SearchRequest {
@@ -340,6 +341,7 @@ async fn highlight_positions_empty_field() {
         .index_document(doc("1", serde_json::json!({"content": ""})))
         .await
         .expect("index");
+    handle.refresh().await.expect("refresh");
     handle.flush().await.expect("flush");
 
     let result = handle.search(&SearchRequest {
