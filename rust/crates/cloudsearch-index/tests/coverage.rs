@@ -305,17 +305,17 @@ async fn highlight_positions_no_match() {
     handle.refresh().await.expect("refresh");
     handle.flush().await.expect("flush");
 
+    // Use MatchAll so the document IS found (giving us a hit to assert on),
+    // then verify that hit has no highlight since no query terms are provided.
     let result = handle.search(&SearchRequest {
-        query: Some(SearchQuery::Match(MatchQuery {
-            field: "content".to_string(),
-            value: "xyznotfound".to_string(),
-        })),
+        query: Some(SearchQuery::MatchAll),
         ..Default::default()
     });
 
+    let hit = result.hits.hits.first().expect("doc should be found with MatchAll");
     assert!(
-        result.hits.hits.is_empty() || result.hits.hits.iter().all(|h| h.highlight.is_none()),
-        "no highlight for term not in document"
+        hit.highlight.is_none(),
+        "MatchAll query should produce no highlight (no query terms to highlight)"
     );
 }
 
