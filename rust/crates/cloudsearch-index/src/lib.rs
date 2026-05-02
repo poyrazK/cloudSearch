@@ -1003,7 +1003,16 @@ impl IndexHandle {
                     for token in &tokens {
                         let mut search_from = 0usize;
                         while let Some(pos) = lower_text[search_from..].find(token) {
-                            let byte_offset = u32::try_from(search_from + pos).unwrap_or(0);
+                            let Ok(byte_offset) = u32::try_from(search_from + pos) else {
+                                tracing::warn!(
+                                    offset = search_from + pos,
+                                    "byte offset exceeds u32::MAX, skipping position for term '{}' in doc '{}'",
+                                    token,
+                                    document.id
+                                );
+                                search_from += pos + 1;
+                                continue;
+                            };
                             seen_offsets
                                 .entry(token.clone())
                                 .or_default()
