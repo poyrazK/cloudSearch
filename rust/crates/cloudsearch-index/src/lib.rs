@@ -4,9 +4,9 @@ use cloudsearch_common::{
     BulkRequest, BulkResponse, CloudSearchError, CreateIndexRequest,
     DateHistogramAggregationResult, DateHistogramBucket, DateHistogramInterval, FieldMapping,
     FieldType, FlushResponse, Fuzziness, HitsMetadata, IndexDocument, IndexMetadata, MappingMode,
-    MatchQuery, MergeResponse, PhraseQuery, PrefixQuery, RangeQuery, Result, SearchHit, SearchQuery,
-    SearchRequest, SearchResponse, SortOrder, SortSpec, StatsAggregationResult, TermQuery,
-    TermsAggregationResult, TermsBucket, TermsQuery, WildcardQuery,
+    MatchQuery, MergeResponse, PhraseQuery, PrefixQuery, RangeQuery, Result, SearchHit,
+    SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec, StatsAggregationResult,
+    TermQuery, TermsAggregationResult, TermsBucket, TermsQuery, WildcardQuery,
 };
 use cloudsearch_storage::{
     IndexManifest, SegmentMeta, SegmentSnapshot, SnapshotMetadata, WalManager, WalRecord,
