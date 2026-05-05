@@ -810,12 +810,14 @@ impl IndexHandle {
                     source: l.source.clone(),
                     score: None,
                     highlight: None,
+                    sort_values: None,
                 };
                 let rh = SearchHit {
                     id: r.id.clone(),
                     source: r.source.clone(),
                     score: None,
                     highlight: None,
+                    sort_values: None,
                 };
                 compare_hits(&lh, &rh, sort)
             });
@@ -827,7 +829,19 @@ impl IndexHandle {
             });
         }
 
-        let from = request.from.unwrap_or(0).min(MAX_SEARCH_OFFSET);
+        let from = if let Some(cursor) = &request.search_after {
+            // For search_after, find position where doc > cursor
+            scored
+                .iter()
+                .position(|(score, doc)| {
+                    let doc_sort_values = compute_sort_values(doc, request.sort.as_ref(), *score);
+                    compare_sort_values_list(&doc_sort_values, cursor, request.sort.as_ref())
+                        == std::cmp::Ordering::Greater
+                })
+                .unwrap_or(scored.len())
+        } else {
+            request.from.unwrap_or(0).min(MAX_SEARCH_OFFSET)
+        };
         let size = request.size.unwrap_or(total).min(MAX_SEARCH_SIZE);
 
         let hits = scored
@@ -840,11 +854,13 @@ impl IndexHandle {
                     r if !r.is_empty() => extract_highlight(doc, doc_id_hash, r, query),
                     _ => None,
                 };
+                let sort_values = compute_sort_values(doc, request.sort.as_ref(), score);
                 SearchHit {
                     id: doc.id.clone(),
                     source: doc.source.clone(),
                     score: Some(score),
                     highlight,
+                    sort_values: Some(sort_values),
                 }
             })
             .collect::<Vec<_>>();
@@ -931,6 +947,18 @@ impl IndexHandle {
             return Err(CloudSearchError::InvalidSearchRequest(format!(
                 "from ({from}) exceeds maximum allowed value ({MAX_SEARCH_OFFSET})"
             )));
+        }
+
+        if request.search_after.is_some() && request.from.is_some() {
+            return Err(CloudSearchError::InvalidSearchRequest(
+                "search_after and from cannot be used together".to_string(),
+            ));
+        }
+
+        if request.search_after.is_some() && request.sort.is_none() {
+            return Err(CloudSearchError::InvalidSearchRequest(
+                "search_after requires sort field to be specified".to_string(),
+            ));
         }
 
         if let Some(aggs) = &request.aggs {
@@ -2297,6 +2325,83 @@ fn comparable_value(value: &serde_json::Value) -> Option<ComparableValue> {
     }
 
     None
+}
+
+/// Compute sort values for a document.
+/// Returns a vector: [`sort_field_value`, `tie_breaker`].
+/// Tie-breaker is [`score`, `doc_id`].
+/// This is used for both `search_after` cursor positioning and response `sort_values`.
+fn compute_sort_values(
+    doc: &IndexDocument,
+    sort: Option<&SortSpec>,
+    score: f32,
+) -> Vec<serde_json::Value> {
+    let mut values = Vec::with_capacity(2);
+    if let Some(sort_spec) = sort {
+        if let Some(field_value) = doc.source.get(&sort_spec.field) {
+            values.push(field_value.clone());
+        } else {
+            values.push(serde_json::Value::Null);
+        }
+    }
+    // Tie-breaker: include score and doc_id to ensure uniqueness
+    values.push(serde_json::Value::Number(
+        serde_json::Number::from_f64(f64::from(score)).unwrap_or(serde_json::Number::from(0)),
+    ));
+    values.push(serde_json::Value::String(doc.id.clone()));
+    values
+}
+
+/// Compare a document's sort values against a `search_after` cursor.
+/// Returns `Ordering::Greater` when doc should come AFTER the cursor
+/// (i.e., cursor is smaller than or equal to doc's values).
+fn compare_sort_values_list(
+    doc_values: &[serde_json::Value],
+    cursor: &[serde_json::Value],
+    sort: Option<&SortSpec>,
+) -> std::cmp::Ordering {
+    for (i, cursor_val) in cursor.iter().enumerate() {
+        if i >= doc_values.len() {
+            return std::cmp::Ordering::Less;
+        }
+        let doc_val = &doc_values[i];
+        let ordering = compare_json_values(doc_val, cursor_val, sort);
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+fn compare_json_values(
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+    sort: Option<&SortSpec>,
+) -> std::cmp::Ordering {
+    let left_comp = comparable_value(left);
+    let right_comp = comparable_value(right);
+
+    let ordering = match (left_comp, right_comp) {
+        (Some(l), Some(r)) => match (&l, &r) {
+            (ComparableValue::Number(ln), ComparableValue::Number(rn)) => ln.total_cmp(rn),
+            (ComparableValue::Timestamp(lt), ComparableValue::Timestamp(rt)) => lt.cmp(rt),
+            (ComparableValue::String(ls), ComparableValue::String(rs)) => ls.cmp(rs),
+            (ComparableValue::Boolean(lb), ComparableValue::Boolean(rb)) => lb.cmp(rb),
+            _ => std::cmp::Ordering::Equal,
+        },
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, None) => std::cmp::Ordering::Equal,
+    };
+
+    if let Some(sort_spec) = sort {
+        match sort_spec.order {
+            SortOrder::Asc => ordering,
+            SortOrder::Desc => ordering.reverse(),
+        }
+    } else {
+        ordering
+    }
 }
 
 fn compare_hits(left: &SearchHit, right: &SearchHit, sort: &SortSpec) -> std::cmp::Ordering {
