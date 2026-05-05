@@ -649,6 +649,7 @@ fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
         return Ok(TermQuery {
             field: field.to_string(),
             value,
+            fuzziness: None,
         });
     }
 
@@ -662,6 +663,7 @@ fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
     Ok(TermQuery {
         field: field.clone(),
         value: raw_value.clone(),
+        fuzziness: None,
     })
 }
 
@@ -1982,6 +1984,7 @@ mod tests {
                             query: Some(SearchQuery::Term(TermQuery {
                                 field: "service".to_string(),
                                 value: serde_json::json!("billing"),
+                                fuzziness: None,
                             })),
                             ..Default::default()
                         })
@@ -2027,6 +2030,7 @@ mod tests {
                             query: Some(SearchQuery::Term(TermQuery {
                                 field: "service".to_string(),
                                 value: serde_json::json!("billing"),
+                                fuzziness: None,
                             })),
                             ..Default::default()
                         })
@@ -2060,6 +2064,7 @@ mod tests {
                                 filter: vec![SearchQuery::Term(TermQuery {
                                     field: "level".to_string(),
                                     value: serde_json::json!("info"),
+                                    fuzziness: None,
                                 })],
                                 ..Default::default()
                             })),
@@ -4083,6 +4088,7 @@ mod tests {
                             query: Some(SearchQuery::Term(TermQuery {
                                 field: "level".to_string(),
                                 value: serde_json::json!("info"),
+                                fuzziness: None,
                             })),
                             aggs: Some(std::collections::BTreeMap::from([
                                 (

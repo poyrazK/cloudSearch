@@ -157,6 +157,7 @@ impl<'a> Parser<'a> {
             Ok(SearchQuery::Term(TermQuery {
                 field: "tag".to_string(),
                 value: serde_json::Value::String(word.to_string()),
+                fuzziness: None,
             }))
         }
     }
@@ -258,6 +259,7 @@ impl<'a> Parser<'a> {
         Ok(SearchQuery::Term(TermQuery {
             field: field.to_string(),
             value: json_value,
+            fuzziness: None,
         }))
     }
 
@@ -597,7 +599,8 @@ mod tests {
             result,
             SearchQuery::Term(TermQuery {
                 field: "status".to_string(),
-                value: serde_json::json!("active")
+                value: serde_json::json!("active"),
+                fuzziness: None,
             })
         );
     }
@@ -609,7 +612,8 @@ mod tests {
             result,
             SearchQuery::Term(TermQuery {
                 field: "count".to_string(),
-                value: serde_json::json!(42)
+                value: serde_json::json!(42),
+                fuzziness: None,
             })
         );
     }
@@ -672,7 +676,8 @@ mod tests {
             result,
             SearchQuery::Term(TermQuery {
                 field: "message".to_string(),
-                value: serde_json::json!("hello world")
+                value: serde_json::json!("hello world"),
+                fuzziness: None,
             })
         );
     }

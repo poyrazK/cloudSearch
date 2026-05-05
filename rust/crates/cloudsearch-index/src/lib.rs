@@ -3,9 +3,9 @@ use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkOperation,
     BulkRequest, BulkResponse, CloudSearchError, CreateIndexRequest,
     DateHistogramAggregationResult, DateHistogramBucket, DateHistogramInterval, FieldMapping,
-    FieldType, FlushResponse, HitsMetadata, IndexDocument, IndexMetadata, MappingMode, MatchQuery,
-    MergeResponse, PhraseQuery, PrefixQuery, RangeQuery, Result, SearchHit, SearchQuery,
-    SearchRequest, SearchResponse, SortOrder, SortSpec, StatsAggregationResult,
+    FieldType, FlushResponse, Fuzziness, HitsMetadata, IndexDocument, IndexMetadata, MappingMode,
+    MatchQuery, MergeResponse, PhraseQuery, PrefixQuery, RangeQuery, Result, SearchHit, SearchQuery,
+    SearchRequest, SearchResponse, SortOrder, SortSpec, StatsAggregationResult, TermQuery,
     TermsAggregationResult, TermsBucket, TermsQuery, WildcardQuery,
 };
 use cloudsearch_storage::{
@@ -1702,11 +1702,7 @@ fn score_query(
 ) -> Option<f32> {
     match query {
         SearchQuery::MatchAll => Some(1.0),
-        SearchQuery::Term(term) => document
-            .source
-            .get(&term.field)
-            .filter(|value| **value == term.value)
-            .map(|_| 1.0),
+        SearchQuery::Term(term) => fuzzy_term_match(document, term).map(|_| 1.0),
         SearchQuery::Terms(terms) => matches_terms_query(document, terms).then_some(1.0),
         SearchQuery::Range(range) => matches_range_query(document, range).then_some(1.0),
         SearchQuery::Bool(bool_query) => {
@@ -1835,6 +1831,74 @@ fn tokenize(text: &str) -> Vec<String> {
     text.split_whitespace()
         .map(str::to_ascii_lowercase)
         .collect()
+}
+
+/// Returns true if the stored value fuzzy-matches the query term.
+/// When fuzziness is None, performs exact match.
+fn fuzzy_term_match(document: &IndexDocument, term: &TermQuery) -> Option<bool> {
+    let stored = document.source.get(&term.field)?;
+
+    // When no fuzziness, do exact comparison (handles bool, number, string)
+    if term.fuzziness.is_none() {
+        return (stored == &term.value).then_some(true);
+    }
+
+    // Fuzzy matching requires string values
+    let stored_str = stored.as_str()?;
+    let query_value = term.value.as_str()?;
+
+    match &term.fuzziness {
+        None => unreachable!(),
+        Some(Fuzziness::Auto) => {
+            let threshold = match query_value.len() {
+                0..=2 => 0,
+                3..=5 => 1,
+                _ => 2,
+            };
+            if threshold == 0 {
+                (stored_str == query_value).then_some(true)
+            } else {
+                Some(levenshtein_distance(stored_str, query_value) <= threshold)
+            }
+        }
+        Some(Fuzziness::Exact(max_dist)) => {
+            if *max_dist == 0 {
+                (stored_str == query_value).then_some(true)
+            } else {
+                Some(levenshtein_distance(stored_str, query_value) <= *max_dist)
+            }
+        }
+    }
+}
+
+/// Compute the Levenshtein edit distance between two strings.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+
+    let mut matrix = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+
+    for (i, row) in matrix.iter_mut().enumerate().take(a.len() + 1) {
+        row[0] = i;
+    }
+    for (j, cell) in matrix[0].iter_mut().enumerate().take(b.len() + 1) {
+        *cell = j;
+    }
+
+    for (i, ca) in a.char_indices() {
+        for (j, cb) in b.char_indices() {
+            let cost = usize::from(ca != cb);
+            matrix[i + 1][j + 1] = (matrix[i][j + 1] + 1) // deletion
+                .min(matrix[i + 1][j] + 1) // insertion
+                .min(matrix[i][j] + cost); // substitution
+        }
+    }
+
+    matrix[a.len()][b.len()]
 }
 
 /// Stable hash of a document ID string for use as a persistent `doc_id` in postings.
@@ -3467,6 +3531,7 @@ mod tests {
             query: Some(SearchQuery::Term(TermQuery {
                 field: "service".to_string(),
                 value: serde_json::json!("billing"),
+                fuzziness: None,
             })),
             ..Default::default()
         });
@@ -3478,6 +3543,7 @@ mod tests {
                 filter: vec![SearchQuery::Term(TermQuery {
                     field: "level".to_string(),
                     value: serde_json::json!("info"),
+                    fuzziness: None,
                 })],
                 ..Default::default()
             })),
@@ -3568,6 +3634,7 @@ mod tests {
             query: Some(SearchQuery::Term(TermQuery {
                 field: "missing".to_string(),
                 value: serde_json::json!("nope"),
+                fuzziness: None,
             })),
             ..Default::default()
         });
@@ -3579,10 +3646,12 @@ mod tests {
                     SearchQuery::Term(TermQuery {
                         field: "service".to_string(),
                         value: serde_json::json!("billing"),
+                        fuzziness: None,
                     }),
                     SearchQuery::Term(TermQuery {
                         field: "active".to_string(),
                         value: serde_json::json!(true),
+                        fuzziness: None,
                     }),
                 ],
                 ..Default::default()
@@ -3706,6 +3775,7 @@ mod tests {
             query: Some(SearchQuery::Term(TermQuery {
                 field: "active".to_string(),
                 value: serde_json::json!(true),
+                fuzziness: None,
             })),
             ..Default::default()
         });
@@ -3715,6 +3785,7 @@ mod tests {
             query: Some(SearchQuery::Term(TermQuery {
                 field: "latency".to_string(),
                 value: serde_json::json!(42),
+                fuzziness: None,
             })),
             ..Default::default()
         });
@@ -3724,6 +3795,7 @@ mod tests {
             query: Some(SearchQuery::Term(TermQuery {
                 field: "latency".to_string(),
                 value: serde_json::json!("42"),
+                fuzziness: None,
             })),
             ..Default::default()
         });
@@ -3942,6 +4014,7 @@ mod tests {
                 must: vec![SearchQuery::Term(TermQuery {
                     field: "service".to_string(),
                     value: serde_json::json!("billing"),
+                    fuzziness: None,
                 })],
                 ..Default::default()
             })),
@@ -3955,10 +4028,12 @@ mod tests {
                     SearchQuery::Term(TermQuery {
                         field: "service".to_string(),
                         value: serde_json::json!("billing"),
+                        fuzziness: None,
                     }),
                     SearchQuery::Term(TermQuery {
                         field: "service".to_string(),
                         value: serde_json::json!("search"),
+                        fuzziness: None,
                     }),
                 ],
                 ..Default::default()
@@ -3972,10 +4047,12 @@ mod tests {
                 filter: vec![SearchQuery::Term(TermQuery {
                     field: "service".to_string(),
                     value: serde_json::json!("billing"),
+                    fuzziness: None,
                 })],
                 must_not: vec![SearchQuery::Term(TermQuery {
                     field: "level".to_string(),
                     value: serde_json::json!("error"),
+                    fuzziness: None,
                 })],
                 ..Default::default()
             })),
@@ -4347,6 +4424,7 @@ mod tests {
             query: Some(SearchQuery::Term(TermQuery {
                 field: "level".to_string(),
                 value: serde_json::json!("info"),
+                fuzziness: None,
             })),
             from: Some(0),
             size: Some(1),

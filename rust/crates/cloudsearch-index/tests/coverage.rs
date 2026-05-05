@@ -111,6 +111,7 @@ async fn validate_search_request_rejects_nested_bool_with_object_field() {
                 must: vec![SearchQuery::Term(TermQuery {
                     field: "meta".to_string(),
                     value: serde_json::json!("value"),
+                    fuzziness: None,
                 })],
                 should: vec![],
                 filter: vec![],
