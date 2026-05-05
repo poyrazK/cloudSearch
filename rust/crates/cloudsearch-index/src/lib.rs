@@ -955,6 +955,12 @@ impl IndexHandle {
             ));
         }
 
+        if request.search_after.is_some() && request.sort.is_none() {
+            return Err(CloudSearchError::InvalidSearchRequest(
+                "search_after requires sort field to be specified".to_string(),
+            ));
+        }
+
         if let Some(aggs) = &request.aggs {
             for (name, agg) in aggs {
                 match agg {

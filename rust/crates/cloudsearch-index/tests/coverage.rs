@@ -193,6 +193,36 @@ async fn validate_search_request_rejects_from_exceeding_max() {
 }
 
 #[tokio::test]
+async fn validate_search_request_rejects_search_after_without_sort() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    let _metadata = catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let handle = catalog.open_index("test").await.expect("open index");
+
+    // search_after without sort is invalid — cursor is meaningless without sort order
+    let request = SearchRequest {
+        search_after: Some(vec![serde_json::json!(1.0), serde_json::json!("doc123")]),
+        ..Default::default()
+    };
+
+    let result = handle.validate_search_request(&request);
+    assert!(
+        result.is_err(),
+        "search_after without sort field should be rejected"
+    );
+}
+
+#[tokio::test]
 async fn highlight_positions_case_insensitive() {
     // Index doc with mixed-case text, search for lowercase term.
     // extract_positions now searches in to_ascii_lowercase()'d text,
