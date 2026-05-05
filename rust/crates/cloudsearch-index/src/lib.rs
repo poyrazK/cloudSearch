@@ -2345,7 +2345,9 @@ fn compute_sort_values(
         }
     }
     // Tie-breaker: include score and doc_id to ensure uniqueness
-    values.push(serde_json::Value::Number(serde_json::Number::from_f64(f64::from(score)).unwrap_or(serde_json::Number::from(0))));
+    values.push(serde_json::Value::Number(
+        serde_json::Number::from_f64(f64::from(score)).unwrap_or(serde_json::Number::from(0)),
+    ));
     values.push(serde_json::Value::String(doc.id.clone()));
     values
 }
@@ -2380,15 +2382,13 @@ fn compare_json_values(
     let right_comp = comparable_value(right);
 
     let ordering = match (left_comp, right_comp) {
-        (Some(l), Some(r)) => {
-            match (&l, &r) {
-                (ComparableValue::Number(ln), ComparableValue::Number(rn)) => ln.total_cmp(rn),
-                (ComparableValue::Timestamp(lt), ComparableValue::Timestamp(rt)) => lt.cmp(rt),
-                (ComparableValue::String(ls), ComparableValue::String(rs)) => ls.cmp(rs),
-                (ComparableValue::Boolean(lb), ComparableValue::Boolean(rb)) => lb.cmp(rb),
-                _ => std::cmp::Ordering::Equal,
-            }
-        }
+        (Some(l), Some(r)) => match (&l, &r) {
+            (ComparableValue::Number(ln), ComparableValue::Number(rn)) => ln.total_cmp(rn),
+            (ComparableValue::Timestamp(lt), ComparableValue::Timestamp(rt)) => lt.cmp(rt),
+            (ComparableValue::String(ls), ComparableValue::String(rs)) => ls.cmp(rs),
+            (ComparableValue::Boolean(lb), ComparableValue::Boolean(rb)) => lb.cmp(rb),
+            _ => std::cmp::Ordering::Equal,
+        },
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, None) => std::cmp::Ordering::Equal,
