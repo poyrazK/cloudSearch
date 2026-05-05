@@ -610,6 +610,7 @@ fn test_search_request_all_fields() {
                 field: "status".to_string(),
             }),
         )])),
+        search_after: None,
     });
 }
 
@@ -713,12 +714,14 @@ fn test_search_response_with_hits_and_aggs() {
                     source: serde_json::json!({"title": "First"}),
                     score: None,
                     highlight: None,
+                    sort_values: None,
                 },
                 SearchHit {
                     id: "doc2".to_string(),
                     source: serde_json::json!({"title": "Second"}),
                     score: None,
                     highlight: None,
+                    sort_values: None,
                 },
             ],
         },
@@ -756,6 +759,7 @@ fn test_hits_metadata() {
             source: serde_json::json!({"x": 1}),
             score: None,
             highlight: None,
+            sort_values: None,
         }],
     });
 }
@@ -769,6 +773,7 @@ fn test_search_hit() {
         source: serde_json::json!({"nested": {"field": "value"}}),
         score: None,
         highlight: None,
+        sort_values: None,
     });
 }
 
@@ -1085,6 +1090,7 @@ fn test_search_hit_with_highlight() {
             "message".to_string(),
             vec!["<em>hello</em> world".to_string()],
         )])),
+        sort_values: None,
     });
 }
 
@@ -1096,6 +1102,7 @@ fn test_skip_serializing_none_for_highlight() {
         source: serde_json::json!({"x": 1}),
         score: None,
         highlight: None,
+        sort_values: None,
     };
     round_trip_static_str(&hit, |value| {
         // highlight field should not appear in JSON when None

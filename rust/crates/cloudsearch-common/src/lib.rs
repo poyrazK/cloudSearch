@@ -245,6 +245,8 @@ pub struct SearchRequest {
     pub from: Option<usize>,
     pub size: Option<usize>,
     pub sort: Option<SortSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_after: Option<Vec<serde_json::Value>>,
     pub aggs: Option<BTreeMap<String, AggregationRequest>>,
 }
 
@@ -378,6 +380,8 @@ pub struct SearchHit {
     pub score: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "highlight")]
     pub highlight: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_values: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
