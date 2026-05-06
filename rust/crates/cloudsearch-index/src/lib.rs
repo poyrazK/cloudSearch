@@ -1702,7 +1702,10 @@ fn score_query(
 ) -> Option<f32> {
     match query {
         SearchQuery::MatchAll => Some(1.0),
-        SearchQuery::Term(term) => fuzzy_term_match(document, term).map(|_| 1.0),
+        SearchQuery::Term(term) => match fuzzy_term_match(document, term) {
+            Some(true) => Some(1.0),
+            _ => None,
+        },
         SearchQuery::Terms(terms) => matches_terms_query(document, terms).then_some(1.0),
         SearchQuery::Range(range) => matches_range_query(document, range).then_some(1.0),
         SearchQuery::Bool(bool_query) => {
@@ -5534,5 +5537,146 @@ mod tests {
     fn tokenize_empty_string() {
         let result = tokenize("");
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn levenshtein_distance_empty() {
+        assert_eq!(levenshtein_distance("", ""), 0);
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+    }
+
+    #[test]
+    fn levenshtein_distance_identical() {
+        assert_eq!(levenshtein_distance("hello", "hello"), 0);
+        assert_eq!(levenshtein_distance("", ""), 0);
+    }
+
+    #[test]
+    fn levenshtein_distance_one_edit() {
+        assert_eq!(levenshtein_distance("hello", "hallo"), 1); // substitution
+        assert_eq!(levenshtein_distance("hello", "hell"), 1);  // deletion
+        assert_eq!(levenshtein_distance("hello", "helloo"), 1); // insertion
+    }
+
+    #[test]
+    fn levenshtein_distance_case_sensitive() {
+        assert_eq!(levenshtein_distance("HELLO", "hello"), 5); // all chars different
+        assert_eq!(levenshtein_distance("Hello", "hello"), 1); // case only
+    }
+
+    #[test]
+    fn levenshtein_distance_complex() {
+        assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
+    }
+
+    #[test]
+    fn fuzzy_term_match_exact_no_fuzziness() {
+        use cloudsearch_common::TermQuery;
+        let doc = IndexDocument {
+            id: "1".to_string(),
+            source: serde_json::json!({"name": "admin"}),
+        };
+        // No fuzziness - exact match required
+        let term = TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("admin"),
+            fuzziness: None,
+        };
+        let result = fuzzy_term_match(&doc, &term);
+        assert_eq!(result, Some(true), "exact match should return Some(true), got {result:?}");
+
+        // Non-matching value returns None (no match, same as original behavior)
+        let term_miss = TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("xyz"),
+            fuzziness: None,
+        };
+        let result_miss = fuzzy_term_match(&doc, &term_miss);
+        assert_eq!(result_miss, None, "non-matching value should return None, got {result_miss:?}");
+
+        // Missing field returns None
+        let term_missing = TermQuery {
+            field: "nonexistent".to_string(),
+            value: serde_json::json!("admin"),
+            fuzziness: None,
+        };
+        let result_missing = fuzzy_term_match(&doc, &term_missing);
+        assert_eq!(result_missing, None, "missing field should return None, got {result_missing:?}");
+    }
+
+    #[test]
+    fn fuzzy_term_match_exact_with_fuzziness() {
+        use cloudsearch_common::{Fuzziness, TermQuery};
+        let doc = IndexDocument {
+            id: "1".to_string(),
+            source: serde_json::json!({"name": "admin"}),
+        };
+        // Fuzziness::Exact(0) is still exact match
+        let term = TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("admin"),
+            fuzziness: Some(Fuzziness::Exact(0)),
+        };
+        let result = fuzzy_term_match(&doc, &term);
+        assert_eq!(result, Some(true), "exact match with Exact(0) should return Some(true), got {result:?}");
+
+        // Different value with threshold 0 - no match
+        let term_miss = TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("xyz"),
+            fuzziness: Some(Fuzziness::Exact(0)),
+        };
+        let result_miss = fuzzy_term_match(&doc, &term_miss);
+        assert_eq!(result_miss, None, "threshold=0 fuzzy with string mismatch returns None, got {result_miss:?}");
+    }
+
+    #[test]
+    fn fuzzy_term_match_auto_mode() {
+        use cloudsearch_common::{Fuzziness, TermQuery};
+        let doc = IndexDocument {
+            id: "1".to_string(),
+            source: serde_json::json!({"name": "admin"}),
+        };
+        // "admin" (6 chars) → Auto threshold = 2, exact match passes
+        let term = TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("admin"),
+            fuzziness: Some(Fuzziness::Auto),
+        };
+        assert_eq!(fuzzy_term_match(&doc, &term), Some(true));
+
+        // Edit distance 1 (admim vs admin) → should match with threshold 2
+        let term_fuzzy = TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("admim"),
+            fuzziness: Some(Fuzziness::Auto),
+        };
+        assert_eq!(fuzzy_term_match(&doc, &term_fuzzy), Some(true));
+
+        // Edit distance 5 > threshold 2 → returns Some(false)
+        let term_no_match = TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("xyz"),
+            fuzziness: Some(Fuzziness::Auto),
+        };
+        let result_no_match = fuzzy_term_match(&doc, &term_no_match);
+        assert_eq!(result_no_match, Some(false), "edit distance 5 > threshold 2 should return Some(false), got {result_no_match:?}");
+    }
+
+    #[test]
+    fn fuzzy_term_match_numeric_stored_value() {
+        use cloudsearch_common::{Fuzziness, TermQuery};
+        let doc = IndexDocument {
+            id: "1".to_string(),
+            source: serde_json::json!({"count": 42}),
+        };
+        // Numeric stored value with fuzziness - should return None (fuzzy only works with strings)
+        let term = TermQuery {
+            field: "count".to_string(),
+            value: serde_json::json!(42),
+            fuzziness: Some(Fuzziness::Auto),
+        };
+        assert_eq!(fuzzy_term_match(&doc, &term), None); // fuzzy requires string
     }
 }
