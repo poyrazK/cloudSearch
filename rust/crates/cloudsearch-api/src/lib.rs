@@ -4472,4 +4472,84 @@ mod tests {
         let metrics_str = String::from_utf8(metrics_body.to_vec()).expect("metrics to string");
         assert!(metrics_str.contains("cloudsearch_merge_total"));
     }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_auto() {
+        use cloudsearch_common::Fuzziness;
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": "auto"
+        });
+        let result = parse_term_query(&json).expect("should parse");
+        assert_eq!(result.fuzziness, Some(Fuzziness::Auto));
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_auto_uppercase() {
+        use cloudsearch_common::Fuzziness;
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": "AUTO"
+        });
+        let result = parse_term_query(&json).expect("should parse");
+        assert_eq!(result.fuzziness, Some(Fuzziness::Auto));
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_exact_integer() {
+        use cloudsearch_common::Fuzziness;
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": 2
+        });
+        let result = parse_term_query(&json).expect("should parse");
+        assert_eq!(result.fuzziness, Some(Fuzziness::Exact(2)));
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_zero() {
+        use cloudsearch_common::Fuzziness;
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": 0
+        });
+        let result = parse_term_query(&json).expect("should parse");
+        assert_eq!(result.fuzziness, Some(Fuzziness::Exact(0)));
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_missing() {
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin"
+        });
+        let result = parse_term_query(&json).expect("should parse");
+        assert_eq!(result.fuzziness, None);
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_wrong_type_rejected() {
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": true
+        });
+        let result = parse_term_query(&json);
+        assert!(result.is_err(), "fuzziness: true should be rejected");
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_unknown_string_rejected() {
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": "unknown"
+        });
+        let result = parse_term_query(&json);
+        assert!(result.is_err(), "fuzziness: unknown should be rejected");
+    }
 }

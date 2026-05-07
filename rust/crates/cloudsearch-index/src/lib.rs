@@ -1885,6 +1885,9 @@ fn fuzzy_term_match(document: &IndexDocument, term: &TermQuery) -> Option<bool> 
     let query_value = term.value.as_str()?;
 
     match &term.fuzziness {
+        // The None branch is unreachable because we already checked is_none() above.
+        // If this guard logic ever changes, a compilation failure is preferable to a
+        // silent wrong-answer at runtime — so we use unreachable!() rather than None.
         None => unreachable!(),
         Some(Fuzziness::Auto) => {
             let threshold = match query_value.len() {
