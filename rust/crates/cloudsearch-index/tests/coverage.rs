@@ -3,7 +3,7 @@
 //! Run with: cargo test -p cloudsearch-index --test coverage
 
 use cloudsearch_common::{
-    BoolQuery, CreateIndexRequest, IndexDocument, IndexSettings, MatchQuery,
+    BoolQuery, CreateIndexRequest, Fuzziness, IndexDocument, IndexSettings, MatchQuery,
     SearchQuery, SearchRequest, SortOrder, SortSpec, TermQuery,
 };
 use cloudsearch_index::{IndexCatalog, MergePlan};
@@ -220,6 +220,45 @@ async fn validate_search_request_rejects_search_after_without_sort() {
     assert!(
         result.is_err(),
         "search_after without sort field should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn validate_search_request_rejects_fuzzy_with_search_after() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    let _metadata = catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let handle = catalog.open_index("test").await.expect("open index");
+
+    // Fuzzy query with search_after is invalid — fuzzy matching affects sort order
+    let request = SearchRequest {
+        query: Some(SearchQuery::Term(TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("admin"),
+            fuzziness: Some(Fuzziness::Auto),
+        })),
+        search_after: Some(vec![serde_json::json!(1.0), serde_json::json!("doc123")]),
+        sort: Some(SortSpec {
+            field: "name".to_string(),
+            order: SortOrder::Asc,
+        }),
+        ..Default::default()
+    };
+
+    let result = handle.validate_search_request(&request);
+    assert!(
+        result.is_err(),
+        "fuzzy query with search_after should be rejected"
     );
 }
 

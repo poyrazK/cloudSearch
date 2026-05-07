@@ -628,11 +628,30 @@ fn parse_query(value: &Value) -> Result<SearchQuery, ApiError> {
 }
 
 fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
+    use cloudsearch_common::Fuzziness;
+
     let object = value.as_object().ok_or_else(|| {
         ApiError(CloudSearchError::InvalidSearchRequest(
             "term query must be a JSON object".to_string(),
         ))
     })?;
+
+    // Extract optional fuzziness before consuming the object
+    let fuzziness = object.get("fuzziness").map(|fv| -> Result<Fuzziness, ApiError> {
+        match fv {
+            Value::String(s) if s.eq_ignore_ascii_case("auto") => Ok(Fuzziness::Auto),
+            Value::Number(n) if n.is_u64() => {
+                let n = usize::try_from(n.as_u64().unwrap())
+                    .map_err(|_| ApiError(CloudSearchError::InvalidSearchRequest(
+                        "fuzziness value is too large".to_string(),
+                    )))?;
+                Ok(Fuzziness::Exact(n))
+            }
+            _ => Err(ApiError(CloudSearchError::InvalidSearchRequest(
+                "fuzziness must be 'auto' or a non-negative integer".to_string(),
+            ))),
+        }
+    }).transpose()?;
 
     if object.contains_key("field") || object.contains_key("value") {
         let field = object.get("field").and_then(Value::as_str).ok_or_else(|| {
@@ -649,7 +668,7 @@ fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
         return Ok(TermQuery {
             field: field.to_string(),
             value,
-            fuzziness: None,
+            fuzziness,
         });
     }
 
@@ -663,7 +682,7 @@ fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
     Ok(TermQuery {
         field: field.clone(),
         value: raw_value.clone(),
-        fuzziness: None,
+        fuzziness,
     })
 }
 

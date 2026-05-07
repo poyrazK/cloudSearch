@@ -4,7 +4,7 @@
 //! into the existing `SearchQuery` AST.
 
 use cloudsearch_common::{
-    BoolQuery, CloudSearchError, RangeQuery, SearchQuery, TermQuery, WildcardQuery,
+    BoolQuery, CloudSearchError, Fuzziness, RangeQuery, SearchQuery, TermQuery, WildcardQuery,
 };
 
 /// Parse a query string into a `SearchQuery`.
@@ -243,6 +243,30 @@ impl<'a> Parser<'a> {
                 gt: None,
                 lte: Some(hi_num.clone()),
                 lt: None,
+            }));
+        }
+
+        // Fuzziness suffix: value~auto or value~N
+        if let Some(with_tilde) = value.strip_suffix('~') {
+            let (base_value, fuzz_suffix) = with_tilde.split_once('~').unwrap_or((with_tilde, ""));
+            let fuzziness = if fuzz_suffix.is_empty() {
+                return Err(CloudSearchError::InvalidSearchRequest(
+                    "fuzziness suffix '~' must be followed by 'auto' or a number".to_string(),
+                ));
+            } else if fuzz_suffix.eq_ignore_ascii_case("auto") {
+                Some(Fuzziness::Auto)
+            } else if let Ok(dist) = fuzz_suffix.parse::<usize>() {
+                Some(Fuzziness::Exact(dist))
+            } else {
+                return Err(CloudSearchError::InvalidSearchRequest(
+                    format!("invalid fuzziness suffix '~{fuzz_suffix}' — use '~auto' or '~N'"),
+                ));
+            };
+            let json_value = Self::parse_value(base_value);
+            return Ok(SearchQuery::Term(TermQuery {
+                field: field.to_string(),
+                value: json_value,
+                fuzziness,
             }));
         }
 

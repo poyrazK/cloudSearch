@@ -289,6 +289,7 @@ pub struct PhraseQuery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum Fuzziness {
     /// Automatically choose edit distance: 0 for 1-2 chars, 1 for 3-5 chars, 2 for 6+ chars.
     Auto,

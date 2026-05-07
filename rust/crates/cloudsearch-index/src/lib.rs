@@ -921,6 +921,14 @@ impl IndexHandle {
     pub fn validate_search_request(&self, request: &SearchRequest) -> Result<()> {
         if let Some(query) = &request.query {
             self.validate_query(query)?;
+            // search_after + fuzzy query is invalid because fuzzy matching can change
+            // which documents match, affecting sort order and making cursors unreliable.
+            if request.search_after.is_some() && self.query_has_fuzzy_term(query) {
+                return Err(CloudSearchError::InvalidSearchRequest(
+                    "search_after is not supported with fuzzy queries because match behavior affects sort order"
+                        .to_string(),
+                ));
+            }
         }
 
         if let Some(sort) = &request.sort
@@ -1589,6 +1597,23 @@ impl IndexHandle {
         }
     }
 
+    #[allow(clippy::self_only_used_in_recursion)]
+    fn query_has_fuzzy_term(&self, query: &SearchQuery) -> bool {
+        match query {
+            SearchQuery::Term(term) => term.fuzziness.is_some(),
+            SearchQuery::Bool(boolean) => {
+                boolean
+                    .must
+                    .iter()
+                    .chain(boolean.should.iter())
+                    .chain(boolean.filter.iter())
+                    .chain(boolean.must_not.iter())
+                    .any(|q| self.query_has_fuzzy_term(q))
+            }
+            _ => false,
+        }
+    }
+
     fn ensure_scalar_field(&self, field: &str, context: &str) -> Result<()> {
         if let Some(mapping) = self.metadata.mappings.get(field)
             && matches!(mapping.field_type, FieldType::Object)
@@ -1836,8 +1861,17 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Returns true if the stored value fuzzy-matches the query term.
-/// When fuzziness is None, performs exact match.
+/// Returns whether the stored value fuzzy-matches the query term.
+///
+/// # Return Value Semantics
+/// - `None` — field is absent from the document, or stored value is not a string.
+///   Cannot participate in fuzzy matching.
+/// - `Some(true)` — field is a string and matches within the fuzziness threshold.
+/// - `Some(false)` — field is a string but edit distance exceeds the threshold.
+///   The document does not match.
+///
+/// When `fuzziness` is `None`, performs exact comparison (handles bool, number,
+/// string uniformly).
 fn fuzzy_term_match(document: &IndexDocument, term: &TermQuery) -> Option<bool> {
     let stored = document.source.get(&term.field)?;
 
