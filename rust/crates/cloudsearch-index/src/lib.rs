@@ -789,9 +789,13 @@ impl IndexHandle {
         let n_docs = self.searchable_documents.len().max(1);
 
         // Build IDF map: for each query term, compute IDF = log((N-df+0.5)/(df+0.5))
-        // We sum DF across all segment readers to get total document frequency
-        let mut idf_map: std::collections::BTreeMap<String, f32> = std::collections::BTreeMap::new();
-        let query_terms = extract_query_terms(query, "");
+        // We sum DF across all segment readers to get total document frequency.
+        // Deduplicate terms via BTreeSet to avoid redundant IDF lookups.
+        let target_field = extract_target_field(query);
+        let mut idf_map: std::collections::BTreeMap<String, f32> =
+            std::collections::BTreeMap::new();
+        let query_terms: std::collections::BTreeSet<String> =
+            extract_query_terms(query, "").into_iter().collect();
         for term in &query_terms {
             let mut total_df = 0usize;
             for reader in &self.positions_readers {
@@ -802,8 +806,8 @@ impl IndexHandle {
             let idf = bm25_idf(total_df, n_docs);
             idf_map.insert(term.clone(), idf);
         }
-        let avg_field_len = compute_avg_field_length(&self.searchable_documents, "content")
-            .max(1.0);
+        let avg_field_len =
+            compute_avg_field_length(&self.searchable_documents, &target_field).max(1.0);
 
         let mut scored: Vec<(f32, &IndexDocument)> = self
             .searchable_documents
@@ -1748,6 +1752,17 @@ fn bm25_idf(df: usize, n_docs: usize) -> f32 {
     let n = n_docs as f32;
     let df = df as f32;
     ((n - df + 0.5) / (df + 0.5)).ln().max(0.0)
+}
+
+/// Extract the target field name from a SearchQuery for BM25 field-length normalization.
+/// Defaults to "content" for queries without a direct field mapping (MatchAll, Bool, Range, etc.).
+fn extract_target_field(query: &SearchQuery) -> String {
+    match query {
+        SearchQuery::Match(mq) => mq.field.clone(),
+        SearchQuery::Phrase(pq) => pq.field.clone(),
+        SearchQuery::Term(tq) => tq.field.clone(),
+        _ => "content".to_string(),
+    }
 }
 
 /// Collect all unique query terms from a SearchQuery (for match/phrase/term queries).
