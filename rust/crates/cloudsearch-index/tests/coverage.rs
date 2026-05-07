@@ -3,8 +3,8 @@
 //! Run with: cargo test -p cloudsearch-index --test coverage
 
 use cloudsearch_common::{
-    BoolQuery, CreateIndexRequest, IndexDocument, IndexSettings, MatchQuery, SearchQuery,
-    SearchRequest, SortOrder, SortSpec, TermQuery,
+    BoolQuery, CreateIndexRequest, Fuzziness, IndexDocument, IndexSettings, MatchQuery,
+    SearchQuery, SearchRequest, SortOrder, SortSpec, TermQuery,
 };
 use cloudsearch_index::{IndexCatalog, MergePlan};
 use cloudsearch_storage::SegmentMeta;
@@ -111,6 +111,7 @@ async fn validate_search_request_rejects_nested_bool_with_object_field() {
                 must: vec![SearchQuery::Term(TermQuery {
                     field: "meta".to_string(),
                     value: serde_json::json!("value"),
+                    fuzziness: None,
                 })],
                 should: vec![],
                 filter: vec![],
@@ -219,6 +220,45 @@ async fn validate_search_request_rejects_search_after_without_sort() {
     assert!(
         result.is_err(),
         "search_after without sort field should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn validate_search_request_rejects_fuzzy_with_search_after() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    let _metadata = catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let handle = catalog.open_index("test").await.expect("open index");
+
+    // Fuzzy query with search_after is invalid — fuzzy matching affects sort order
+    let request = SearchRequest {
+        query: Some(SearchQuery::Term(TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("admin"),
+            fuzziness: Some(Fuzziness::Auto),
+        })),
+        search_after: Some(vec![serde_json::json!(1.0), serde_json::json!("doc123")]),
+        sort: Some(SortSpec {
+            field: "name".to_string(),
+            order: SortOrder::Asc,
+        }),
+        ..Default::default()
+    };
+
+    let result = handle.validate_search_request(&request);
+    assert!(
+        result.is_err(),
+        "fuzzy query with search_after should be rejected"
     );
 }
 
@@ -389,5 +429,130 @@ async fn highlight_positions_empty_field() {
     assert!(
         result.hits.hits.is_empty() || result.hits.hits.iter().all(|h| h.highlight.is_none()),
         "no highlight for empty text field"
+    );
+}
+
+#[tokio::test]
+async fn fuzzy_match_exact_edit_distance_within_threshold() {
+    // Index doc with "name": "admin", search with "admim" (edit distance 1) and fuzziness=1
+    // Should match since edit distance <= threshold
+    use cloudsearch_common::{Fuzziness, TermQuery};
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    handle
+        .index_document(doc("1", serde_json::json!({"name": "admin"})))
+        .await
+        .expect("index");
+    handle.refresh().await.expect("refresh");
+
+    // Edit distance 1 — should match with fuzziness=1
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::Term(TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("admim"),
+            fuzziness: Some(Fuzziness::Exact(1)),
+        })),
+        ..Default::default()
+    });
+    assert_eq!(
+        result.hits.total, 1,
+        "edit distance 1 should match with fuzziness=1"
+    );
+    assert_eq!(result.hits.hits[0].id, "1");
+}
+
+#[tokio::test]
+async fn fuzzy_match_no_match_when_exceeding_threshold() {
+    // Index doc with "name": "admin", search with "xyz" (edit distance 5) and fuzziness=1
+    // Should NOT match since edit distance > threshold
+    use cloudsearch_common::{Fuzziness, TermQuery};
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    handle
+        .index_document(doc("1", serde_json::json!({"name": "admin"})))
+        .await
+        .expect("index");
+    handle.refresh().await.expect("refresh");
+
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::Term(TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("xyz"),
+            fuzziness: Some(Fuzziness::Exact(1)),
+        })),
+        ..Default::default()
+    });
+    assert_eq!(
+        result.hits.total, 0,
+        "edit distance 5 should NOT match with fuzziness=1"
+    );
+}
+
+#[tokio::test]
+async fn fuzzy_match_auto_mode_threshold_2_for_long_terms() {
+    // Index doc with "name": "admin" (6 chars), use Auto fuzziness
+    // Auto threshold for 6+ chars is 2, so "admim" (edit distance 1) should match
+    use cloudsearch_common::{Fuzziness, TermQuery};
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    handle
+        .index_document(doc("1", serde_json::json!({"name": "admin"})))
+        .await
+        .expect("index");
+    handle.refresh().await.expect("refresh");
+
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::Term(TermQuery {
+            field: "name".to_string(),
+            value: serde_json::json!("admim"),
+            fuzziness: Some(Fuzziness::Auto),
+        })),
+        ..Default::default()
+    });
+    assert_eq!(
+        result.hits.total, 1,
+        "Auto fuzziness (threshold=2) should match edit distance 1"
     );
 }

@@ -4,7 +4,7 @@
 //! into the existing `SearchQuery` AST.
 
 use cloudsearch_common::{
-    BoolQuery, CloudSearchError, RangeQuery, SearchQuery, TermQuery, WildcardQuery,
+    BoolQuery, CloudSearchError, Fuzziness, RangeQuery, SearchQuery, TermQuery, WildcardQuery,
 };
 
 /// Parse a query string into a `SearchQuery`.
@@ -157,6 +157,7 @@ impl<'a> Parser<'a> {
             Ok(SearchQuery::Term(TermQuery {
                 field: "tag".to_string(),
                 value: serde_json::Value::String(word.to_string()),
+                fuzziness: None,
             }))
         }
     }
@@ -245,6 +246,34 @@ impl<'a> Parser<'a> {
             }));
         }
 
+        // Fuzziness suffix: value~auto or value~N
+        // NOTE: This fires before wildcard detection (* and ?) below. A value like
+        // "admin~auto*" will be parsed as a fuzziness query with suffix "auto*" (which
+        // fails validation) rather than a wildcard query. This is unlikely to affect real
+        // queries but is a known limitation of the current parse order.
+        if let Some(with_tilde) = value.strip_suffix('~') {
+            let (base_value, fuzz_suffix) = with_tilde.split_once('~').unwrap_or((with_tilde, ""));
+            let fuzziness = if fuzz_suffix.is_empty() {
+                return Err(CloudSearchError::InvalidSearchRequest(
+                    "fuzziness suffix '~' must be followed by 'auto' or a number".to_string(),
+                ));
+            } else if fuzz_suffix.eq_ignore_ascii_case("auto") {
+                Some(Fuzziness::Auto)
+            } else if let Ok(dist) = fuzz_suffix.parse::<usize>() {
+                Some(Fuzziness::Exact(dist))
+            } else {
+                return Err(CloudSearchError::InvalidSearchRequest(format!(
+                    "invalid fuzziness suffix '~{fuzz_suffix}' — use '~auto' or '~N'"
+                )));
+            };
+            let json_value = Self::parse_value(base_value);
+            return Ok(SearchQuery::Term(TermQuery {
+                field: field.to_string(),
+                value: json_value,
+                fuzziness,
+            }));
+        }
+
         // Wildcard detection: contains * or ?
         if value.contains('*') || value.contains('?') {
             return Ok(SearchQuery::Wildcard(WildcardQuery {
@@ -258,6 +287,7 @@ impl<'a> Parser<'a> {
         Ok(SearchQuery::Term(TermQuery {
             field: field.to_string(),
             value: json_value,
+            fuzziness: None,
         }))
     }
 
@@ -597,7 +627,8 @@ mod tests {
             result,
             SearchQuery::Term(TermQuery {
                 field: "status".to_string(),
-                value: serde_json::json!("active")
+                value: serde_json::json!("active"),
+                fuzziness: None,
             })
         );
     }
@@ -609,7 +640,8 @@ mod tests {
             result,
             SearchQuery::Term(TermQuery {
                 field: "count".to_string(),
-                value: serde_json::json!(42)
+                value: serde_json::json!(42),
+                fuzziness: None,
             })
         );
     }
@@ -672,7 +704,8 @@ mod tests {
             result,
             SearchQuery::Term(TermQuery {
                 field: "message".to_string(),
-                value: serde_json::json!("hello world")
+                value: serde_json::json!("hello world"),
+                fuzziness: None,
             })
         );
     }

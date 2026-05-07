@@ -628,11 +628,34 @@ fn parse_query(value: &Value) -> Result<SearchQuery, ApiError> {
 }
 
 fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
+    use cloudsearch_common::Fuzziness;
+
     let object = value.as_object().ok_or_else(|| {
         ApiError(CloudSearchError::InvalidSearchRequest(
             "term query must be a JSON object".to_string(),
         ))
     })?;
+
+    // Extract optional fuzziness before consuming the object
+    let fuzziness = object
+        .get("fuzziness")
+        .map(|fv| -> Result<Fuzziness, ApiError> {
+            match fv {
+                Value::String(s) if s.eq_ignore_ascii_case("auto") => Ok(Fuzziness::Auto),
+                Value::Number(n) if n.is_u64() => {
+                    let n = usize::try_from(n.as_u64().unwrap()).map_err(|_| {
+                        ApiError(CloudSearchError::InvalidSearchRequest(
+                            "fuzziness value is too large".to_string(),
+                        ))
+                    })?;
+                    Ok(Fuzziness::Exact(n))
+                }
+                _ => Err(ApiError(CloudSearchError::InvalidSearchRequest(
+                    "fuzziness must be 'auto' or a non-negative integer".to_string(),
+                ))),
+            }
+        })
+        .transpose()?;
 
     if object.contains_key("field") || object.contains_key("value") {
         let field = object.get("field").and_then(Value::as_str).ok_or_else(|| {
@@ -649,6 +672,7 @@ fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
         return Ok(TermQuery {
             field: field.to_string(),
             value,
+            fuzziness,
         });
     }
 
@@ -662,6 +686,7 @@ fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
     Ok(TermQuery {
         field: field.clone(),
         value: raw_value.clone(),
+        fuzziness,
     })
 }
 
@@ -1982,6 +2007,7 @@ mod tests {
                             query: Some(SearchQuery::Term(TermQuery {
                                 field: "service".to_string(),
                                 value: serde_json::json!("billing"),
+                                fuzziness: None,
                             })),
                             ..Default::default()
                         })
@@ -2027,6 +2053,7 @@ mod tests {
                             query: Some(SearchQuery::Term(TermQuery {
                                 field: "service".to_string(),
                                 value: serde_json::json!("billing"),
+                                fuzziness: None,
                             })),
                             ..Default::default()
                         })
@@ -2060,6 +2087,7 @@ mod tests {
                                 filter: vec![SearchQuery::Term(TermQuery {
                                     field: "level".to_string(),
                                     value: serde_json::json!("info"),
+                                    fuzziness: None,
                                 })],
                                 ..Default::default()
                             })),
@@ -4083,6 +4111,7 @@ mod tests {
                             query: Some(SearchQuery::Term(TermQuery {
                                 field: "level".to_string(),
                                 value: serde_json::json!("info"),
+                                fuzziness: None,
                             })),
                             aggs: Some(std::collections::BTreeMap::from([
                                 (
@@ -4446,5 +4475,85 @@ mod tests {
             .to_bytes();
         let metrics_str = String::from_utf8(metrics_body.to_vec()).expect("metrics to string");
         assert!(metrics_str.contains("cloudsearch_merge_total"));
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_auto() {
+        use cloudsearch_common::Fuzziness;
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": "auto"
+        });
+        let result = parse_term_query(&json).expect("should parse");
+        assert_eq!(result.fuzziness, Some(Fuzziness::Auto));
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_auto_uppercase() {
+        use cloudsearch_common::Fuzziness;
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": "AUTO"
+        });
+        let result = parse_term_query(&json).expect("should parse");
+        assert_eq!(result.fuzziness, Some(Fuzziness::Auto));
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_exact_integer() {
+        use cloudsearch_common::Fuzziness;
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": 2
+        });
+        let result = parse_term_query(&json).expect("should parse");
+        assert_eq!(result.fuzziness, Some(Fuzziness::Exact(2)));
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_zero() {
+        use cloudsearch_common::Fuzziness;
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": 0
+        });
+        let result = parse_term_query(&json).expect("should parse");
+        assert_eq!(result.fuzziness, Some(Fuzziness::Exact(0)));
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_missing() {
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin"
+        });
+        let result = parse_term_query(&json).expect("should parse");
+        assert_eq!(result.fuzziness, None);
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_wrong_type_rejected() {
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": true
+        });
+        let result = parse_term_query(&json);
+        assert!(result.is_err(), "fuzziness: true should be rejected");
+    }
+
+    #[test]
+    fn parse_term_query_with_fuzziness_unknown_string_rejected() {
+        let json = serde_json::json!({
+            "field": "name",
+            "value": "admin",
+            "fuzziness": "unknown"
+        });
+        let result = parse_term_query(&json);
+        assert!(result.is_err(), "fuzziness: unknown should be rejected");
     }
 }

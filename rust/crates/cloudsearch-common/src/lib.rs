@@ -289,9 +289,20 @@ pub struct PhraseQuery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Fuzziness {
+    /// Automatically choose edit distance: 0 for 1-2 chars, 1 for 3-5 chars, 2 for 6+ chars.
+    Auto,
+    /// Explicit edit distance threshold.
+    Exact(usize),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TermQuery {
     pub field: String,
     pub value: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fuzziness: Option<Fuzziness>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
