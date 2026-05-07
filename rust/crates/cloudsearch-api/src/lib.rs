@@ -637,21 +637,25 @@ fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
     })?;
 
     // Extract optional fuzziness before consuming the object
-    let fuzziness = object.get("fuzziness").map(|fv| -> Result<Fuzziness, ApiError> {
-        match fv {
-            Value::String(s) if s.eq_ignore_ascii_case("auto") => Ok(Fuzziness::Auto),
-            Value::Number(n) if n.is_u64() => {
-                let n = usize::try_from(n.as_u64().unwrap())
-                    .map_err(|_| ApiError(CloudSearchError::InvalidSearchRequest(
-                        "fuzziness value is too large".to_string(),
-                    )))?;
-                Ok(Fuzziness::Exact(n))
+    let fuzziness = object
+        .get("fuzziness")
+        .map(|fv| -> Result<Fuzziness, ApiError> {
+            match fv {
+                Value::String(s) if s.eq_ignore_ascii_case("auto") => Ok(Fuzziness::Auto),
+                Value::Number(n) if n.is_u64() => {
+                    let n = usize::try_from(n.as_u64().unwrap()).map_err(|_| {
+                        ApiError(CloudSearchError::InvalidSearchRequest(
+                            "fuzziness value is too large".to_string(),
+                        ))
+                    })?;
+                    Ok(Fuzziness::Exact(n))
+                }
+                _ => Err(ApiError(CloudSearchError::InvalidSearchRequest(
+                    "fuzziness must be 'auto' or a non-negative integer".to_string(),
+                ))),
             }
-            _ => Err(ApiError(CloudSearchError::InvalidSearchRequest(
-                "fuzziness must be 'auto' or a non-negative integer".to_string(),
-            ))),
-        }
-    }).transpose()?;
+        })
+        .transpose()?;
 
     if object.contains_key("field") || object.contains_key("value") {
         let field = object.get("field").and_then(Value::as_str).ok_or_else(|| {

@@ -262,9 +262,9 @@ impl<'a> Parser<'a> {
             } else if let Ok(dist) = fuzz_suffix.parse::<usize>() {
                 Some(Fuzziness::Exact(dist))
             } else {
-                return Err(CloudSearchError::InvalidSearchRequest(
-                    format!("invalid fuzziness suffix '~{fuzz_suffix}' — use '~auto' or '~N'"),
-                ));
+                return Err(CloudSearchError::InvalidSearchRequest(format!(
+                    "invalid fuzziness suffix '~{fuzz_suffix}' — use '~auto' or '~N'"
+                )));
             };
             let json_value = Self::parse_value(base_value);
             return Ok(SearchQuery::Term(TermQuery {

@@ -1601,15 +1601,13 @@ impl IndexHandle {
     fn query_has_fuzzy_term(&self, query: &SearchQuery) -> bool {
         match query {
             SearchQuery::Term(term) => term.fuzziness.is_some(),
-            SearchQuery::Bool(boolean) => {
-                boolean
-                    .must
-                    .iter()
-                    .chain(boolean.should.iter())
-                    .chain(boolean.filter.iter())
-                    .chain(boolean.must_not.iter())
-                    .any(|q| self.query_has_fuzzy_term(q))
-            }
+            SearchQuery::Bool(boolean) => boolean
+                .must
+                .iter()
+                .chain(boolean.should.iter())
+                .chain(boolean.filter.iter())
+                .chain(boolean.must_not.iter())
+                .any(|q| self.query_has_fuzzy_term(q)),
             _ => false,
         }
     }
@@ -5592,7 +5590,7 @@ mod tests {
     #[test]
     fn levenshtein_distance_one_edit() {
         assert_eq!(levenshtein_distance("hello", "hallo"), 1); // substitution
-        assert_eq!(levenshtein_distance("hello", "hell"), 1);  // deletion
+        assert_eq!(levenshtein_distance("hello", "hell"), 1); // deletion
         assert_eq!(levenshtein_distance("hello", "helloo"), 1); // insertion
     }
 
@@ -5621,7 +5619,11 @@ mod tests {
             fuzziness: None,
         };
         let result = fuzzy_term_match(&doc, &term);
-        assert_eq!(result, Some(true), "exact match should return Some(true), got {result:?}");
+        assert_eq!(
+            result,
+            Some(true),
+            "exact match should return Some(true), got {result:?}"
+        );
 
         // Non-matching value returns None (no match, same as original behavior)
         let term_miss = TermQuery {
@@ -5630,7 +5632,10 @@ mod tests {
             fuzziness: None,
         };
         let result_miss = fuzzy_term_match(&doc, &term_miss);
-        assert_eq!(result_miss, None, "non-matching value should return None, got {result_miss:?}");
+        assert_eq!(
+            result_miss, None,
+            "non-matching value should return None, got {result_miss:?}"
+        );
 
         // Missing field returns None
         let term_missing = TermQuery {
@@ -5639,7 +5644,10 @@ mod tests {
             fuzziness: None,
         };
         let result_missing = fuzzy_term_match(&doc, &term_missing);
-        assert_eq!(result_missing, None, "missing field should return None, got {result_missing:?}");
+        assert_eq!(
+            result_missing, None,
+            "missing field should return None, got {result_missing:?}"
+        );
     }
 
     #[test]
@@ -5656,7 +5664,11 @@ mod tests {
             fuzziness: Some(Fuzziness::Exact(0)),
         };
         let result = fuzzy_term_match(&doc, &term);
-        assert_eq!(result, Some(true), "exact match with Exact(0) should return Some(true), got {result:?}");
+        assert_eq!(
+            result,
+            Some(true),
+            "exact match with Exact(0) should return Some(true), got {result:?}"
+        );
 
         // Different value with threshold 0 - no match
         let term_miss = TermQuery {
@@ -5665,7 +5677,10 @@ mod tests {
             fuzziness: Some(Fuzziness::Exact(0)),
         };
         let result_miss = fuzzy_term_match(&doc, &term_miss);
-        assert_eq!(result_miss, None, "threshold=0 fuzzy with string mismatch returns None, got {result_miss:?}");
+        assert_eq!(
+            result_miss, None,
+            "threshold=0 fuzzy with string mismatch returns None, got {result_miss:?}"
+        );
     }
 
     #[test]
@@ -5698,7 +5713,11 @@ mod tests {
             fuzziness: Some(Fuzziness::Auto),
         };
         let result_no_match = fuzzy_term_match(&doc, &term_no_match);
-        assert_eq!(result_no_match, Some(false), "edit distance 5 > threshold 2 should return Some(false), got {result_no_match:?}");
+        assert_eq!(
+            result_no_match,
+            Some(false),
+            "edit distance 5 > threshold 2 should return Some(false), got {result_no_match:?}"
+        );
     }
 
     #[test]

@@ -468,7 +468,10 @@ async fn fuzzy_match_exact_edit_distance_within_threshold() {
         })),
         ..Default::default()
     });
-    assert_eq!(result.hits.total, 1, "edit distance 1 should match with fuzziness=1");
+    assert_eq!(
+        result.hits.total, 1,
+        "edit distance 1 should match with fuzziness=1"
+    );
     assert_eq!(result.hits.hits[0].id, "1");
 }
 
@@ -507,7 +510,10 @@ async fn fuzzy_match_no_match_when_exceeding_threshold() {
         })),
         ..Default::default()
     });
-    assert_eq!(result.hits.total, 0, "edit distance 5 should NOT match with fuzziness=1");
+    assert_eq!(
+        result.hits.total, 0,
+        "edit distance 5 should NOT match with fuzziness=1"
+    );
 }
 
 #[tokio::test]
@@ -545,5 +551,8 @@ async fn fuzzy_match_auto_mode_threshold_2_for_long_terms() {
         })),
         ..Default::default()
     });
-    assert_eq!(result.hits.total, 1, "Auto fuzziness (threshold=2) should match edit distance 1");
+    assert_eq!(
+        result.hits.total, 1,
+        "Auto fuzziness (threshold=2) should match edit distance 1"
+    );
 }
