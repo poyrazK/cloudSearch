@@ -791,7 +791,7 @@ impl IndexHandle {
         // Build IDF map: for each query term, compute IDF = log((N-df+0.5)/(df+0.5))
         // We sum DF across all segment readers to get total document frequency.
         // Deduplicate terms via BTreeSet to avoid redundant IDF lookups.
-        let target_field = extract_target_field(query);
+        let _target_field = extract_target_field(query);
         let mut idf_map: std::collections::BTreeMap<String, f32> =
             std::collections::BTreeMap::new();
         let query_terms: std::collections::BTreeSet<String> =
@@ -806,9 +806,24 @@ impl IndexHandle {
             let idf = bm25_idf(total_df, n_docs);
             idf_map.insert(term.clone(), idf);
         }
-        let avg_field_len =
-            compute_avg_field_length(&self.searchable_documents, &target_field).max(1.0);
-        let bm25_ctx = Bm25Context::new(idf_map, avg_field_len, k1, b);
+        // Collect all field names from all documents to compute per-field avg lengths
+        let mut all_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for doc in self.searchable_documents.values() {
+            if let Some(obj) = doc.source.as_object() {
+                for k in obj.keys() {
+                    all_fields.insert(k.to_string());
+                }
+            }
+        }
+        let mut avg_field_lens: std::collections::BTreeMap<String, f32> =
+            std::collections::BTreeMap::new();
+        for field in &all_fields {
+            avg_field_lens.insert(
+                field.clone(),
+                compute_avg_field_length(&self.searchable_documents, field).max(1.0),
+            );
+        }
+        let bm25_ctx = Bm25Context::new(idf_map, avg_field_lens, k1, b);
 
         let mut scored: Vec<(f32, &IndexDocument)> = self
             .searchable_documents
@@ -1749,8 +1764,8 @@ fn infer_field_type(field: &str, value: &serde_json::Value) -> Result<Option<Fie
 struct Bm25Context {
     /// Precomputed IDF per term: term → IDF score
     idf_map: std::collections::BTreeMap<String, f32>,
-    /// Precomputed average field length across all documents for the target field
-    avg_field_len: f32,
+    /// Precomputed average field length per field: field name → avg length
+    avg_field_lens: std::collections::BTreeMap<String, f32>,
     /// BM25 term frequency saturation parameter (default 1.2)
     k1: f32,
     /// BM25 field length normalization parameter (default 0.75)
@@ -1760,24 +1775,30 @@ struct Bm25Context {
 impl Bm25Context {
     fn new(
         idf_map: std::collections::BTreeMap<String, f32>,
-        avg_field_len: f32,
+        avg_field_lens: std::collections::BTreeMap<String, f32>,
         k1: f32,
         b: f32,
     ) -> Self {
         Self {
             idf_map,
-            avg_field_len,
+            avg_field_lens,
             k1,
             b,
         }
     }
 
-    /// Score a single term using the BM25 formula.
-    fn bm25_term_score(&self, tf: u32, doc_len: usize, idf: f32) -> f32 {
+    /// Get the average field length for a specific field, defaulting to 1.0.
+    fn get_avg_field_len(&self, field: &str) -> f32 {
+        self.avg_field_lens.get(field).copied().unwrap_or(1.0)
+    }
+
+    /// Score a single term using the BM25 formula for a specific field.
+    fn bm25_term_score(&self, tf: u32, doc_len: usize, idf: f32, field: &str) -> f32 {
         let tf = tf as f32;
         let doc_len = doc_len as f32;
+        let avg_len = self.get_avg_field_len(field);
         let numerator = tf * (self.k1 + 1.0);
-        let denominator = tf + self.k1 * (1.0 - self.b + self.b * doc_len / self.avg_field_len.max(1.0));
+        let denominator = tf + self.k1 * (1.0 - self.b + self.b * doc_len / avg_len.max(1.0));
         idf * numerator / denominator
     }
 }
@@ -1935,7 +1956,7 @@ fn score_match_query(
 
         // Use precomputed IDF if available; missing terms contribute 0 (never seen in corpus)
         let idf = bm25_ctx.idf_map.get(token).copied().unwrap_or(0.0);
-        let term_score = bm25_ctx.bm25_term_score(tf, doc_len, idf);
+        let term_score = bm25_ctx.bm25_term_score(tf, doc_len, idf, &query.field);
         total_score += term_score;
         matched += 1;
     }
@@ -1998,7 +2019,7 @@ fn score_term_query(
     let field_tokens = tokenize(stored_str);
     let doc_len = field_tokens.len();
 
-    Some(bm25_ctx.bm25_term_score(tf, doc_len, idf))
+    Some(bm25_ctx.bm25_term_score(tf, doc_len, idf, &term.field))
 }
 
 /// Score a phrase query by checking if query terms appear consecutively in document text.
@@ -2102,7 +2123,7 @@ fn score_phrase_query(
                             continue;
                         }
                         let idf = bm25_ctx.idf_map.get(term).copied().unwrap_or(0.0);
-                        term_score_sum += bm25_ctx.bm25_term_score(tf, doc_len, idf);
+                        term_score_sum += bm25_ctx.bm25_term_score(tf, doc_len, idf, &phrase.field);
                     }
                     // Penalize large gaps slightly
                     let gap_factor = if max_gap <= 10 {
