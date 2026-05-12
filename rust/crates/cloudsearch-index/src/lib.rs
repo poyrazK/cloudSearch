@@ -1804,10 +1804,12 @@ impl Bm25Context {
 }
 
 /// BM25 IDF formula: log((N - df + 0.5) / (df + 0.5)).
-/// Returns 0 for df > N (shouldn't happen in practice).
+/// Returns 0 when df > N (shouldn't happen in practice).
+/// When df = 0 (term not in corpus), returns a default of 1.0 instead of
+/// computing log(2N+1) which would overestimate rare-term scores.
 fn bm25_idf(df: usize, n_docs: usize) -> f32 {
     if df == 0 {
-        return 0.0;
+        return 1.0;
     }
     let n = n_docs as f32;
     let df = df as f32;
@@ -1848,6 +1850,12 @@ fn extract_query_terms(query: &SearchQuery, target_field: &str) -> Vec<String> {
                 terms.extend(extract_query_terms(q, target_field));
             }
             terms
+        }
+        SearchQuery::Terms(tq) => {
+            tq.values
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_lowercase()))
+                .collect()
         }
         _ => vec![],
     }
@@ -1894,7 +1902,7 @@ fn score_query(
                 score_term_query(document, term, doc_id, positions_readers, bm25_ctx)
             }
         }
-        SearchQuery::Terms(terms) => matches_terms_query(document, terms).then_some(1.0),
+        SearchQuery::Terms(terms) => score_terms_query(document, terms, doc_id, positions_readers, bm25_ctx),
         SearchQuery::Range(range) => matches_range_query(document, range).then_some(1.0),
         SearchQuery::Bool(bool_query) => {
             score_bool_query(document, bool_query, doc_id, positions_readers, bm25_ctx)
@@ -1954,8 +1962,8 @@ fn score_match_query(
             }
         }
 
-        // Use precomputed IDF if available; missing terms contribute 0 (never seen in corpus)
-        let idf = bm25_ctx.idf_map.get(token).copied().unwrap_or(0.0);
+        // Use precomputed IDF if available; missing terms use default of 1.0
+        let idf = bm25_ctx.idf_map.get(token).copied().unwrap_or(1.0);
         let term_score = bm25_ctx.bm25_term_score(tf, doc_len, idf, &query.field);
         total_score += term_score;
         matched += 1;
@@ -2012,14 +2020,72 @@ fn score_term_query(
         return None;
     }
 
-    // Look up IDF; missing terms contribute 0
-    let idf = bm25_ctx.idf_map.get(&term_key).copied().unwrap_or(0.0);
+    // Look up IDF; missing terms use a default of 1.0 (moderately rare term)
+    let idf = bm25_ctx.idf_map.get(&term_key).copied().unwrap_or(1.0);
 
     // Compute doc_len
     let field_tokens = tokenize(stored_str);
     let doc_len = field_tokens.len();
 
     Some(bm25_ctx.bm25_term_score(tf, doc_len, idf, &term.field))
+}
+
+/// Score a terms query (OR over multiple values) using BM25.
+/// Returns the max BM25 score across all matching term values.
+fn score_terms_query(
+    document: &IndexDocument,
+    terms: &TermsQuery,
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    let mut max_score = 0.0f32;
+
+    // Look up stored field value once
+    let stored = document.source.get(&terms.field)?;
+
+    for term_value in &terms.values {
+        // Handle non-string term values (numbers, booleans): use value equality
+        let Some(term_value_str) = term_value.as_str() else {
+            if stored == term_value {
+                max_score = max_score.max(1.0);
+            }
+            continue;
+        };
+
+        // For string term values, both term_value_str and stored_str must be strings
+        let Some(stored_str) = stored.as_str() else {
+            continue;
+        };
+
+        let term_key = term_value_str.to_lowercase();
+
+        // Find TF for this document
+        let mut tf = 0u32;
+        for reader in positions_readers {
+            if let Some(pl) = reader.get(&term_key)
+                && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
+            {
+                tf += pl.docs[idx].term_freq;
+            }
+        }
+        if tf == 0 {
+            let field_tokens = tokenize(stored_str);
+            if field_tokens.contains(&term_key) {
+                tf = field_tokens.iter().filter(|t| *t == &term_key).count() as u32;
+            }
+        }
+        if tf == 0 {
+            continue;
+        }
+
+        let idf = bm25_ctx.idf_map.get(&term_key).copied().unwrap_or(1.0);
+        let field_tokens = tokenize(stored_str);
+        let doc_len = field_tokens.len();
+        let score = bm25_ctx.bm25_term_score(tf, doc_len, idf, &terms.field);
+        max_score = max_score.max(score);
+    }
+    (max_score > 0.0).then_some(max_score)
 }
 
 /// Score a phrase query by checking if query terms appear consecutively in document text.
@@ -2122,16 +2188,16 @@ fn score_phrase_query(
                         if tf == 0 {
                             continue;
                         }
-                        let idf = bm25_ctx.idf_map.get(term).copied().unwrap_or(0.0);
+                        let idf = bm25_ctx.idf_map.get(term).copied().unwrap_or(1.0);
                         term_score_sum += bm25_ctx.bm25_term_score(tf, doc_len, idf, &phrase.field);
                     }
-                    // Penalize large gaps slightly
-                    let gap_factor = if max_gap <= 10 {
-                        1.0
+                    // Apply gap penalty as divisor (not multiplier) to avoid amplifying
+                    // already-large BM25 term scores. Exact consecutive phrases (gap=0) keep full score.
+                    let score = if max_gap <= 10 {
+                        term_score_sum
                     } else {
-                        1.0 / (1.0 + max_gap as f32 * 0.1)
+                        term_score_sum / (1.0 + max_gap as f32 * 0.1)
                     };
-                    let score = term_score_sum * gap_factor;
                     best_score = Some(best_score.map_or(score, |s| s.max(score)));
                 }
             }
@@ -2437,13 +2503,6 @@ fn score_bool_query(
             });
 
     Some(if count > 0 { sum / count as f32 } else { 1.0 })
-}
-
-fn matches_terms_query(document: &IndexDocument, terms: &TermsQuery) -> bool {
-    document
-        .source
-        .get(&terms.field)
-        .is_some_and(|value| terms.values.iter().any(|candidate| candidate == value))
 }
 
 #[allow(clippy::cast_precision_loss)]
