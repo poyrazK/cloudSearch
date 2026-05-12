@@ -1933,8 +1933,8 @@ fn score_match_query(
             }
         }
 
-        // Use precomputed IDF if available, otherwise compute from df=matched docs
-        let idf = bm25_ctx.idf_map.get(token).copied().unwrap_or(1.0);
+        // Use precomputed IDF if available; missing terms contribute 0 (never seen in corpus)
+        let idf = bm25_ctx.idf_map.get(token).copied().unwrap_or(0.0);
         let term_score = bm25_ctx.bm25_term_score(tf, doc_len, idf);
         total_score += term_score;
         matched += 1;
@@ -1991,8 +1991,8 @@ fn score_term_query(
         return None;
     }
 
-    // Look up IDF
-    let idf = bm25_ctx.idf_map.get(&term_key).copied().unwrap_or(1.0);
+    // Look up IDF; missing terms contribute 0
+    let idf = bm25_ctx.idf_map.get(&term_key).copied().unwrap_or(0.0);
 
     // Compute doc_len
     let field_tokens = tokenize(stored_str);
@@ -2101,7 +2101,7 @@ fn score_phrase_query(
                         if tf == 0 {
                             continue;
                         }
-                        let idf = bm25_ctx.idf_map.get(term).copied().unwrap_or(1.0);
+                        let idf = bm25_ctx.idf_map.get(term).copied().unwrap_or(0.0);
                         term_score_sum += bm25_ctx.bm25_term_score(tf, doc_len, idf);
                     }
                     // Penalize large gaps slightly
