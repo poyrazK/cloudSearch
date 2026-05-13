@@ -791,7 +791,6 @@ impl IndexHandle {
         // Build IDF map: for each query term, compute IDF = log((N-df+0.5)/(df+0.5))
         // We sum DF across all segment readers to get total document frequency.
         // Deduplicate terms via BTreeSet to avoid redundant IDF lookups.
-        let _target_field = extract_target_field(query);
         let mut idf_map: std::collections::BTreeMap<String, f32> =
             std::collections::BTreeMap::new();
         let query_terms: std::collections::BTreeSet<String> =
@@ -1816,17 +1815,6 @@ fn bm25_idf(df: usize, n_docs: usize) -> f32 {
     ((n - df + 0.5) / (df + 0.5)).ln().max(0.0)
 }
 
-/// Extract the target field name from a SearchQuery for BM25 field-length normalization.
-/// Defaults to "content" for queries without a direct field mapping (MatchAll, Bool, Range, etc.).
-fn extract_target_field(query: &SearchQuery) -> String {
-    match query {
-        SearchQuery::Match(mq) => mq.field.clone(),
-        SearchQuery::Phrase(pq) => pq.field.clone(),
-        SearchQuery::Term(tq) => tq.field.clone(),
-        _ => "content".to_string(),
-    }
-}
-
 /// Collect all unique query terms from a SearchQuery (for match/phrase/term queries).
 fn extract_query_terms(query: &SearchQuery, target_field: &str) -> Vec<String> {
     match query {
@@ -1972,7 +1960,7 @@ fn score_match_query(
     if matched == 0 {
         None
     } else {
-        Some(total_score / matched as f32)
+        Some(total_score)
     }
 }
 
