@@ -2498,7 +2498,10 @@ fn score_prefix_query_bm25(
         if tf == 0 {
             continue;
         }
-        let idf = bm25_ctx.idf_map.get(token).copied().unwrap_or(1.0);
+        let idf = bm25_ctx.idf_map.get(token)
+            .copied()
+            .or_else(|| bm25_ctx.idf_map.get(&stored.to_lowercase()).copied())
+            .unwrap_or(1.0);
         total_score += bm25_ctx.bm25_term_score(tf, doc_len, idf, &prefix.field);
     }
 
