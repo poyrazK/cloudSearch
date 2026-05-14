@@ -779,6 +779,7 @@ impl IndexHandle {
     }
 
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn search(&self, request: &SearchRequest) -> SearchResponse {
         let query = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll);
         let now = Utc::now();
@@ -809,22 +810,21 @@ impl IndexHandle {
         // since prefix matching checks if stored.starts_with(prefix) first.
         if let SearchQuery::Prefix(pq) = query {
             let full_value = pq.value.to_lowercase();
-            if !idf_map.contains_key(&full_value) {
-                let mut total_df = 0usize;
-                for reader in &self.positions_readers {
-                    if let Some(pl) = reader.get(&full_value) {
-                        total_df += pl.docs.len();
-                    }
+            let mut total_df = 0usize;
+            for reader in &self.positions_readers {
+                if let Some(pl) = reader.get(&full_value) {
+                    total_df += pl.docs.len();
                 }
-                let idf = bm25_idf(total_df, n_docs);
-                idf_map.insert(full_value, idf);
             }
+            idf_map
+                .entry(full_value)
+                .or_insert(bm25_idf(total_df, n_docs));
         }
         let mut all_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for doc in self.searchable_documents.values() {
             if let Some(obj) = doc.source.as_object() {
                 for k in obj.keys() {
-                    all_fields.insert(k.to_string());
+                    all_fields.insert(k.clone());
                 }
             }
         }
@@ -844,7 +844,8 @@ impl IndexHandle {
             .filter(|(_, doc)| !self.is_expired(&doc.id, now))
             .filter_map(|(_, doc)| {
                 let doc_id_hash = hash_doc_id(&doc.id);
-                score_query(doc, query, doc_id_hash, &self.positions_readers, &bm25_ctx).map(|s| (s, doc))
+                score_query(doc, query, doc_id_hash, &self.positions_readers, &bm25_ctx)
+                    .map(|s| (s, doc))
             })
             .collect();
 
@@ -1806,6 +1807,7 @@ impl Bm25Context {
     }
 
     /// Score a single term using the BM25 formula for a specific field.
+    #[allow(clippy::cast_precision_loss)]
     fn bm25_term_score(&self, tf: u32, doc_len: usize, idf: f32, field: &str) -> f32 {
         let tf = tf as f32;
         let doc_len = doc_len as f32;
@@ -1820,6 +1822,7 @@ impl Bm25Context {
 /// Returns 0 when df > N (shouldn't happen in practice).
 /// When df = 0 (term not in corpus), returns a default of 1.0 instead of
 /// computing log(2N+1) which would overestimate rare-term scores.
+#[allow(clippy::cast_precision_loss)]
 fn bm25_idf(df: usize, n_docs: usize) -> f32 {
     if df == 0 {
         return 1.0;
@@ -1829,15 +1832,11 @@ fn bm25_idf(df: usize, n_docs: usize) -> f32 {
     ((n - df + 0.5) / (df + 0.5)).ln().max(0.0)
 }
 
-/// Collect all unique query terms from a SearchQuery (for match/phrase/term queries).
+/// Collect all unique query terms from a `SearchQuery` (for match/phrase/term queries).
 fn extract_query_terms(query: &SearchQuery, target_field: &str) -> Vec<String> {
     match query {
-        SearchQuery::Match(mq) if mq.field == target_field => {
-            tokenize(&mq.value)
-        }
-        SearchQuery::Phrase(pq) if pq.field == target_field => {
-            tokenize(&pq.value)
-        }
+        SearchQuery::Match(mq) if mq.field == target_field => tokenize(&mq.value),
+        SearchQuery::Phrase(pq) if pq.field == target_field => tokenize(&pq.value),
         SearchQuery::Term(tq) if tq.fuzziness.is_none() => {
             // For exact term queries, use the term value as-is (already lowercase normalization)
             if let serde_json::Value::String(s) = &tq.value {
@@ -1853,18 +1852,18 @@ fn extract_query_terms(query: &SearchQuery, target_field: &str) -> Vec<String> {
             }
             terms
         }
-        SearchQuery::Terms(tq) => {
-            tq.values
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_lowercase()))
-                .collect()
-        }
+        SearchQuery::Terms(tq) => tq
+            .values
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_lowercase))
+            .collect(),
         // Prefix and Wildcard are handled in scoring (need positions_readers for term enumeration)
         _ => vec![],
     }
 }
 
 /// Compute average field length across all documents in the index.
+#[allow(clippy::cast_precision_loss)]
 fn compute_avg_field_length(
     documents: &std::collections::BTreeMap<String, IndexDocument>,
     field: &str,
@@ -1905,7 +1904,9 @@ fn score_query(
                 score_term_query(document, term, doc_id, positions_readers, bm25_ctx)
             }
         }
-        SearchQuery::Terms(terms) => score_terms_query(document, terms, doc_id, positions_readers, bm25_ctx),
+        SearchQuery::Terms(terms) => {
+            score_terms_query(document, terms, doc_id, positions_readers, bm25_ctx)
+        }
         SearchQuery::Range(range) => matches_range_query(document, range).then_some(1.0),
         SearchQuery::Bool(bool_query) => {
             score_bool_query(document, bool_query, doc_id, positions_readers, bm25_ctx)
@@ -1971,7 +1972,8 @@ fn score_match_query(
             // (doc may not have been flushed yet, only in WAL)
             if field_tokens.contains(token) {
                 // Count occurrences in field_tokens
-                tf = field_tokens.iter().filter(|t| *t == token).count() as u32;
+                tf =
+                    u32::try_from(field_tokens.iter().filter(|t| *t == token).count()).unwrap_or(0);
             } else {
                 continue;
             }
@@ -2027,7 +2029,8 @@ fn score_term_query(
     if tf == 0 {
         let field_tokens = tokenize(stored_str);
         if field_tokens.contains(&term_key) {
-            tf = field_tokens.iter().filter(|t| *t == &term_key).count() as u32;
+            tf =
+                u32::try_from(field_tokens.iter().filter(|t| *t == &term_key).count()).unwrap_or(0);
         }
     }
 
@@ -2087,7 +2090,8 @@ fn score_terms_query(
         if tf == 0 {
             let field_tokens = tokenize(stored_str);
             if field_tokens.contains(&term_key) {
-                tf = field_tokens.iter().filter(|t| *t == &term_key).count() as u32;
+                tf = u32::try_from(field_tokens.iter().filter(|t| *t == &term_key).count())
+                    .unwrap_or(0);
             }
         }
         if tf == 0 {
@@ -2486,30 +2490,28 @@ fn score_prefix_query_bm25(
         matched_any = true;
         let mut tf = 0u32;
         for reader in positions_readers {
-            if let Some(pl) = reader.get(token) {
-                if let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id)) {
-                    tf += pl.docs[idx].term_freq;
-                }
+            if let Some(pl) = reader.get(token)
+                && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
+            {
+                tf += pl.docs[idx].term_freq;
             }
         }
         if tf == 0 {
-            tf = field_tokens.iter().filter(|t| *t == token).count() as u32;
+            tf = u32::try_from(field_tokens.iter().filter(|t| *t == token).count()).unwrap_or(0);
         }
         if tf == 0 {
             continue;
         }
-        let idf = bm25_ctx.idf_map.get(token)
+        let idf = bm25_ctx
+            .idf_map
+            .get(token)
             .copied()
             .or_else(|| bm25_ctx.idf_map.get(&stored.to_lowercase()).copied())
             .unwrap_or(1.0);
         total_score += bm25_ctx.bm25_term_score(tf, doc_len, idf, &prefix.field);
     }
 
-    if matched_any {
-        Some(total_score)
-    } else {
-        None
-    }
+    if matched_any { Some(total_score) } else { None }
 }
 
 /// Score a wildcard query using BM25 by enumerating all terms matching the pattern
@@ -2521,9 +2523,7 @@ fn score_wildcard_query_bm25(
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
     bm25_ctx: &Bm25Context,
 ) -> Option<f32> {
-    let Some(re) = build_wildcard_regex(&wildcard.value) else {
-        return None;
-    };
+    let re = build_wildcard_regex(&wildcard.value)?;
     let stored = document.source.get(&wildcard.field)?.as_str()?;
     let field_tokens = tokenize(stored);
     let doc_len = field_tokens.len();
@@ -2536,14 +2536,14 @@ fn score_wildcard_query_bm25(
         }
         let mut tf = 0u32;
         for reader in positions_readers {
-            if let Some(pl) = reader.get(token) {
-                if let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id)) {
-                    tf += pl.docs[idx].term_freq;
-                }
+            if let Some(pl) = reader.get(token)
+                && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
+            {
+                tf += pl.docs[idx].term_freq;
             }
         }
         if tf == 0 {
-            tf = field_tokens.iter().filter(|t| *t == token).count() as u32;
+            tf = u32::try_from(field_tokens.iter().filter(|t| *t == token).count()).unwrap_or(0);
         }
         if tf == 0 {
             continue;
