@@ -805,7 +805,21 @@ impl IndexHandle {
             let idf = bm25_idf(total_df, n_docs);
             idf_map.insert(term.clone(), idf);
         }
-        // Collect all field names from all documents to compute per-field avg lengths
+        // For prefix queries, also compute IDF for the full stored field value
+        // since prefix matching checks if stored.starts_with(prefix) first.
+        if let SearchQuery::Prefix(pq) = query {
+            let full_value = pq.value.to_lowercase();
+            if !idf_map.contains_key(&full_value) {
+                let mut total_df = 0usize;
+                for reader in &self.positions_readers {
+                    if let Some(pl) = reader.get(&full_value) {
+                        total_df += pl.docs.len();
+                    }
+                }
+                let idf = bm25_idf(total_df, n_docs);
+                idf_map.insert(full_value, idf);
+            }
+        }
         let mut all_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for doc in self.searchable_documents.values() {
             if let Some(obj) = doc.source.as_object() {
@@ -1845,6 +1859,7 @@ fn extract_query_terms(query: &SearchQuery, target_field: &str) -> Vec<String> {
                 .filter_map(|v| v.as_str().map(|s| s.to_lowercase()))
                 .collect()
         }
+        // Prefix and Wildcard are handled in scoring (need positions_readers for term enumeration)
         _ => vec![],
     }
 }
@@ -1895,8 +1910,20 @@ fn score_query(
         SearchQuery::Bool(bool_query) => {
             score_bool_query(document, bool_query, doc_id, positions_readers, bm25_ctx)
         }
-        SearchQuery::Prefix(prefix) => matches_prefix_query(document, prefix).then_some(1.0),
-        SearchQuery::Wildcard(wc) => matches_wildcard_query(document, wc).then_some(1.0),
+        SearchQuery::Prefix(prefix) => {
+            if matches_prefix_query(document, prefix) {
+                score_prefix_query_bm25(document, prefix, doc_id, positions_readers, bm25_ctx)
+            } else {
+                None
+            }
+        }
+        SearchQuery::Wildcard(wc) => {
+            if matches_wildcard_query(document, wc) {
+                score_wildcard_query_bm25(document, wc, doc_id, positions_readers, bm25_ctx)
+            } else {
+                None
+            }
+        }
         SearchQuery::Match(mq) => {
             score_match_query(document, mq, doc_id, positions_readers, bm25_ctx)
         }
@@ -2429,6 +2456,99 @@ fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
         })
         .collect();
     Regex::new(&format!("^{regex_pattern}$")).ok()
+}
+
+/// Score a prefix query using BM25 by enumerating all terms matching the prefix
+/// and summing their BM25 scores.
+/// Score a prefix query using BM25 by summing BM25 scores for all tokens
+/// that start with the prefix. Uses binary matching to filter candidates first.
+fn score_prefix_query_bm25(
+    document: &IndexDocument,
+    prefix: &PrefixQuery,
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    let stored = document.source.get(&prefix.field)?.as_str()?;
+    let field_tokens = tokenize(stored);
+    let doc_len = field_tokens.len();
+    let prefix_lower = prefix.value.to_lowercase();
+
+    // Check each field token: if it starts with the prefix, score it using BM25.
+    // This handles both keyword-style fields (full value match) and text fields (token match).
+    let mut total_score = 0.0f32;
+    let mut matched_any = false;
+
+    for token in &field_tokens {
+        if !token.starts_with(&prefix_lower) {
+            continue;
+        }
+        matched_any = true;
+        let mut tf = 0u32;
+        for reader in positions_readers {
+            if let Some(pl) = reader.get(token) {
+                if let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id)) {
+                    tf += pl.docs[idx].term_freq;
+                }
+            }
+        }
+        if tf == 0 {
+            tf = field_tokens.iter().filter(|t| *t == token).count() as u32;
+        }
+        if tf == 0 {
+            continue;
+        }
+        let idf = bm25_ctx.idf_map.get(token).copied().unwrap_or(1.0);
+        total_score += bm25_ctx.bm25_term_score(tf, doc_len, idf, &prefix.field);
+    }
+
+    if matched_any {
+        Some(total_score)
+    } else {
+        None
+    }
+}
+
+/// Score a wildcard query using BM25 by enumerating all terms matching the pattern
+/// and summing their BM25 scores. Uses binary matching to filter candidates first.
+fn score_wildcard_query_bm25(
+    document: &IndexDocument,
+    wildcard: &WildcardQuery,
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    let Some(re) = build_wildcard_regex(&wildcard.value) else {
+        return None;
+    };
+    let stored = document.source.get(&wildcard.field)?.as_str()?;
+    let field_tokens = tokenize(stored);
+    let doc_len = field_tokens.len();
+
+    // Score each field token that matches the wildcard pattern
+    let mut total_score = 0.0f32;
+    for token in &field_tokens {
+        if !re.is_match(token) {
+            continue;
+        }
+        let mut tf = 0u32;
+        for reader in positions_readers {
+            if let Some(pl) = reader.get(token) {
+                if let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id)) {
+                    tf += pl.docs[idx].term_freq;
+                }
+            }
+        }
+        if tf == 0 {
+            tf = field_tokens.iter().filter(|t| *t == token).count() as u32;
+        }
+        if tf == 0 {
+            continue;
+        }
+        let idf = bm25_ctx.idf_map.get(token).copied().unwrap_or(1.0);
+        total_score += bm25_ctx.bm25_term_score(tf, doc_len, idf, &wildcard.field);
+    }
+    (total_score > 0.0).then_some(total_score)
 }
 
 #[allow(clippy::cast_precision_loss)]
