@@ -2130,99 +2130,100 @@ fn score_phrase_query(
         return None;
     }
 
-    // Precompute BM25 term_score_sum once per document (same regardless of which
-    // matching position we start from — only max_gap varies per position).
-    let mut term_score_sum = 0.0f32;
-    for term in &query_tokens {
-        let mut tf = 0u32;
-        for reader in positions_readers {
-            if let Some(pl) = reader.get(term)
-                && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
-            {
-                tf += pl.docs[idx].term_freq;
-            }
-        }
-        if tf == 0 {
-            // Fallback: doc not yet flushed to positions readers (only in WAL)
-            tf = u32::try_from(field_tokens.iter().filter(|t| *t == term).count()).unwrap_or(0);
-        }
-        if tf == 0 {
-            continue; // term not in this document — skip, don't fail entire match
-        }
-        let idf = bm25_ctx.idf_map.get(term).copied().unwrap_or(1.0);
-        term_score_sum += bm25_ctx.bm25_term_score(tf, doc_len, idf, &phrase.field);
-    }
-
-    // If no terms scored at all, document doesn't match
-    if term_score_sum == 0.0 {
-        return None;
-    }
-
     // For each segment's positions reader, find matching phrase occurrences
     let mut best_score: Option<f32> = None;
 
     for reader in positions_readers {
+        // Get positions of first term
         let first_term = &query_tokens[0];
         let Some(posting_list) = reader.get(first_term) else {
             continue;
         };
 
-        // Binary search to find this document's posting instead of linear scan
-        let Ok(idx) = posting_list
-            .docs
-            .binary_search_by(|p| p.doc_id.cmp(&doc_id))
-        else {
-            continue;
-        };
-        let posting = &posting_list.docs[idx];
-        let first_positions = &posting.positions;
-
-        for &first_pos in first_positions {
-            let first_pos = first_pos as usize;
-            if first_pos >= field_str.len() {
+        for posting in &posting_list.docs {
+            // Only consider postings for THIS document (matched by doc_id)
+            if posting.doc_id != doc_id {
                 continue;
             }
-
-            let mut all_match = true;
-            let mut max_gap: u32 = 0;
-            let mut previous_pos = first_pos as u32;
-
-            for term in query_tokens.iter().skip(1) {
-                let Some(next_list) = reader.get(term) else {
-                    all_match = false;
-                    break;
-                };
-
-                let Ok(idx2) = next_list.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id)) else {
-                    all_match = false;
-                    break;
-                };
-                let next_posting = &next_list.docs[idx2];
-                let mut found_pos: Option<u32> = None;
-                for &p in &next_posting.positions {
-                    if p > previous_pos {
-                        found_pos = Some(p);
-                        break;
-                    }
+            let first_positions = &posting.positions;
+            for &first_pos in first_positions {
+                let first_pos = first_pos as usize;
+                if first_pos >= field_str.len() {
+                    continue;
                 }
 
-                let Some(found_pos) = found_pos else {
-                    all_match = false;
-                    break;
-                };
+                // Check if remaining terms appear consecutively after first_pos
+                let mut all_match = true;
+                let mut max_gap: u32 = 0;
+                let mut previous_pos = first_pos as u32;
 
-                let gap = found_pos.saturating_sub(previous_pos);
-                max_gap = max_gap.max(gap);
-                previous_pos = found_pos;
-            }
+                for term in query_tokens.iter().skip(1) {
+                    let Some(next_list) = reader.get(term) else {
+                        all_match = false;
+                        break;
+                    };
 
-            if all_match {
-                let score = if max_gap <= 10 {
-                    term_score_sum
-                } else {
-                    term_score_sum / (1.0 + max_gap as f32 * 0.1)
-                };
-                best_score = Some(best_score.map_or(score, |s| s.max(score)));
+                    // Find a position of this term that is after previous_pos
+                    // Must check ALL documents in the posting list, filtering by doc_id
+                    let mut found_pos: Option<u32> = None;
+                    for posting in &next_list.docs {
+                        // Only consider postings for THIS document
+                        if posting.doc_id != doc_id {
+                            continue;
+                        }
+                        for p in &posting.positions {
+                            if *p > previous_pos {
+                                found_pos = Some(*p);
+                                break;
+                            }
+                        }
+                        if found_pos.is_some() {
+                            break;
+                        }
+                    }
+
+                    let Some(found_pos) = found_pos else {
+                        all_match = false;
+                        break;
+                    };
+
+                    // Calculate gap from previous term's position
+                    let gap = found_pos.saturating_sub(previous_pos);
+                    max_gap = max_gap.max(gap);
+                    previous_pos = found_pos;
+                }
+
+                if all_match {
+                    // Compute BM25 score per term and sum
+                    let mut term_score_sum = 0.0f32;
+                    for term in &query_tokens {
+                        let mut tf = 0u32;
+                        for reader in positions_readers {
+                            if let Some(pl) = reader.get(term)
+                                && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
+                            {
+                                tf += pl.docs[idx].term_freq;
+                            }
+                        }
+                        if tf == 0 {
+                            // Fallback: count from field tokens
+                            tf = field_tokens.iter().filter(|t| *t == term).count() as u32;
+                        }
+                        if tf == 0 {
+                            continue;
+                        }
+                        let idf = bm25_ctx.idf_map.get(term).copied().unwrap_or(1.0);
+                        term_score_sum += bm25_ctx.bm25_term_score(tf, doc_len, idf, &phrase.field);
+                    }
+                    // Apply gap penalty as divisor (not multiplier) to avoid amplifying
+                    // already-large BM25 term scores. Exact consecutive phrases (gap=0) keep full score.
+                    let score = if max_gap <= 10 {
+                        term_score_sum
+                    } else {
+                        term_score_sum / (1.0 + max_gap as f32 * 0.1)
+                    };
+                    best_score = Some(best_score.map_or(score, |s| s.max(score)));
+                }
             }
         }
     }
