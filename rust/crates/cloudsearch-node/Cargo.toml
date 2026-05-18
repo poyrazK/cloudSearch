@@ -13,6 +13,7 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
+libc = "0.2"
 reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
