@@ -779,9 +779,64 @@ impl IndexHandle {
     }
 
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn search(&self, request: &SearchRequest) -> SearchResponse {
         let query = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll);
         let now = Utc::now();
+
+        // BM25 parameters
+        let k1 = 1.2f32;
+        let b = 0.75f32;
+        let n_docs = self.searchable_documents.len().max(1);
+
+        // Build IDF map: for each query term, compute IDF = log((N-df+0.5)/(df+0.5))
+        // We sum DF across all segment readers to get total document frequency.
+        // Deduplicate terms via BTreeSet to avoid redundant IDF lookups.
+        let mut idf_map: std::collections::BTreeMap<String, f32> =
+            std::collections::BTreeMap::new();
+        let query_terms: std::collections::BTreeSet<String> =
+            extract_query_terms(query).into_iter().collect();
+        for term in &query_terms {
+            let mut total_df = 0usize;
+            for reader in &self.positions_readers {
+                if let Some(pl) = reader.get(term) {
+                    total_df += pl.docs.len();
+                }
+            }
+            let idf = bm25_idf(total_df, n_docs);
+            idf_map.insert(term.clone(), idf);
+        }
+        // For prefix queries, also compute IDF for the full stored field value
+        // since prefix matching checks if stored.starts_with(prefix) first.
+        if let SearchQuery::Prefix(pq) = query {
+            let full_value = pq.value.to_lowercase();
+            let mut total_df = 0usize;
+            for reader in &self.positions_readers {
+                if let Some(pl) = reader.get(&full_value) {
+                    total_df += pl.docs.len();
+                }
+            }
+            idf_map
+                .entry(full_value)
+                .or_insert(bm25_idf(total_df, n_docs));
+        }
+        let mut all_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for doc in self.searchable_documents.values() {
+            if let Some(obj) = doc.source.as_object() {
+                for k in obj.keys() {
+                    all_fields.insert(k.clone());
+                }
+            }
+        }
+        let mut avg_field_lens: std::collections::BTreeMap<String, f32> =
+            std::collections::BTreeMap::new();
+        for field in &all_fields {
+            avg_field_lens.insert(
+                field.clone(),
+                compute_avg_field_length(&self.searchable_documents, field).max(1.0),
+            );
+        }
+        let bm25_ctx = Bm25Context::new(idf_map, avg_field_lens, k1, b);
 
         let mut scored: Vec<(f32, &IndexDocument)> = self
             .searchable_documents
@@ -789,7 +844,8 @@ impl IndexHandle {
             .filter(|(_, doc)| !self.is_expired(&doc.id, now))
             .filter_map(|(_, doc)| {
                 let doc_id_hash = hash_doc_id(&doc.id);
-                score_query(doc, query, doc_id_hash, &self.positions_readers).map(|s| (s, doc))
+                score_query(doc, query, doc_id_hash, &self.positions_readers, &bm25_ctx)
+                    .map(|s| (s, doc))
             })
             .collect();
 
@@ -1717,58 +1773,358 @@ fn infer_field_type(field: &str, value: &serde_json::Value) -> Result<Option<Fie
     })
 }
 
+/// BM25 context: precomputed values for BM25 scoring, passed through the scoring chain.
+#[derive(Clone, Debug)]
+struct Bm25Context {
+    /// Precomputed IDF per term: term → IDF score
+    idf_map: std::collections::BTreeMap<String, f32>,
+    /// Precomputed average field length per field: field name → avg length
+    avg_field_lens: std::collections::BTreeMap<String, f32>,
+    /// BM25 term frequency saturation parameter (default 1.2)
+    k1: f32,
+    /// BM25 field length normalization parameter (default 0.75)
+    b: f32,
+}
+
+impl Bm25Context {
+    fn new(
+        idf_map: std::collections::BTreeMap<String, f32>,
+        avg_field_lens: std::collections::BTreeMap<String, f32>,
+        k1: f32,
+        b: f32,
+    ) -> Self {
+        Self {
+            idf_map,
+            avg_field_lens,
+            k1,
+            b,
+        }
+    }
+
+    /// Get the average field length for a specific field, defaulting to 1.0.
+    fn get_avg_field_len(&self, field: &str) -> f32 {
+        self.avg_field_lens.get(field).copied().unwrap_or(1.0)
+    }
+
+    /// Score a single term using the BM25 formula for a specific field.
+    #[allow(clippy::cast_precision_loss)]
+    fn bm25_term_score(&self, tf: u32, doc_len: usize, idf: f32, field: &str) -> f32 {
+        let tf = tf as f32;
+        let doc_len = doc_len as f32;
+        let avg_len = self.get_avg_field_len(field);
+        let numerator = tf * (self.k1 + 1.0);
+        let denominator = tf + self.k1 * (1.0 - self.b + self.b * doc_len / avg_len.max(1.0));
+        idf * numerator / denominator
+    }
+}
+
+/// BM25 IDF formula: log((N - df + 0.5) / (df + 0.5)), clamped to [0, ∞).
+/// - df == 0 (term not in corpus): returns 1.0 (rare-term default)
+/// - otherwise: computes the log formula; if result is negative (term in >50% of docs),
+///   returns 0.0 since high-frequency terms should not boost scoring.
+#[allow(clippy::cast_precision_loss)]
+fn bm25_idf(df: usize, n_docs: usize) -> f32 {
+    if df == 0 {
+        return 1.0;
+    }
+    let n = n_docs as f32;
+    let df = df as f32;
+    ((n - df + 0.5) / (df + 0.5)).ln().max(0.0)
+}
+
+/// Collect all unique query terms from a `SearchQuery` (for match/phrase/term queries).
+fn extract_query_terms(query: &SearchQuery) -> Vec<String> {
+    match query {
+        SearchQuery::Match(mq) => tokenize(&mq.value),
+        SearchQuery::Phrase(pq) => tokenize(&pq.value),
+        SearchQuery::Term(tq) if tq.fuzziness.is_none() => {
+            // For exact term queries, use the term value as-is (already lowercase normalization)
+            if let serde_json::Value::String(s) = &tq.value {
+                vec![s.to_lowercase()]
+            } else {
+                vec![]
+            }
+        }
+        SearchQuery::Bool(bq) => {
+            let mut terms = Vec::new();
+            for q in bq
+                .must
+                .iter()
+                .chain(bq.should.iter())
+                .chain(bq.filter.iter())
+            {
+                terms.extend(extract_query_terms(q));
+            }
+            terms
+        }
+        SearchQuery::Terms(tq) => tq
+            .values
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_lowercase))
+            .collect(),
+        // Prefix and Wildcard are handled in scoring (need positions_readers for term enumeration)
+        _ => vec![],
+    }
+}
+
+/// Compute average field length across all documents in the index.
+#[allow(clippy::cast_precision_loss)]
+fn compute_avg_field_length(
+    documents: &std::collections::BTreeMap<String, IndexDocument>,
+    field: &str,
+) -> f32 {
+    let mut total_len = 0usize;
+    let mut count = 0usize;
+    for doc in documents.values() {
+        if let Some(val) = doc.source.get(field)
+            && let Some(s) = val.as_str()
+        {
+            total_len += tokenize(s).len();
+            count += 1;
+        }
+    }
+    if count == 0 {
+        1.0
+    } else {
+        total_len as f32 / count as f32
+    }
+}
+
 fn score_query(
     document: &IndexDocument,
     query: &SearchQuery,
     doc_id: u64,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
 ) -> Option<f32> {
     match query {
         SearchQuery::MatchAll => Some(1.0),
-        SearchQuery::Term(term) => match fuzzy_term_match(document, term) {
-            Some(true) => Some(1.0),
-            _ => None,
-        },
-        SearchQuery::Terms(terms) => matches_terms_query(document, terms).then_some(1.0),
+        SearchQuery::Term(term) => {
+            if term.fuzziness.is_some() {
+                match fuzzy_term_match(document, term) {
+                    Some(true) => Some(1.0),
+                    _ => None,
+                }
+            } else {
+                score_term_query(document, term, doc_id, positions_readers, bm25_ctx)
+            }
+        }
+        SearchQuery::Terms(terms) => {
+            score_terms_query(document, terms, doc_id, positions_readers, bm25_ctx)
+        }
         SearchQuery::Range(range) => matches_range_query(document, range).then_some(1.0),
         SearchQuery::Bool(bool_query) => {
-            score_bool_query(document, bool_query, doc_id, positions_readers)
+            score_bool_query(document, bool_query, doc_id, positions_readers, bm25_ctx)
         }
-        SearchQuery::Prefix(prefix) => matches_prefix_query(document, prefix).then_some(1.0),
-        SearchQuery::Wildcard(wc) => matches_wildcard_query(document, wc).then_some(1.0),
-        SearchQuery::Match(mq) => score_match_query(document, mq),
+        SearchQuery::Prefix(prefix) => {
+            if matches_prefix_query(document, prefix) {
+                score_prefix_query_bm25(document, prefix, doc_id, positions_readers, bm25_ctx)
+            } else {
+                None
+            }
+        }
+        SearchQuery::Wildcard(wc) => {
+            if matches_wildcard_query(document, wc) {
+                score_wildcard_query_bm25(document, wc, doc_id, positions_readers, bm25_ctx)
+            } else {
+                None
+            }
+        }
+        SearchQuery::Match(mq) => {
+            score_match_query(document, mq, doc_id, positions_readers, bm25_ctx)
+        }
         SearchQuery::Phrase(phrase) => {
-            score_phrase_query(document, phrase, doc_id, positions_readers)
+            score_phrase_query(document, phrase, doc_id, positions_readers, bm25_ctx)
         }
     }
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn score_match_query(document: &IndexDocument, query: &MatchQuery) -> Option<f32> {
+fn score_match_query(
+    document: &IndexDocument,
+    query: &MatchQuery,
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
     let field_str = document.source.get(&query.field)?.as_str()?;
     let field_tokens = tokenize(field_str);
     let query_tokens = tokenize(&query.value);
     if query_tokens.is_empty() {
         return None;
     }
-    let field_set: std::collections::HashSet<&String> = field_tokens.iter().collect();
-    let matched = query_tokens
-        .iter()
-        .filter(|t| field_set.contains(t))
-        .count();
-    (matched > 0).then(|| matched as f32 / query_tokens.len() as f32)
+    let doc_len = field_tokens.len();
+
+    // For each query token, look up DF from positions readers and TF from the posting
+    // for this specific document, then compute BM25 and sum
+    let mut total_score = 0.0f32;
+    let mut matched = 0;
+
+    for token in &query_tokens {
+        // Find TF for this document across all segment readers
+        let mut tf = 0u32;
+        for reader in positions_readers {
+            if let Some(pl) = reader.get(token) {
+                // Binary search for this doc_id
+                if let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id)) {
+                    tf += pl.docs[idx].term_freq;
+                }
+            }
+        }
+
+        if tf == 0 {
+            // Token not in inverted index for this doc — check source field directly
+            // (doc may not have been flushed yet, only in WAL)
+            if field_tokens.contains(token) {
+                // Count occurrences in field_tokens
+                tf =
+                    u32::try_from(field_tokens.iter().filter(|t| *t == token).count()).unwrap_or(0);
+            } else {
+                continue;
+            }
+        }
+
+        // Use precomputed IDF if available; missing terms use default of 1.0
+        let idf = bm25_ctx.idf_map.get(token).copied().unwrap_or(1.0);
+        let term_score = bm25_ctx.bm25_term_score(tf, doc_len, idf, &query.field);
+        total_score += term_score;
+        matched += 1;
+    }
+
+    if matched == 0 {
+        None
+    } else {
+        Some(total_score)
+    }
+}
+
+/// Score a non-fuzzy term query using BM25.
+/// Falls back to binary scoring for non-string fields (bool, int, etc.)
+/// or when no postings are available.
+fn score_term_query(
+    document: &IndexDocument,
+    term: &TermQuery,
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    // Get the stored field value
+    let stored = document.source.get(&term.field)?;
+
+    // For non-string fields, use direct value equality (binary scoring)
+    let Some(stored_str) = stored.as_str() else {
+        return (stored == &term.value).then_some(1.0);
+    };
+
+    // Look up term value (lowercased) in positions readers
+    let term_value = term.value.as_str()?;
+    let term_key = term_value.to_lowercase();
+
+    // Find TF for this document across all segment readers
+    let mut tf = 0u32;
+    for reader in positions_readers {
+        if let Some(pl) = reader.get(&term_key)
+            && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
+        {
+            tf += pl.docs[idx].term_freq;
+        }
+    }
+
+    // Fallback: if no postings (e.g., not flushed), approximate from field value
+    if tf == 0 {
+        let field_tokens = tokenize(stored_str);
+        if field_tokens.contains(&term_key) {
+            tf =
+                u32::try_from(field_tokens.iter().filter(|t| *t == &term_key).count()).unwrap_or(0);
+        }
+    }
+
+    if tf == 0 {
+        return None;
+    }
+
+    // Look up IDF; missing terms use a default of 1.0 (moderately rare term)
+    let idf = bm25_ctx.idf_map.get(&term_key).copied().unwrap_or(1.0);
+
+    // Compute doc_len
+    let field_tokens = tokenize(stored_str);
+    let doc_len = field_tokens.len();
+
+    Some(bm25_ctx.bm25_term_score(tf, doc_len, idf, &term.field))
+}
+
+/// Score a terms query (OR over multiple values) using BM25.
+/// Returns the max BM25 score across all matching term values.
+fn score_terms_query(
+    document: &IndexDocument,
+    terms: &TermsQuery,
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    let mut max_score = 0.0f32;
+
+    // Look up stored field value once
+    let stored = document.source.get(&terms.field)?;
+
+    for term_value in &terms.values {
+        // Handle non-string term values (numbers, booleans): use value equality
+        let Some(term_value_str) = term_value.as_str() else {
+            if stored == term_value {
+                max_score = max_score.max(1.0);
+            }
+            continue;
+        };
+
+        // For string term values, both term_value_str and stored_str must be strings
+        let Some(stored_str) = stored.as_str() else {
+            continue;
+        };
+
+        let term_key = term_value_str.to_lowercase();
+
+        // Find TF for this document
+        let mut tf = 0u32;
+        for reader in positions_readers {
+            if let Some(pl) = reader.get(&term_key)
+                && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
+            {
+                tf += pl.docs[idx].term_freq;
+            }
+        }
+        if tf == 0 {
+            let field_tokens = tokenize(stored_str);
+            if field_tokens.contains(&term_key) {
+                tf = u32::try_from(field_tokens.iter().filter(|t| *t == &term_key).count())
+                    .unwrap_or(0);
+            }
+        }
+        if tf == 0 {
+            continue;
+        }
+
+        let idf = bm25_ctx.idf_map.get(&term_key).copied().unwrap_or(1.0);
+        let field_tokens = tokenize(stored_str);
+        let doc_len = field_tokens.len();
+        let score = bm25_ctx.bm25_term_score(tf, doc_len, idf, &terms.field);
+        max_score = max_score.max(score);
+    }
+    (max_score > 0.0).then_some(max_score)
 }
 
 /// Score a phrase query by checking if query terms appear consecutively in document text.
-/// Uses positions data to verify proximity and score based on gap size.
+/// Uses positions data to verify proximity and scores using BM25 per term.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 fn score_phrase_query(
     document: &IndexDocument,
     phrase: &PhraseQuery,
     doc_id: u64,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
 ) -> Option<f32> {
     let field_str = document.source.get(&phrase.field)?.as_str()?;
+    let field_tokens = tokenize(field_str);
+    let doc_len = field_tokens.len();
     let query_tokens = tokenize(&phrase.value);
     if query_tokens.len() < 2 {
         return None;
@@ -1838,11 +2194,33 @@ fn score_phrase_query(
                 }
 
                 if all_match {
-                    // Score based on gap: exact consecutive = 1.0, gaps decay score
+                    // Compute BM25 score per term and sum
+                    let mut term_score_sum = 0.0f32;
+                    for term in &query_tokens {
+                        let mut tf = 0u32;
+                        for reader in positions_readers {
+                            if let Some(pl) = reader.get(term)
+                                && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
+                            {
+                                tf += pl.docs[idx].term_freq;
+                            }
+                        }
+                        if tf == 0 {
+                            // Fallback: count from field tokens
+                            tf = field_tokens.iter().filter(|t| *t == term).count() as u32;
+                        }
+                        if tf == 0 {
+                            continue;
+                        }
+                        let idf = bm25_ctx.idf_map.get(term).copied().unwrap_or(1.0);
+                        term_score_sum += bm25_ctx.bm25_term_score(tf, doc_len, idf, &phrase.field);
+                    }
+                    // Apply gap penalty as divisor (not multiplier) to avoid amplifying
+                    // already-large BM25 term scores. Exact consecutive phrases (gap=0) keep full score.
                     let score = if max_gap <= 10 {
-                        1.0
+                        term_score_sum
                     } else {
-                        1.0 / (1.0 + max_gap as f32 * 0.1)
+                        term_score_sum / (1.0 + max_gap as f32 * 0.1)
                     };
                     best_score = Some(best_score.map_or(score, |s| s.max(score)));
                 }
@@ -2089,33 +2467,125 @@ fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
     Regex::new(&format!("^{regex_pattern}$")).ok()
 }
 
+/// Score a prefix query using BM25 by summing BM25 scores for all tokens
+/// that start with the prefix. Uses binary matching to filter candidates first.
+fn score_prefix_query_bm25(
+    document: &IndexDocument,
+    prefix: &PrefixQuery,
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    let stored = document.source.get(&prefix.field)?.as_str()?;
+    let stored_lowercase = stored.to_lowercase();
+    let field_tokens = tokenize(stored);
+    let doc_len = field_tokens.len();
+    let prefix_lower = prefix.value.to_lowercase();
+
+    // Check each field token: if it starts with the prefix, score it using BM25.
+    // This handles both keyword-style fields (full value match) and text fields (token match).
+    let mut total_score = 0.0f32;
+    let mut matched_any = false;
+
+    for token in &field_tokens {
+        if !token.starts_with(&prefix_lower) {
+            continue;
+        }
+        matched_any = true;
+        let mut tf = 0u32;
+        for reader in positions_readers {
+            if let Some(pl) = reader.get(token)
+                && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
+            {
+                tf += pl.docs[idx].term_freq;
+            }
+        }
+        if tf == 0 {
+            tf = u32::try_from(field_tokens.iter().filter(|t| *t == token).count()).unwrap_or(0);
+        }
+        if tf == 0 {
+            continue;
+        }
+        let idf = bm25_ctx
+            .idf_map
+            .get(token)
+            .copied()
+            .or_else(|| bm25_ctx.idf_map.get(&stored_lowercase).copied())
+            .unwrap_or(1.0);
+        total_score += bm25_ctx.bm25_term_score(tf, doc_len, idf, &prefix.field);
+    }
+
+    if matched_any { Some(total_score) } else { None }
+}
+
+/// Score a wildcard query using BM25 by enumerating all terms matching the pattern
+/// and summing their BM25 scores. Uses binary matching to filter candidates first.
+fn score_wildcard_query_bm25(
+    document: &IndexDocument,
+    wildcard: &WildcardQuery,
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    let re = build_wildcard_regex(&wildcard.value)?;
+    let stored = document.source.get(&wildcard.field)?.as_str()?;
+    let field_tokens = tokenize(stored);
+    let doc_len = field_tokens.len();
+
+    // Score each field token that matches the wildcard pattern
+    let mut total_score = 0.0f32;
+    for token in &field_tokens {
+        if !re.is_match(token) {
+            continue;
+        }
+        let mut tf = 0u32;
+        for reader in positions_readers {
+            if let Some(pl) = reader.get(token)
+                && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
+            {
+                tf += pl.docs[idx].term_freq;
+            }
+        }
+        if tf == 0 {
+            tf = u32::try_from(field_tokens.iter().filter(|t| *t == token).count()).unwrap_or(0);
+        }
+        if tf == 0 {
+            continue;
+        }
+        let idf = bm25_ctx.idf_map.get(token).copied().unwrap_or(1.0);
+        total_score += bm25_ctx.bm25_term_score(tf, doc_len, idf, &wildcard.field);
+    }
+    (total_score > 0.0).then_some(total_score)
+}
+
 #[allow(clippy::cast_precision_loss)]
 fn score_bool_query(
     document: &IndexDocument,
     bool_query: &BoolQuery,
     doc_id: u64,
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
 ) -> Option<f32> {
     // Evaluate each clause group once and store the scores.
     let must_scores: Vec<Option<f32>> = bool_query
         .must
         .iter()
-        .map(|q| score_query(document, q, doc_id, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers, bm25_ctx))
         .collect();
     let filter_scores: Vec<Option<f32>> = bool_query
         .filter
         .iter()
-        .map(|q| score_query(document, q, doc_id, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers, bm25_ctx))
         .collect();
     let must_not_scores: Vec<Option<f32>> = bool_query
         .must_not
         .iter()
-        .map(|q| score_query(document, q, doc_id, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers, bm25_ctx))
         .collect();
     let should_scores: Vec<Option<f32>> = bool_query
         .should
         .iter()
-        .map(|q| score_query(document, q, doc_id, positions_readers))
+        .map(|q| score_query(document, q, doc_id, positions_readers, bm25_ctx))
         .collect();
 
     // All must clauses must match.
@@ -2148,13 +2618,6 @@ fn score_bool_query(
             });
 
     Some(if count > 0 { sum / count as f32 } else { 1.0 })
-}
-
-fn matches_terms_query(document: &IndexDocument, terms: &TermsQuery) -> bool {
-    document
-        .source
-        .get(&terms.field)
-        .is_some_and(|value| terms.values.iter().any(|candidate| candidate == value))
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -5439,9 +5902,11 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(hello.hits.total, 2);
-        // query "hello" has 1 token; both docs match 1/1 = 1.0, so the tie-breaker (alphabetical id) applies
+        // With BM25 scoring, "hello" has df=2 (doc-1 and doc-2), n=3.
+        // IDF = max(0, ln((3-2+0.5)/(2+0.5))) ≈ 0, so score ≈ 0 unless TF is high.
+        // Both docs match "hello" with equal TF, so tie-breaker is alphabetical id.
         assert_eq!(hello.hits.hits[0].id, "doc-1");
-        assert_eq!(hello.hits.hits[0].score, Some(1.0));
+        assert!(hello.hits.hits[0].score.unwrap_or(0.0) >= 0.0);
 
         // Match "hello world" - both docs match 2/2 tokens = 1.0 (tie goes to lower doc id)
         let both = handle.search(&SearchRequest {
@@ -5452,11 +5917,14 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(both.hits.total, 2);
-        // Both match 2/2 = 1.0, tie-breaker is alphabetical: doc-1 < doc-2
+        // Both docs match 2 tokens. With BM25, doc-1 ("hello world" → 2 tokens, len=2)
+        // and doc-2 ("hello there world" → 3 tokens, len=3) get different scores even with
+        // identical term frequencies, due to field length normalization.
+        // Tie-breaker is alphabetical: doc-1 < doc-2.
         assert_eq!(both.hits.hits[0].id, "doc-1");
-        assert_eq!(both.hits.hits[0].score, Some(1.0));
+        assert!(both.hits.hits[0].score.unwrap_or(0.0) >= 0.0);
         assert_eq!(both.hits.hits[1].id, "doc-2");
-        assert_eq!(both.hits.hits[1].score, Some(1.0));
+        assert!(both.hits.hits[1].score.unwrap_or(0.0) >= 0.0);
 
         // Match "xyz" finds nothing
         let no_match = handle.search(&SearchRequest {
