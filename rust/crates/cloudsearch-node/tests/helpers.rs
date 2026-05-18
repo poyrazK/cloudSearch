@@ -275,3 +275,13 @@ pub fn stop_node(child: &mut Child) {
     child.kill().expect("kill node");
     child.wait().expect("wait for node exit");
 }
+
+/// Sends SIGKILL to a child process (hard crash, no signal handler called).
+///
+/// # Panics
+/// Panics if the syscall fails.
+pub fn hard_kill(child: &mut Child) {
+    // SIGKILL cannot be caught or handled — guarantees immediate termination.
+    child.kill().expect("kill node");
+    child.wait().expect("wait for killed node");
+}
