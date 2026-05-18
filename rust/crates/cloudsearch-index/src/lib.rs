@@ -2467,8 +2467,6 @@ fn build_wildcard_regex(pattern: &str) -> Option<Regex> {
     Regex::new(&format!("^{regex_pattern}$")).ok()
 }
 
-/// Score a prefix query using BM25 by enumerating all terms matching the prefix
-/// and summing their BM25 scores.
 /// Score a prefix query using BM25 by summing BM25 scores for all tokens
 /// that start with the prefix. Uses binary matching to filter candidates first.
 fn score_prefix_query_bm25(
