@@ -2479,6 +2479,7 @@ fn score_prefix_query_bm25(
     bm25_ctx: &Bm25Context,
 ) -> Option<f32> {
     let stored = document.source.get(&prefix.field)?.as_str()?;
+    let stored_lowercase = stored.to_lowercase();
     let field_tokens = tokenize(stored);
     let doc_len = field_tokens.len();
     let prefix_lower = prefix.value.to_lowercase();
@@ -2511,7 +2512,7 @@ fn score_prefix_query_bm25(
             .idf_map
             .get(token)
             .copied()
-            .or_else(|| bm25_ctx.idf_map.get(&stored.to_lowercase()).copied())
+            .or_else(|| bm25_ctx.idf_map.get(&stored_lowercase).copied())
             .unwrap_or(1.0);
         total_score += bm25_ctx.bm25_term_score(tf, doc_len, idf, &prefix.field);
     }
