@@ -2600,10 +2600,16 @@ fn score_bool_query(
     if must_not_scores.iter().any(std::option::Option::is_some) {
         return None;
     }
-    // When there are no must/filter clauses, at least one should must match.
-    let should_required =
-        bool_query.must.is_empty() && bool_query.filter.is_empty() && !bool_query.should.is_empty();
-    if should_required && !should_scores.iter().any(std::option::Option::is_some) {
+    // When there are no must/filter clauses, at least one should must match (unless minimum_should_match is 0).
+    let min_should_match: usize = if bool_query.should.is_empty() {
+        0
+    } else if bool_query.must.is_empty() && bool_query.filter.is_empty() {
+        bool_query.minimum_should_match.unwrap_or(1) as usize
+    } else {
+        bool_query.minimum_should_match.unwrap_or(0) as usize
+    };
+    let matching_should_count = should_scores.iter().filter(|s| s.is_some()).count();
+    if matching_should_count < min_should_match {
         return None;
     }
 

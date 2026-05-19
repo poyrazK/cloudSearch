@@ -164,6 +164,7 @@ fn test_search_query_bool() {
             value: serde_json::json!(true),
             fuzziness: None,
         })],
+        minimum_should_match: None,
     }));
 }
 
@@ -1083,6 +1084,7 @@ fn test_bool_query_with_should_and_filter() {
             lt: None,
         })],
         must_not: vec![],
+        minimum_should_match: None,
     }));
 }
 
