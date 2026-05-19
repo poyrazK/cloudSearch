@@ -2207,7 +2207,8 @@ fn score_phrase_query(
                         }
                         if tf == 0 {
                             // Fallback: count from field tokens
-                            tf = field_tokens.iter().filter(|t| *t == term).count() as u32;
+                            tf = u32::try_from(field_tokens.iter().filter(|t| *t == term).count())
+                                .unwrap_or(0);
                         }
                         if tf == 0 {
                             continue;
