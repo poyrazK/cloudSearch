@@ -321,4 +321,85 @@ mod tests {
         let field_names: Vec<_> = reader.fields().collect();
         assert_eq!(field_names, vec!["a", "b"]);
     }
+
+    // ─── Truncated/malformed data tests ───────────────────────────────────────
+
+    #[test]
+    fn test_keywords_truncated_offset_table() {
+        // doc_count=3 but data only has 8 bytes (needs 12 for 3 offsets)
+        let data = vec![1u8, 0, 0, 0, 6, 0, 0, 0]; // only 2 offsets, not 3
+        let field = DocValuesField {
+            field: "field".to_string(),
+            value_type: DocValueType::Keyword,
+            doc_count: 3,
+            data,
+        };
+        let reader = reader_with_field(field);
+        assert!(reader.keywords("field").is_none());
+    }
+
+    #[test]
+    fn test_i64_values_truncated_data() {
+        // 3 values need 24 bytes, but only 20 bytes provided
+        let mut data = vec![0u8; 20];
+        data[0..8].copy_from_slice(&0_i64.to_le_bytes());
+        data[8..16].copy_from_slice(&1_i64.to_le_bytes());
+        let field = DocValuesField {
+            field: "field".to_string(),
+            value_type: DocValueType::Long,
+            doc_count: 3,
+            data,
+        };
+        let reader = reader_with_field(field);
+        assert!(reader.i64_values("field").is_none());
+    }
+
+    #[test]
+    fn test_f64_values_truncated_data() {
+        // 3 f64 values need 24 bytes, but only 16 bytes
+        let mut data = vec![0u8; 16];
+        data[..8].copy_from_slice(&1.0_f64.to_le_bytes());
+        data[8..16].copy_from_slice(&2.0_f64.to_le_bytes());
+        let field = DocValuesField {
+            field: "field".to_string(),
+            value_type: DocValueType::Double,
+            doc_count: 3,
+            data,
+        };
+        let reader = reader_with_field(field);
+        assert!(reader.f64_values("field").is_none());
+    }
+
+    #[test]
+    fn test_bool_values_truncated_data() {
+        // 10 docs need 2 bytes, but only 1 byte provided
+        let field = DocValuesField {
+            field: "field".to_string(),
+            value_type: DocValueType::Boolean,
+            doc_count: 10,
+            data: vec![0b0000_0101],
+        };
+        let reader = reader_with_field(field);
+        assert!(reader.bool_values("field").is_none());
+    }
+
+    #[test]
+    fn test_keywords_malformed_offset_past_pool() {
+        // Offset table says doc0 starts at byte 100, but pool is only 10 bytes
+        let pool = b"\x00abcdefghi"; // 11 bytes total (0-10)
+        let offsets = [100u32, 0, 0]; // doc0 offset way past pool
+        let mut data = Vec::new();
+        for off in offsets {
+            data.extend_from_slice(&off.to_le_bytes());
+        }
+        data.extend_from_slice(pool);
+        let field = DocValuesField {
+            field: "field".to_string(),
+            value_type: DocValueType::Keyword,
+            doc_count: 3,
+            data,
+        };
+        let reader = reader_with_field(field);
+        assert!(reader.keywords("field").is_none());
+    }
 }
