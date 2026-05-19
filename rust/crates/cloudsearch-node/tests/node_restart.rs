@@ -1374,7 +1374,7 @@ async fn hard_crash_preserves_flushed_segments() {
             .json(&json!({"id": format!("doc-{}", i), "source": {"status": "flushed", "n": i}}))
             .send()
             .await
-            .unwrap_or_else(|_| panic!("index doc-{}", i))
+            .unwrap_or_else(|_| panic!("index doc-{i}"))
             .error_for_status()
             .expect("status");
     }
