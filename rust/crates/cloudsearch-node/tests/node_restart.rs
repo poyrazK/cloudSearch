@@ -1226,7 +1226,11 @@ async fn hard_crash_preserves_data_across_sigkill() {
         .send()
         .await
         .expect("health check");
-    assert_eq!(health.status(), 200, "node should be healthy after hard crash");
+    assert_eq!(
+        health.status(),
+        200,
+        "node should be healthy after hard crash"
+    );
 
     // Search to verify the node is operational
     let search = client
@@ -1242,11 +1246,14 @@ async fn hard_crash_preserves_data_across_sigkill() {
         .expect("parse");
 
     let total = search["hits"]["total"]["value"].clone();
-    eprintln!("SEARCH RESULT after hard crash: total={}", total);
+    eprintln!("SEARCH RESULT after hard crash: total={total}");
 
     // At minimum, the node should be operational with some documents.
     // Exact count depends on whether unflushed data was synced before SIGKILL.
-    assert!(total.as_u64().unwrap_or(0) >= 1, "expected at least 1 doc after hard crash");
+    assert!(
+        total.as_u64().unwrap_or(0) >= 1,
+        "expected at least 1 doc after hard crash"
+    );
 
     stop_node(&mut second);
 }
@@ -1295,7 +1302,7 @@ async fn wal_corruption_recovery_skips_bad_records() {
     let wal_dir = temp_dir.path().join("indexes").join("logs").join("wal");
     let wal_files: Vec<_> = std::fs::read_dir(&wal_dir)
         .expect("read wal dir")
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
         .collect();
 
@@ -1313,10 +1320,7 @@ async fn wal_corruption_recovery_skips_bad_records() {
     // This is valid behavior: corruption should be detected and reported, not silently ignored.
     // We verify that the node either starts healthy OR fails with a clear error (not a crash).
     let mut second = spawn_node(temp_dir.path(), port);
-    let health_result = client
-        .get(format!("{base_url}/_health"))
-        .send()
-        .await;
+    let health_result = client.get(format!("{base_url}/_health")).send().await;
 
     match health_result {
         Ok(resp) if resp.status() == 200 => {
@@ -1370,7 +1374,7 @@ async fn hard_crash_preserves_flushed_segments() {
             .json(&json!({"id": format!("doc-{}", i), "source": {"status": "flushed", "n": i}}))
             .send()
             .await
-            .expect(&format!("index doc-{}", i))
+            .unwrap_or_else(|_| panic!("index doc-{}", i))
             .error_for_status()
             .expect("status");
     }
