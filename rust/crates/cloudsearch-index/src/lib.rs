@@ -779,6 +779,7 @@ impl IndexHandle {
     }
 
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn search(&self, request: &SearchRequest) -> SearchResponse {
         let query = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll);
         let now = Utc::now();
@@ -790,7 +791,8 @@ impl IndexHandle {
 
         // Build IDF map: for each query term, compute IDF = log((N-df+0.5)/(df+0.5))
         // We sum DF across all segment readers to get total document frequency
-        let mut idf_map: std::collections::BTreeMap<String, f32> = std::collections::BTreeMap::new();
+        let mut idf_map: std::collections::BTreeMap<String, f32> =
+            std::collections::BTreeMap::new();
         let query_terms = extract_query_terms(query, "");
         for term in &query_terms {
             let mut total_df = 0usize;
@@ -802,8 +804,8 @@ impl IndexHandle {
             let idf = bm25_idf(total_df, n_docs);
             idf_map.insert(term.clone(), idf);
         }
-        let avg_field_len = compute_avg_field_length(&self.searchable_documents, "content")
-            .max(1.0);
+        let avg_field_len =
+            compute_avg_field_length(&self.searchable_documents, "content").max(1.0);
 
         let mut scored: Vec<(f32, &IndexDocument)> = self
             .searchable_documents
@@ -811,7 +813,17 @@ impl IndexHandle {
             .filter(|(_, doc)| !self.is_expired(&doc.id, now))
             .filter_map(|(_, doc)| {
                 let doc_id_hash = hash_doc_id(&doc.id);
-                score_query(doc, query, doc_id_hash, &self.positions_readers, &idf_map, avg_field_len, k1, b).map(|s| (s, doc))
+                score_query(
+                    doc,
+                    query,
+                    doc_id_hash,
+                    &self.positions_readers,
+                    &idf_map,
+                    avg_field_len,
+                    k1,
+                    b,
+                )
+                .map(|s| (s, doc))
             })
             .collect();
 
@@ -1739,8 +1751,9 @@ fn infer_field_type(field: &str, value: &serde_json::Value) -> Result<Option<Fie
     })
 }
 
-/// BM25 IDF formula: log((N - df + 0.5) / (df + 0.5)).
-/// Returns 0 for df > N (shouldn't happen in practice).
+/// BM25 IDF formula: `log((N - df + 0.5) / (df + 0.5))`.
+/// Returns 0 for `df > N` (shouldn't happen in practice).
+#[allow(clippy::cast_precision_loss)]
 fn bm25_idf(df: usize, n_docs: usize) -> f32 {
     if df == 0 {
         return 0.0;
@@ -1750,15 +1763,11 @@ fn bm25_idf(df: usize, n_docs: usize) -> f32 {
     ((n - df + 0.5) / (df + 0.5)).ln().max(0.0)
 }
 
-/// Collect all unique query terms from a SearchQuery (for match/phrase/term queries).
+/// Collect all unique query terms from a `SearchQuery` (for match/phrase/term queries).
 fn extract_query_terms(query: &SearchQuery, target_field: &str) -> Vec<String> {
     match query {
-        SearchQuery::Match(mq) if mq.field == target_field => {
-            tokenize(&mq.value)
-        }
-        SearchQuery::Phrase(pq) if pq.field == target_field => {
-            tokenize(&pq.value)
-        }
+        SearchQuery::Match(mq) if mq.field == target_field => tokenize(&mq.value),
+        SearchQuery::Phrase(pq) if pq.field == target_field => tokenize(&pq.value),
         SearchQuery::Term(tq) if tq.fuzziness.is_none() => {
             // For exact term queries, use the term value as-is (already lowercase normalization)
             if let serde_json::Value::String(s) = &tq.value {
@@ -1779,6 +1788,7 @@ fn extract_query_terms(query: &SearchQuery, target_field: &str) -> Vec<String> {
 }
 
 /// Compute average field length across all documents in the index.
+#[allow(clippy::cast_precision_loss)]
 fn compute_avg_field_length(
     documents: &std::collections::BTreeMap<String, IndexDocument>,
     field: &str,
@@ -1819,14 +1829,28 @@ fn score_query(
         },
         SearchQuery::Terms(terms) => matches_terms_query(document, terms).then_some(1.0),
         SearchQuery::Range(range) => matches_range_query(document, range).then_some(1.0),
-        SearchQuery::Bool(bool_query) => {
-            score_bool_query(document, bool_query, doc_id, positions_readers, idf_map, avg_field_len, k1, b)
-        }
+        SearchQuery::Bool(bool_query) => score_bool_query(
+            document,
+            bool_query,
+            doc_id,
+            positions_readers,
+            idf_map,
+            avg_field_len,
+            k1,
+            b,
+        ),
         SearchQuery::Prefix(prefix) => matches_prefix_query(document, prefix).then_some(1.0),
         SearchQuery::Wildcard(wc) => matches_wildcard_query(document, wc).then_some(1.0),
-        SearchQuery::Match(mq) => {
-            score_match_query(document, mq, doc_id, positions_readers, idf_map, avg_field_len, k1, b)
-        }
+        SearchQuery::Match(mq) => score_match_query(
+            document,
+            mq,
+            doc_id,
+            positions_readers,
+            idf_map,
+            avg_field_len,
+            k1,
+            b,
+        ),
         SearchQuery::Phrase(phrase) => {
             score_phrase_query(document, phrase, doc_id, positions_readers)
         }
@@ -1874,7 +1898,8 @@ fn score_match_query(
             // (doc may not have been flushed yet, only in WAL)
             if field_tokens.contains(token) {
                 // Count occurrences in field_tokens
-                tf = field_tokens.iter().filter(|t| *t == token).count() as u32;
+                tf =
+                    u32::try_from(field_tokens.iter().filter(|t| *t == token).count()).unwrap_or(0);
             } else {
                 continue;
             }
@@ -2240,22 +2265,66 @@ fn score_bool_query(
     let must_scores: Vec<Option<f32>> = bool_query
         .must
         .iter()
-        .map(|q| score_query(document, q, doc_id, positions_readers, idf_map, avg_field_len, k1, b))
+        .map(|q| {
+            score_query(
+                document,
+                q,
+                doc_id,
+                positions_readers,
+                idf_map,
+                avg_field_len,
+                k1,
+                b,
+            )
+        })
         .collect();
     let filter_scores: Vec<Option<f32>> = bool_query
         .filter
         .iter()
-        .map(|q| score_query(document, q, doc_id, positions_readers, idf_map, avg_field_len, k1, b))
+        .map(|q| {
+            score_query(
+                document,
+                q,
+                doc_id,
+                positions_readers,
+                idf_map,
+                avg_field_len,
+                k1,
+                b,
+            )
+        })
         .collect();
     let must_not_scores: Vec<Option<f32>> = bool_query
         .must_not
         .iter()
-        .map(|q| score_query(document, q, doc_id, positions_readers, idf_map, avg_field_len, k1, b))
+        .map(|q| {
+            score_query(
+                document,
+                q,
+                doc_id,
+                positions_readers,
+                idf_map,
+                avg_field_len,
+                k1,
+                b,
+            )
+        })
         .collect();
     let should_scores: Vec<Option<f32>> = bool_query
         .should
         .iter()
-        .map(|q| score_query(document, q, doc_id, positions_readers, idf_map, avg_field_len, k1, b))
+        .map(|q| {
+            score_query(
+                document,
+                q,
+                doc_id,
+                positions_readers,
+                idf_map,
+                avg_field_len,
+                k1,
+                b,
+            )
+        })
         .collect();
 
     // All must clauses must match.
