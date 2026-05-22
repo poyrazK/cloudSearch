@@ -4,7 +4,7 @@
 
 use cloudsearch_common::{
     BoolQuery, CreateIndexRequest, Fuzziness, IndexDocument, IndexSettings, MatchQuery,
-    SearchQuery, SearchRequest, SortOrder, SortSpec, TermQuery,
+    MultiMatchQuery, MultiMatchType, SearchQuery, SearchRequest, SortOrder, SortSpec, TermQuery,
 };
 use cloudsearch_index::{IndexCatalog, MergePlan};
 use cloudsearch_storage::SegmentMeta;
@@ -662,5 +662,109 @@ async fn minimum_should_match_zero_allows_no_should_matches() {
     assert_eq!(
         result.hits.total, 1,
         "minimum_should_match=0 should allow doc when no should clauses match"
+    );
+}
+
+#[tokio::test]
+async fn multi_match_best_fields_returns_max_score() {
+    // Doc has "foo" in title and "bar" in content.
+    // multi_match query "foo bar" across both fields (best_fields).
+    // Only "foo" matches in title, only "bar" matches in content.
+    // So each field gets one match → best_fields returns the max score.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    handle
+        .index_document(doc("1", serde_json::json!({"title": "foo", "content": "bar"})))
+        .await
+        .expect("index");
+    handle.refresh().await.expect("refresh");
+
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::MultiMatch(MultiMatchQuery {
+            query: "foo bar".to_string(),
+            fields: [("title".to_string(), 1.0), ("content".to_string(), 1.0)]
+                .into_iter()
+                .collect(),
+            multi_match_type: MultiMatchType::BestFields,
+            tie_breaker: 0.0,
+        })),
+        ..Default::default()
+    });
+
+    assert_eq!(result.hits.total, 1, "doc should match multi_match query");
+    assert!(result.hits.hits[0].score.is_some());
+}
+
+#[tokio::test]
+async fn multi_match_most_fields_sums_scores() {
+    // Doc has "foo" in both title and content.
+    // multi_match query "foo foo" across both fields (most_fields).
+    // Each field contributes a score → sum should be higher than single field.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    handle
+        .index_document(doc("1", serde_json::json!({"title": "foo", "content": "foo"})))
+        .await
+        .expect("index");
+    handle.refresh().await.expect("refresh");
+
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::MultiMatch(MultiMatchQuery {
+            query: "foo".to_string(),
+            fields: [("title".to_string(), 1.0), ("content".to_string(), 1.0)]
+                .into_iter()
+                .collect(),
+            multi_match_type: MultiMatchType::MostFields,
+            tie_breaker: 0.0,
+        })),
+        ..Default::default()
+    });
+
+    assert_eq!(result.hits.total, 1, "doc should match multi_match query");
+    let score = result.hits.hits[0].score.unwrap();
+
+    // Compare with best_fields
+    let best_fields_result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::MultiMatch(MultiMatchQuery {
+            query: "foo".to_string(),
+            fields: [("title".to_string(), 1.0), ("content".to_string(), 1.0)]
+                .into_iter()
+                .collect(),
+            multi_match_type: MultiMatchType::BestFields,
+            tie_breaker: 0.0,
+        })),
+        ..Default::default()
+    });
+    let best_score = best_fields_result.hits.hits[0].score.unwrap();
+
+    assert!(
+        score > best_score,
+        "most_fields score ({score}) should exceed best_fields score ({best_score})"
     );
 }

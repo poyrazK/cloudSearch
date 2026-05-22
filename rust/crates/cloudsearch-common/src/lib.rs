@@ -239,7 +239,7 @@ pub struct RestoreResponse {
     pub sequence_number: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SearchRequest {
     pub query: Option<SearchQuery>,
     pub from: Option<usize>,
@@ -250,7 +250,7 @@ pub struct SearchRequest {
     pub aggs: Option<BTreeMap<String, AggregationRequest>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchQuery {
     MatchAll,
@@ -262,6 +262,7 @@ pub enum SearchQuery {
     Wildcard(WildcardQuery),
     Match(MatchQuery),
     Phrase(PhraseQuery),
+    MultiMatch(MultiMatchQuery),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -286,6 +287,27 @@ pub struct MatchQuery {
 pub struct PhraseQuery {
     pub field: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiMatchType {
+    #[default]
+    BestFields,
+    MostFields,
+    Phrase,
+    PhrasePrefix,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MultiMatchQuery {
+    pub query: String,
+    #[serde(default)]
+    pub fields: BTreeMap<String, f32>,
+    #[serde(default)]
+    pub multi_match_type: MultiMatchType,
+    #[serde(default)]
+    pub tie_breaker: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -320,7 +342,7 @@ pub struct RangeQuery {
     pub lt: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct BoolQuery {
     #[serde(default)]
     pub must: Vec<SearchQuery>,
@@ -356,12 +378,12 @@ pub struct SearchResponse {
     pub aggregations: BTreeMap<String, AggregationResult>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct MultiSearchRequest {
     pub searches: Vec<MultiSearchItem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MultiSearchItem {
     pub index: String,
     pub request: SearchRequest,
