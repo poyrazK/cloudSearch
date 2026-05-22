@@ -1010,7 +1010,13 @@ fn parse_bool_query(value: &Value) -> Result<BoolQuery, ApiError> {
         ))
     })?;
 
-    let allowed = ["must", "should", "filter", "must_not", "minimum_should_match"];
+    let allowed = [
+        "must",
+        "should",
+        "filter",
+        "must_not",
+        "minimum_should_match",
+    ];
     for key in object.keys() {
         if !allowed.contains(&key.as_str()) {
             return Err(ApiError(CloudSearchError::InvalidSearchRequest(format!(
@@ -1022,11 +1028,13 @@ fn parse_bool_query(value: &Value) -> Result<BoolQuery, ApiError> {
     let minimum_should_match = object
         .get("minimum_should_match")
         .and_then(serde_json::Value::as_u64)
-        .map(|v| u32::try_from(v).map_err(|_| {
-            ApiError(CloudSearchError::InvalidSearchRequest(
-                "minimum_should_match must be a non-negative integer".to_string(),
-            ))
-        }))
+        .map(|v| {
+            u32::try_from(v).map_err(|_| {
+                ApiError(CloudSearchError::InvalidSearchRequest(
+                    "minimum_should_match must be a non-negative integer".to_string(),
+                ))
+            })
+        })
         .transpose()?;
 
     Ok(BoolQuery {
