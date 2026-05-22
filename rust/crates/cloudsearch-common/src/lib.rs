@@ -330,6 +330,10 @@ pub struct BoolQuery {
     pub filter: Vec<SearchQuery>,
     #[serde(default)]
     pub must_not: Vec<SearchQuery>,
+    /// Minimum number of `should` clauses that must match.
+    /// If `None`, defaults to 1 when no `must`/`filter` is present, else 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_should_match: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

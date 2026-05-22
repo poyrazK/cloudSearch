@@ -116,10 +116,12 @@ async fn validate_search_request_rejects_nested_bool_with_object_field() {
                 should: vec![],
                 filter: vec![],
                 must_not: vec![],
+                minimum_should_match: None,
             })],
             should: vec![],
             filter: vec![],
             must_not: vec![],
+            minimum_should_match: None,
         })),
         sort: Some(SortSpec {
             field: "meta".to_string(),
@@ -554,5 +556,111 @@ async fn fuzzy_match_auto_mode_threshold_2_for_long_terms() {
     assert_eq!(
         result.hits.total, 1,
         "Auto fuzziness (threshold=2) should match edit distance 1"
+    );
+}
+
+#[tokio::test]
+async fn minimum_should_match_requires_multiple_should_matches() {
+    // Both docs have only one matching term in should clause.
+    // With minimum_should_match=2, neither doc matches both, so total=0.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    handle
+        .index_document(doc("1", serde_json::json!({"x": "a"})))
+        .await
+        .expect("index");
+    handle
+        .index_document(doc("2", serde_json::json!({"x": "b"})))
+        .await
+        .expect("index");
+    handle.refresh().await.expect("refresh");
+
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::Bool(BoolQuery {
+            should: vec![
+                SearchQuery::Term(TermQuery {
+                    field: "x".to_string(),
+                    value: serde_json::json!("a"),
+                    fuzziness: None,
+                }),
+                SearchQuery::Term(TermQuery {
+                    field: "x".to_string(),
+                    value: serde_json::json!("b"),
+                    fuzziness: None,
+                }),
+            ],
+            minimum_should_match: Some(2),
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        result.hits.total, 0,
+        "minimum_should_match=2 should reject docs with only 1 matching should clause"
+    );
+}
+
+#[tokio::test]
+async fn minimum_should_match_zero_allows_no_should_matches() {
+    // Doc only matches "a" not "b". With minimum_should_match=0, all should are optional.
+    // Must is empty and filter is empty, so default would be 1 but explicit 0 overrides.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    handle
+        .index_document(doc("1", serde_json::json!({"x": "a"})))
+        .await
+        .expect("index");
+    handle.refresh().await.expect("refresh");
+
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::Bool(BoolQuery {
+            should: vec![
+                SearchQuery::Term(TermQuery {
+                    field: "x".to_string(),
+                    value: serde_json::json!("a"),
+                    fuzziness: None,
+                }),
+                SearchQuery::Term(TermQuery {
+                    field: "x".to_string(),
+                    value: serde_json::json!("b"),
+                    fuzziness: None,
+                }),
+            ],
+            minimum_should_match: Some(0),
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        result.hits.total, 1,
+        "minimum_should_match=0 should allow doc when no should clauses match"
     );
 }

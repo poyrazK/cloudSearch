@@ -509,6 +509,7 @@ impl<'a> Parser<'a> {
                         should,
                         filter,
                         must_not: vec![],
+                        minimum_should_match: None,
                     }));
                 } else if !should.is_empty() {
                     // Bool with only should (e.g., OR group) - preserve as a unit in must
@@ -517,6 +518,7 @@ impl<'a> Parser<'a> {
                         should,
                         filter: vec![],
                         must_not: vec![],
+                        minimum_should_match: None,
                     }));
                 }
                 must_not.extend(mn);
@@ -537,6 +539,7 @@ impl<'a> Parser<'a> {
                         should,
                         filter,
                         must_not: vec![],
+                        minimum_should_match: None,
                     }));
                 } else if !should.is_empty() {
                     must.push(SearchQuery::Bool(BoolQuery {
@@ -544,6 +547,7 @@ impl<'a> Parser<'a> {
                         should,
                         filter: vec![],
                         must_not: vec![],
+                        minimum_should_match: None,
                     }));
                 }
                 must_not.extend(mn);
@@ -556,6 +560,7 @@ impl<'a> Parser<'a> {
             should: vec![],
             filter: vec![],
             must_not,
+            minimum_should_match: None,
         })
     }
 
@@ -592,6 +597,7 @@ impl<'a> Parser<'a> {
             should,
             filter: vec![],
             must_not: vec![],
+            minimum_should_match: None,
         })
     }
 
@@ -611,6 +617,7 @@ impl<'a> Parser<'a> {
             should,
             filter,
             must_not: vec![right],
+            minimum_should_match: None,
         })
     }
 }
