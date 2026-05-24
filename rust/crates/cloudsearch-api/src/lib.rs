@@ -9,11 +9,11 @@ use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkRequest,
     BulkResponse, CloudSearchError, CreateIndexRequest, CreateSnapshotResponse,
     DateHistogramAggregationResult, ErrorResponse, FlushResponse, HealthResponse, IndexDocument,
-    IndexDocumentRequest, ListSnapshotsResponse, MatchQuery, MergeResponse,
-    MultiSearchItemResponse, MultiSearchRequest, MultiSearchResponse, PhraseQuery, PrefixQuery,
-    RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortSpec,
-    StatsAggregationResult, TermQuery, TermsAggregationResult, TermsQuery, UpdateSettingsRequest,
-    WildcardQuery,
+    IndexDocumentRequest, ListSnapshotsResponse, MatchQuery, MergeResponse, MultiMatchQuery,
+    MultiMatchType, MultiSearchItemResponse, MultiSearchRequest, MultiSearchResponse, PhraseQuery,
+    PrefixQuery, RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
+    SearchResponse, SortSpec, StatsAggregationResult, TermQuery, TermsAggregationResult,
+    TermsQuery, UpdateSettingsRequest, WildcardQuery,
 };
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use serde_json::Value;
@@ -621,6 +621,7 @@ fn parse_query(value: &Value) -> Result<SearchQuery, ApiError> {
         "wildcard" => Ok(SearchQuery::Wildcard(parse_wildcard_query(body)?)),
         "match" => Ok(SearchQuery::Match(parse_match_query(body)?)),
         "phrase" => Ok(SearchQuery::Phrase(parse_phrase_query(body)?)),
+        "multi_match" => Ok(SearchQuery::MultiMatch(parse_multi_match_query(body)?)),
         other => Err(ApiError(CloudSearchError::InvalidSearchRequest(format!(
             "unsupported query clause '{other}'"
         )))),
@@ -1000,6 +1001,60 @@ fn parse_phrase_query(value: &Value) -> Result<PhraseQuery, ApiError> {
     Ok(PhraseQuery {
         field: field.clone(),
         value: value.to_string(),
+    })
+}
+
+fn parse_multi_match_query(value: &Value) -> Result<MultiMatchQuery, ApiError> {
+    let object = value.as_object().ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "multi_match query must be a JSON object".to_string(),
+        ))
+    })?;
+
+    let query = object.get("query").and_then(Value::as_str).ok_or_else(|| {
+        ApiError(CloudSearchError::InvalidSearchRequest(
+            "multi_match query requires 'query' string".to_string(),
+        ))
+    })?;
+
+    let fields = object
+        .get("fields")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "multi_match query requires 'fields' object".to_string(),
+            ))
+        })?;
+
+    let parsed_fields: std::collections::BTreeMap<String, f32> = std::collections::BTreeMap::new();
+    let mut parsed_fields = parsed_fields;
+    for (field_name, weight_val) in fields {
+        #[allow(clippy::cast_possible_truncation)]
+        let weight = weight_val.as_f64().map_or(1.0, |f| f as f32);
+        parsed_fields.insert(field_name.clone(), weight);
+    }
+
+    let multi_match_type = object.get("type").and_then(Value::as_str).map_or(
+        MultiMatchType::BestFields,
+        |s| match s {
+            "most_fields" => MultiMatchType::MostFields,
+            "phrase" => MultiMatchType::Phrase,
+            "phrase_prefix" => MultiMatchType::PhrasePrefix,
+            _ => MultiMatchType::BestFields,
+        },
+    );
+
+    #[allow(clippy::cast_possible_truncation)]
+    let tie_breaker = object
+        .get("tie_breaker")
+        .and_then(Value::as_f64)
+        .map_or(0.0, |f| f as f32);
+
+    Ok(MultiMatchQuery {
+        query: query.to_string(),
+        fields: parsed_fields,
+        multi_match_type,
+        tie_breaker,
     })
 }
 

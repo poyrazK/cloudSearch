@@ -4,9 +4,10 @@ use cloudsearch_common::{
     BulkRequest, BulkResponse, CloudSearchError, CreateIndexRequest,
     DateHistogramAggregationResult, DateHistogramBucket, DateHistogramInterval, FieldMapping,
     FieldType, FlushResponse, Fuzziness, HitsMetadata, IndexDocument, IndexMetadata, MappingMode,
-    MatchQuery, MergeResponse, PhraseQuery, PrefixQuery, RangeQuery, Result, SearchHit,
-    SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec, StatsAggregationResult,
-    TermQuery, TermsAggregationResult, TermsBucket, TermsQuery, WildcardQuery,
+    MatchQuery, MergeResponse, MultiMatchQuery, MultiMatchType, PhraseQuery, PrefixQuery,
+    RangeQuery, Result, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec,
+    StatsAggregationResult, TermQuery, TermsAggregationResult, TermsBucket, TermsQuery,
+    WildcardQuery,
 };
 use cloudsearch_storage::{
     IndexManifest, SegmentMeta, SegmentSnapshot, SnapshotMetadata, WalManager, WalRecord,
@@ -1650,6 +1651,16 @@ impl IndexHandle {
             SearchQuery::Wildcard(wc) => self.ensure_scalar_field(&wc.field, &wc.field),
             SearchQuery::Match(mq) => self.ensure_text_field(&mq.field, &mq.field),
             SearchQuery::Phrase(phrase) => self.ensure_text_field(&phrase.field, &phrase.field),
+            SearchQuery::MultiMatch(mm) => {
+                if mm.fields.is_empty() {
+                    return Err(CloudSearchError::InvalidSearchRequest(
+                        "multi_match query requires at least one field".to_string(),
+                    ));
+                }
+                mm.fields
+                    .keys()
+                    .try_for_each(|f| self.ensure_text_field(f, f))
+            }
         }
     }
 
@@ -1837,6 +1848,7 @@ fn extract_query_terms(query: &SearchQuery) -> Vec<String> {
     match query {
         SearchQuery::Match(mq) => tokenize(&mq.value),
         SearchQuery::Phrase(pq) => tokenize(&pq.value),
+        SearchQuery::MultiMatch(mm) => tokenize(&mm.query),
         SearchQuery::Term(tq) if tq.fuzziness.is_none() => {
             // For exact term queries, use the term value as-is (already lowercase normalization)
             if let serde_json::Value::String(s) = &tq.value {
@@ -1936,6 +1948,9 @@ fn score_query(
         SearchQuery::Phrase(phrase) => {
             score_phrase_query(document, phrase, doc_id, positions_readers, bm25_ctx)
         }
+        SearchQuery::MultiMatch(mm) => {
+            score_multi_match_query(document, mm, doc_id, positions_readers, bm25_ctx)
+        }
     }
 }
 
@@ -1996,6 +2011,378 @@ fn score_match_query(
     } else {
         Some(total_score)
     }
+}
+
+fn score_multi_match_query(
+    document: &IndexDocument,
+    query: &MultiMatchQuery,
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    let query_tokens = tokenize(&query.query);
+    if query_tokens.is_empty() {
+        return None;
+    }
+
+    // Compute per-field BM25 scores
+    let mut field_scores: Vec<f32> = Vec::new();
+    for (field, weight) in &query.fields {
+        let Some(score) = score_match_query_for_field(
+            document,
+            field,
+            &query_tokens,
+            doc_id,
+            positions_readers,
+            bm25_ctx,
+        ) else {
+            continue;
+        };
+        field_scores.push(score * weight);
+    }
+
+    if field_scores.is_empty() {
+        return None;
+    }
+
+    match query.multi_match_type {
+        MultiMatchType::BestFields => {
+            // max + tie_breaker * sum(others)
+            field_scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            let max = field_scores[0];
+            let sum_others: f32 = field_scores[1..].iter().sum();
+            Some(max + query.tie_breaker * sum_others)
+        }
+        MultiMatchType::MostFields => {
+            // sum of all scores
+            Some(field_scores.into_iter().sum())
+        }
+        MultiMatchType::Phrase => {
+            // Strict phrase matching — returns best phrase score only if all tokens
+            // are consecutive. No fallback to best_fields.
+            score_phrase_for_fields(
+                document,
+                &query_tokens,
+                &query.fields,
+                doc_id,
+                positions_readers,
+                bm25_ctx,
+            )
+        }
+        MultiMatchType::PhrasePrefix => score_phrase_prefix_for_fields(
+            document,
+            &query_tokens,
+            &query.fields,
+            doc_id,
+            positions_readers,
+            bm25_ctx,
+        ),
+    }
+}
+
+/// Score a match query for a specific field given pre-tokenized query tokens.
+fn score_match_query_for_field(
+    document: &IndexDocument,
+    field: &str,
+    query_tokens: &[String],
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    let field_str = document.source.get(field)?.as_str()?;
+    let field_tokens = tokenize(field_str);
+    let doc_len = field_tokens.len();
+
+    let mut total_score = 0.0f32;
+    let mut matched = 0;
+
+    for token in query_tokens {
+        let mut tf = 0u32;
+        for reader in positions_readers {
+            if let Some(pl) = reader.get(token)
+                && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
+            {
+                tf += pl.docs[idx].term_freq;
+            }
+        }
+
+        if tf == 0 {
+            if field_tokens.contains(token) {
+                tf =
+                    u32::try_from(field_tokens.iter().filter(|t| *t == token).count()).unwrap_or(0);
+            } else {
+                continue;
+            }
+        }
+
+        let idf = bm25_ctx.idf_map.get(token).copied().unwrap_or(1.0);
+        let term_score = bm25_ctx.bm25_term_score(tf, doc_len, idf, field);
+        total_score += term_score;
+        matched += 1;
+    }
+
+    if matched == 0 {
+        None
+    } else {
+        Some(total_score)
+    }
+}
+
+/// Score phrase matching across multiple fields.
+/// Returns the best weighted phrase score if any field matches all tokens consecutively.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn score_phrase_for_fields(
+    document: &IndexDocument,
+    query_tokens: &[String],
+    fields: &std::collections::BTreeMap<String, f32>,
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    if query_tokens.len() < 2 || positions_readers.is_empty() {
+        return None;
+    }
+
+    let mut best: Option<f32> = None;
+
+    for (field, weight) in fields {
+        let Some(field_str) = document.source.get(field)?.as_str() else {
+            continue;
+        };
+        let field_tokens = tokenize(field_str);
+        if field_tokens.len() < query_tokens.len() {
+            continue;
+        }
+
+        if let Some(score) =
+            score_phrase_in_field(doc_id, query_tokens, positions_readers, bm25_ctx)
+        {
+            let phrase_score = score * weight;
+            best = Some(best.map_or(phrase_score, |b| b.max(phrase_score)));
+        }
+    }
+
+    best
+}
+
+/// Check if all query tokens appear consecutively in a field at the given positions.
+/// Returns the last matched position on success, or None on failure.
+fn tokens_are_consecutive(
+    doc_id: u64,
+    query_tokens: &[String],
+    positions_reader: &cloudsearch_storage::inverted_index::PositionsReader,
+) -> Option<u32> {
+    let first_term = &query_tokens[0];
+    let posting_list = positions_reader.get(first_term)?;
+
+    for posting in posting_list.docs.iter().filter(|p| p.doc_id == doc_id) {
+        for &first_pos in &posting.positions {
+            let mut previous_pos = first_pos;
+
+            let all_consecutive = query_tokens
+                .iter()
+                .skip(1)
+                .take(query_tokens.len() - 1)
+                .enumerate()
+                .all(|(idx, token)| {
+                    let prev_token = &query_tokens[idx];
+                    let allowed_pos = previous_pos as usize + prev_token.len() + 1;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let allowed_positions = [allowed_pos as u32, (allowed_pos + 1) as u32];
+
+                    let Some(next_list) = positions_reader.get(token) else {
+                        return false;
+                    };
+
+                    for posting in next_list.docs.iter().filter(|p| p.doc_id == doc_id) {
+                        for &pos in &posting.positions {
+                            if allowed_positions.contains(&pos) && pos > previous_pos {
+                                previous_pos = pos;
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                });
+
+            if all_consecutive {
+                return Some(previous_pos);
+            }
+        }
+    }
+    None
+}
+
+/// Score phrase matching in a single field.
+/// Returns phrase score if all tokens are consecutive, None otherwise.
+#[allow(clippy::cast_possible_truncation)]
+fn score_phrase_in_field(
+    doc_id: u64,
+    query_tokens: &[String],
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    for reader in positions_readers {
+        if tokens_are_consecutive(doc_id, query_tokens, reader).is_some() {
+            let idf_sum: f32 = query_tokens
+                .iter()
+                .map(|t| bm25_ctx.idf_map.get(t).copied().unwrap_or(1.0))
+                .sum();
+            return Some(idf_sum);
+        }
+    }
+    None
+}
+
+/// Score phrase matching with prefix on last token.
+/// All tokens except last must match consecutively. Last token matches as prefix.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn score_phrase_prefix_for_fields(
+    document: &IndexDocument,
+    query_tokens: &[String],
+    fields: &std::collections::BTreeMap<String, f32>,
+    doc_id: u64,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    if query_tokens.len() < 2 || positions_readers.is_empty() {
+        return None;
+    }
+
+    let mut best: Option<f32> = None;
+
+    for (field, weight) in fields {
+        let Some(field_str) = document.source.get(field)?.as_str() else {
+            continue;
+        };
+        let field_tokens = tokenize(field_str);
+        if field_tokens.len() < query_tokens.len() {
+            continue;
+        }
+
+        if let Some(score) =
+            score_phrase_prefix_in_field(doc_id, query_tokens, positions_readers, bm25_ctx)
+        {
+            let phrase_score = score * weight;
+            best = Some(best.map_or(phrase_score, |b| b.max(phrase_score)));
+        }
+    }
+
+    best
+}
+
+/// Check if all tokens except the last are consecutive at the given start position.
+/// Returns the last matched position on success, or None on failure.
+fn consecutive_except_last(
+    doc_id: u64,
+    query_tokens: &[String],
+    first_pos: u32,
+    positions_reader: &cloudsearch_storage::inverted_index::PositionsReader,
+) -> Option<u32> {
+    let last_idx = query_tokens.len() - 1;
+    let mut previous_pos = first_pos;
+
+    for (qi, token) in query_tokens
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(last_idx.saturating_sub(1))
+    {
+        let prev_token = &query_tokens[qi - 1];
+        let allowed_pos = previous_pos as usize + prev_token.len() + 1;
+        #[allow(clippy::cast_possible_truncation)]
+        let allowed_positions = [allowed_pos as u32, (allowed_pos + 1) as u32];
+
+        let next_list = positions_reader.get(token)?;
+
+        let mut found = None;
+        for posting in next_list.docs.iter().filter(|p| p.doc_id == doc_id) {
+            for &pos in &posting.positions {
+                if allowed_positions.contains(&pos) && pos > previous_pos {
+                    found = Some(pos);
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+
+        let pos = found?;
+        previous_pos = pos;
+    }
+
+    Some(previous_pos)
+}
+
+/// Check if any term starting with prefix appears after the given position.
+fn prefix_matches_after_position(
+    doc_id: u64,
+    prefix: &str,
+    after_pos: u32,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+) -> bool {
+    for reader in positions_readers {
+        for term in reader.terms() {
+            if !term.starts_with(prefix) {
+                continue;
+            }
+            let Some(pl) = reader.get(term) else {
+                continue;
+            };
+            if let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id)) {
+                for &pos in &pl.docs[idx].positions {
+                    if pos > after_pos {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Score phrase prefix matching in a single field.
+/// Returns phrase score if all tokens except last are consecutive and last matches prefix.
+#[allow(clippy::cast_possible_truncation)]
+fn score_phrase_prefix_in_field(
+    doc_id: u64,
+    query_tokens: &[String],
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    let last_idx = query_tokens.len() - 1;
+    let prefix_term = &query_tokens[last_idx];
+
+    for reader in positions_readers {
+        let first_term = &query_tokens[0];
+        let Some(posting_list) = reader.get(first_term) else {
+            continue;
+        };
+
+        #[allow(clippy::collapsible_if)]
+        for posting in posting_list.docs.iter().filter(|p| p.doc_id == doc_id) {
+            for &first_pos in &posting.positions {
+                if let Some(last_pos) =
+                    consecutive_except_last(doc_id, query_tokens, first_pos, reader)
+                {
+                    if prefix_matches_after_position(
+                        doc_id,
+                        prefix_term,
+                        last_pos,
+                        positions_readers,
+                    ) {
+                        let idf_sum: f32 = query_tokens
+                            .iter()
+                            .map(|t| bm25_ctx.idf_map.get(t).copied().unwrap_or(1.0))
+                            .sum();
+                        return Some(idf_sum);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Score a non-fuzzy term query using BM25.
@@ -2155,7 +2542,7 @@ fn score_phrase_query(
                 // Check if remaining terms appear consecutively after first_pos
                 let mut all_match = true;
                 let mut max_gap: u32 = 0;
-                let mut previous_pos = first_pos as u32;
+                let mut previous_pos: u32 = first_pos as u32;
 
                 for term in query_tokens.iter().skip(1) {
                     let Some(next_list) = reader.get(term) else {
@@ -2436,6 +2823,7 @@ fn get_query_terms(query: &SearchQuery) -> Vec<String> {
         SearchQuery::Wildcard(wc) => tokenize(&wc.value),
         SearchQuery::Match(mq) => tokenize(&mq.value),
         SearchQuery::Phrase(phrase) => tokenize(&phrase.value),
+        SearchQuery::MultiMatch(mm) => tokenize(&mm.query),
     }
 }
 
