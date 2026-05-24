@@ -687,7 +687,10 @@ async fn multi_match_best_fields_returns_max_score() {
     let mut handle = catalog.open_index("test").await.expect("open index");
 
     handle
-        .index_document(doc("1", serde_json::json!({"title": "foo", "content": "bar"})))
+        .index_document(doc(
+            "1",
+            serde_json::json!({"title": "foo", "content": "bar"}),
+        ))
         .await
         .expect("index");
     handle.refresh().await.expect("refresh");
@@ -729,7 +732,10 @@ async fn multi_match_most_fields_sums_scores() {
     let mut handle = catalog.open_index("test").await.expect("open index");
 
     handle
-        .index_document(doc("1", serde_json::json!({"title": "foo", "content": "foo"})))
+        .index_document(doc(
+            "1",
+            serde_json::json!({"title": "foo", "content": "foo"}),
+        ))
         .await
         .expect("index");
     handle.refresh().await.expect("refresh");
@@ -767,4 +773,204 @@ async fn multi_match_most_fields_sums_scores() {
         score > best_score,
         "most_fields score ({score}) should exceed best_fields score ({best_score})"
     );
+}
+
+#[tokio::test]
+async fn multi_match_phrase_requires_consecutive_tokens() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    handle
+        .index_document(doc(
+            "1",
+            serde_json::json!({"content": "hello world today"}),
+        ))
+        .await
+        .expect("index");
+    handle.refresh().await.expect("refresh");
+    handle.flush().await.expect("flush");
+
+    // Consecutive "hello world" — should match
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::MultiMatch(MultiMatchQuery {
+            query: "hello world".to_string(),
+            fields: [("content".to_string(), 1.0)].into_iter().collect(),
+            multi_match_type: MultiMatchType::Phrase,
+            tie_breaker: 0.0,
+        })),
+        ..Default::default()
+    });
+    assert_eq!(
+        result.hits.total, 1,
+        "consecutive 'hello world' should match"
+    );
+
+    // Non-consecutive "hello today" — should NOT match
+    let result2 = handle.search(&SearchRequest {
+        query: Some(SearchQuery::MultiMatch(MultiMatchQuery {
+            query: "hello today".to_string(),
+            fields: [("content".to_string(), 1.0)].into_iter().collect(),
+            multi_match_type: MultiMatchType::Phrase,
+            tie_breaker: 0.0,
+        })),
+        ..Default::default()
+    });
+    assert_eq!(
+        result2.hits.total, 0,
+        "non-consecutive 'hello today' should not match phrase query"
+    );
+}
+
+#[tokio::test]
+async fn multi_match_phrase_prefix_with_prefix_last_token() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    handle
+        .index_document(doc(
+            "1",
+            serde_json::json!({"content": "hello world wildcarding"}),
+        ))
+        .await
+        .expect("index");
+    handle.refresh().await.expect("refresh");
+    handle.flush().await.expect("flush");
+
+    // "hello world wild*" — hello world consecutive, wild* prefix matches wildcarding
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::MultiMatch(MultiMatchQuery {
+            query: "hello world wild".to_string(),
+            fields: [("content".to_string(), 1.0)].into_iter().collect(),
+            multi_match_type: MultiMatchType::PhrasePrefix,
+            tie_breaker: 0.0,
+        })),
+        ..Default::default()
+    });
+    assert_eq!(
+        result.hits.total, 1,
+        "phrase_prefix: 'hello world wild*' should match 'wildcarding'"
+    );
+}
+
+#[tokio::test]
+async fn multi_match_tie_breaker_formula() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    // Doc with two fields, "foo" appears in both
+    handle
+        .index_document(doc(
+            "1",
+            serde_json::json!({"title": "foo bar", "content": "baz foo"}),
+        ))
+        .await
+        .expect("index");
+    handle.refresh().await.expect("refresh");
+
+    // tie_breaker = 0.0: pure max
+    let tie0 = handle
+        .search(&SearchRequest {
+            query: Some(SearchQuery::MultiMatch(MultiMatchQuery {
+                query: "foo".to_string(),
+                fields: [("title".to_string(), 1.0), ("content".to_string(), 1.0)]
+                    .into_iter()
+                    .collect(),
+                multi_match_type: MultiMatchType::BestFields,
+                tie_breaker: 0.0,
+            })),
+            ..Default::default()
+        })
+        .hits
+        .hits[0]
+        .score
+        .unwrap();
+
+    // tie_breaker = 0.3: max + 0.3 * sum_others
+    let tie3 = handle
+        .search(&SearchRequest {
+            query: Some(SearchQuery::MultiMatch(MultiMatchQuery {
+                query: "foo".to_string(),
+                fields: [("title".to_string(), 1.0), ("content".to_string(), 1.0)]
+                    .into_iter()
+                    .collect(),
+                multi_match_type: MultiMatchType::BestFields,
+                tie_breaker: 0.3,
+            })),
+            ..Default::default()
+        })
+        .hits
+        .hits[0]
+        .score
+        .unwrap();
+
+    assert!(
+        tie3 > tie0,
+        "tie_breaker=0.3 should produce higher score than tie_breaker=0: {tie3} vs {tie0}"
+    );
+}
+
+#[tokio::test]
+async fn multi_match_rejects_empty_fields() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let handle = catalog.open_index("test").await.expect("open index");
+
+    let result = handle.validate_search_request(&SearchRequest {
+        query: Some(SearchQuery::MultiMatch(MultiMatchQuery {
+            query: "foo".to_string(),
+            fields: std::collections::BTreeMap::new(),
+            multi_match_type: MultiMatchType::BestFields,
+            tie_breaker: 0.0,
+        })),
+        ..Default::default()
+    });
+
+    assert!(result.is_err(), "empty fields should be rejected");
 }

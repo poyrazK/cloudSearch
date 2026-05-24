@@ -10,11 +10,10 @@ use cloudsearch_common::{
     BulkResponse, CloudSearchError, CreateIndexRequest, CreateSnapshotResponse,
     DateHistogramAggregationResult, ErrorResponse, FlushResponse, HealthResponse, IndexDocument,
     IndexDocumentRequest, ListSnapshotsResponse, MatchQuery, MergeResponse, MultiMatchQuery,
-    MultiMatchType, MultiSearchItemResponse, MultiSearchRequest, MultiSearchResponse,
-    PhraseQuery, PrefixQuery, RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
+    MultiMatchType, MultiSearchItemResponse, MultiSearchRequest, MultiSearchResponse, PhraseQuery,
+    PrefixQuery, RangeQuery, RefreshResponse, SearchHit, SearchQuery, SearchRequest,
     SearchResponse, SortSpec, StatsAggregationResult, TermQuery, TermsAggregationResult,
-    TermsQuery, UpdateSettingsRequest,
-    WildcardQuery,
+    TermsQuery, UpdateSettingsRequest, WildcardQuery,
 };
 use cloudsearch_index::{IndexCatalog, IndexRegistry};
 use serde_json::Value;
@@ -1018,11 +1017,14 @@ fn parse_multi_match_query(value: &Value) -> Result<MultiMatchQuery, ApiError> {
         ))
     })?;
 
-    let fields = object.get("fields").and_then(Value::as_object).ok_or_else(|| {
-        ApiError(CloudSearchError::InvalidSearchRequest(
-            "multi_match query requires 'fields' object".to_string(),
-        ))
-    })?;
+    let fields = object
+        .get("fields")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            ApiError(CloudSearchError::InvalidSearchRequest(
+                "multi_match query requires 'fields' object".to_string(),
+            ))
+        })?;
 
     let parsed_fields: std::collections::BTreeMap<String, f32> = std::collections::BTreeMap::new();
     let mut parsed_fields = parsed_fields;
@@ -1032,15 +1034,15 @@ fn parse_multi_match_query(value: &Value) -> Result<MultiMatchQuery, ApiError> {
         parsed_fields.insert(field_name.clone(), weight);
     }
 
-    let multi_match_type = object
-        .get("type")
-        .and_then(Value::as_str)
-        .map_or(MultiMatchType::BestFields, |s| match s {
+    let multi_match_type = object.get("type").and_then(Value::as_str).map_or(
+        MultiMatchType::BestFields,
+        |s| match s {
             "most_fields" => MultiMatchType::MostFields,
             "phrase" => MultiMatchType::Phrase,
             "phrase_prefix" => MultiMatchType::PhrasePrefix,
             _ => MultiMatchType::BestFields,
-        });
+        },
+    );
 
     #[allow(clippy::cast_possible_truncation)]
     let tie_breaker = object
