@@ -333,10 +333,18 @@ pub struct MltQuery {
     pub field_boost_factor: f32,
 }
 
-fn default_mlt_min_term_freq() -> usize { 2 }
-fn default_mlt_min_doc_freq() -> usize { 1 }
-fn default_mlt_max_query_terms() -> usize { 25 }
-fn default_mlt_field_boost_factor() -> f32 { 1.0 }
+fn default_mlt_min_term_freq() -> usize {
+    2
+}
+fn default_mlt_min_doc_freq() -> usize {
+    1
+}
+fn default_mlt_max_query_terms() -> usize {
+    25
+}
+fn default_mlt_field_boost_factor() -> f32 {
+    1.0
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

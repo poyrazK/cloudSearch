@@ -3,8 +3,8 @@
 //! Run with: cargo test -p cloudsearch-index --test coverage
 
 use cloudsearch_common::{
-    BoolQuery, CreateIndexRequest, Fuzziness, IndexDocument, IndexSettings, MatchQuery,
-    MltQuery, MultiMatchQuery, MultiMatchType, SearchQuery, SearchRequest, SortOrder, SortSpec, TermQuery,
+    BoolQuery, CreateIndexRequest, Fuzziness, IndexDocument, IndexSettings, MatchQuery, MltQuery,
+    MultiMatchQuery, MultiMatchType, SearchQuery, SearchRequest, SortOrder, SortSpec, TermQuery,
 };
 use cloudsearch_index::{IndexCatalog, MergePlan};
 use cloudsearch_storage::SegmentMeta;
@@ -694,7 +694,10 @@ async fn mlt_with_doc_id_excludes_source_and_ranks_by_significance() {
     let mut handle = catalog.open_index("test").await.expect("open index");
 
     handle
-        .index_document(doc("doc1", serde_json::json!({"content": "apple banana cherry"})))
+        .index_document(doc(
+            "doc1",
+            serde_json::json!({"content": "apple banana cherry"}),
+        ))
         .await
         .expect("index doc1");
     handle
@@ -724,7 +727,10 @@ async fn mlt_with_doc_id_excludes_source_and_ranks_by_significance() {
 
     // MLT with doc_id should return empty if positions_readers are empty (needs flush)
     // This is expected behavior - MLT requires positions data
-    assert_eq!(result.hits.total, 0, "MLT requires flushed segments for positions data");
+    assert_eq!(
+        result.hits.total, 0,
+        "MLT requires flushed segments for positions data"
+    );
 }
 
 #[tokio::test]
@@ -773,7 +779,10 @@ async fn mlt_with_like_uses_raw_source() {
 
     // MLT requires flushed segments for positions data (positions_readers)
     // Currently returns empty until flush is implemented for per-doc inverted index
-    assert_eq!(result.hits.total, 0, "MLT requires flushed segments for positions data");
+    assert_eq!(
+        result.hits.total, 0,
+        "MLT requires flushed segments for positions data"
+    );
 }
 
 #[tokio::test]
@@ -837,7 +846,10 @@ async fn mlt_respects_min_term_freq_and_max_query_terms() {
 
     // doc1 has 5 occurrences of "rare" and 1 occurrence of "common"
     handle
-        .index_document(doc("doc1", serde_json::json!({"content": "rare rare rare rare rare common"})))
+        .index_document(doc(
+            "doc1",
+            serde_json::json!({"content": "rare rare rare rare rare common"}),
+        ))
         .await
         .expect("index doc1");
     // doc2 has 2 occurrences of "rare"
@@ -866,7 +878,10 @@ async fn mlt_respects_min_term_freq_and_max_query_terms() {
 
     // MLT requires flushed segments for positions data
     // Currently returns empty until flush is implemented for per-doc inverted index
-    assert_eq!(result.hits.total, 0, "MLT requires flushed segments for positions data");
+    assert_eq!(
+        result.hits.total, 0,
+        "MLT requires flushed segments for positions data"
+    );
 }
 
 #[tokio::test]

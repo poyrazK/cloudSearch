@@ -783,18 +783,32 @@ impl IndexHandle {
     #[allow(clippy::too_many_lines)]
     pub fn search(&self, request: &SearchRequest) -> SearchResponse {
         // Transform MLT query to BoolQuery before scoring
-        let query = if let SearchQuery::Mlt(mlt) = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll) {
+        // Also capture doc_id to exclude from results (exclusion at search level, not via must_not)
+        let (query, mlt_doc_id_to_exclude) = if let SearchQuery::Mlt(mlt) =
+            request.query.as_ref().unwrap_or(&SearchQuery::MatchAll)
+        {
+            let doc_id_to_exclude = mlt.doc_id.clone();
             match self.build_mlt_bool_query(mlt) {
-                Ok(bool_query) => SearchQuery::Bool(bool_query),
+                Ok(bool_query) => (SearchQuery::Bool(bool_query), doc_id_to_exclude),
                 Err(_e) => {
                     return SearchResponse {
-                        hits: HitsMetadata { total: 0, hits: vec![] },
+                        hits: HitsMetadata {
+                            total: 0,
+                            hits: vec![],
+                        },
                         aggregations: std::collections::BTreeMap::new(),
                     };
                 }
             }
         } else {
-            request.query.as_ref().unwrap_or(&SearchQuery::MatchAll).clone()
+            (
+                request
+                    .query
+                    .as_ref()
+                    .unwrap_or(&SearchQuery::MatchAll)
+                    .clone(),
+                None,
+            )
         };
         let now = Utc::now();
 
@@ -857,6 +871,10 @@ impl IndexHandle {
             .iter()
             .filter(|(_, doc)| !self.is_expired(&doc.id, now))
             .filter_map(|(_, doc)| {
+                // Exclude source doc from MLT results (must_not at search level, not via query)
+                if let Some(ref exclude_id) = mlt_doc_id_to_exclude && doc.id == *exclude_id {
+                        return None;
+                    }
                 let doc_id_hash = hash_doc_id(&doc.id);
                 score_query(doc, &query, doc_id_hash, &self.positions_readers, &bm25_ctx)
                     .map(|s| (s, doc))
@@ -968,55 +986,66 @@ impl IndexHandle {
             mlt.fields.clone()
         };
 
-        // Step 3: Extract terms and their frequencies from reference doc
-        let mut term_freqs: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        // Step 3: Extract terms and their frequencies per field
+        let mut field_term_freqs: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, usize>,
+        > = std::collections::HashMap::new();
         for field in &fields_to_analyze {
             if let Some(text) = ref_source.get(field).and_then(|v| v.as_str()) {
                 let tokens = tokenize(text);
+                let field_freqs = field_term_freqs
+                    .entry(field.clone())
+                    .or_default();
                 for token in tokens {
-                    if let Some(min_len) = mlt.min_word_length && token.len() < min_len {
+                    if let Some(min_len) = mlt.min_word_length
+                        && token.len() < min_len
+                    {
                         continue;
                     }
-                    if let Some(max_len) = mlt.max_word_length && token.len() > max_len {
+                    if let Some(max_len) = mlt.max_word_length
+                        && token.len() > max_len
+                    {
                         continue;
                     }
-                    *term_freqs.entry(token).or_insert(0) += 1;
+                    *field_freqs.entry(token).or_insert(0) += 1;
                 }
             }
         }
 
-        // Step 4: Filter by min_term_freq and gather positions readers for DF lookups
+        // Step 4: Compute significance scores per (field, term, tf)
         let positions_readers = &self.positions_readers;
         let n_docs = self.searchable_documents.len().max(1);
-        let mut scored_terms: Vec<(String, f32)> = Vec::new();
+        let mut scored_terms: Vec<(String, String, f32)> = Vec::new();
 
-        for (term, tf) in term_freqs {
-            if tf < mlt.min_term_freq {
-                continue;
-            }
-
-            // Compute DF across all segment readers
-            let mut df = 0usize;
-            for reader in positions_readers {
-                if let Some(pl) = reader.get(&term) {
-                    df += pl.docs.len();
+        for (field, term_freqs) in &field_term_freqs {
+            for (term, &tf) in term_freqs {
+                if tf < mlt.min_term_freq {
+                    continue;
                 }
-            }
 
-            if df < mlt.min_doc_freq {
-                continue;
-            }
+                // Compute DF across all segment readers
+                let mut df = 0usize;
+                for reader in positions_readers {
+                    if let Some(pl) = reader.get(term) {
+                        df += pl.docs.len();
+                    }
+                }
 
-            // TF * IDF significance score
-            let idf = bm25_idf(df, n_docs);
-            #[allow(clippy::cast_precision_loss)]
-            let significance = tf as f32 * idf;
-            scored_terms.push((term, significance));
+                if df < mlt.min_doc_freq {
+                    continue;
+                }
+
+                // TF * IDF significance score
+                let idf = bm25_idf(df, n_docs);
+                #[allow(clippy::cast_precision_loss)]
+                let significance = tf as f32 * idf;
+                scored_terms.push((field.clone(), term.clone(), significance));
+            }
         }
 
         // Step 5: Sort by significance, take top max_query_terms
-        scored_terms.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored_terms.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         scored_terms.truncate(mlt.max_query_terms);
 
         if scored_terms.is_empty() {
@@ -1026,20 +1055,14 @@ impl IndexHandle {
         }
 
         // Step 6: Normalize boosts to [1.0, 1.0 + field_boost_factor]
-        let max_sig = scored_terms
-            .first()
-            .map_or(1.0, |(_, s)| *s)
-            .max(1.0);
+        let max_sig = scored_terms.first().map_or(1.0, |(_, _, s)| *s).max(1.0);
 
         let should_clauses: Vec<SearchQuery> = scored_terms
             .into_iter()
-            .map(|(term, sig)| {
+            .map(|(field, term, sig)| {
                 let boost = 1.0 + (sig / max_sig) * mlt.field_boost_factor;
                 SearchQuery::Term(TermQuery {
-                    field: fields_to_analyze
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "_all".to_string()),
+                    field,
                     value: serde_json::Value::String(term),
                     fuzziness: None,
                     boost: Some(boost),
@@ -1047,23 +1070,11 @@ impl IndexHandle {
             })
             .collect();
 
-        // Step 7: Build BoolQuery with should clauses and must_not for reference doc
-        let must_not: Vec<SearchQuery> = if let Some(doc_id) = &mlt.doc_id {
-            vec![SearchQuery::Term(TermQuery {
-                field: "_id".to_string(),
-                value: serde_json::Value::String(doc_id.clone()),
-                fuzziness: None,
-                boost: None,
-            })]
-        } else {
-            vec![]
-        };
-
         Ok(BoolQuery {
             must: vec![],
             should: should_clauses,
             filter: vec![],
-            must_not,
+            must_not: vec![],
             minimum_should_match: Some(1),
         })
     }
@@ -4604,7 +4615,7 @@ mod tests {
                 ..Default::default()
             })),
             ..Default::default()
- });
+        });
         assert_eq!(filtered.hits.total, 2);
     }
 
