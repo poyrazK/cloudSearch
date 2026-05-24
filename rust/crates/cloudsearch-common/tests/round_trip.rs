@@ -123,6 +123,7 @@ fn test_search_query_term() {
         field: "status".to_string(),
         value: serde_json::json!("active"),
         fuzziness: None,
+        boost: None,
     }));
 }
 
@@ -152,17 +153,20 @@ fn test_search_query_bool() {
             field: "status".to_string(),
             value: serde_json::json!("active"),
             fuzziness: None,
+            boost: None,
         })],
         should: vec![SearchQuery::Term(TermQuery {
             field: "tag".to_string(),
             value: serde_json::json!("featured"),
             fuzziness: None,
+            boost: None,
         })],
         filter: vec![],
         must_not: vec![SearchQuery::Term(TermQuery {
             field: "deleted".to_string(),
             value: serde_json::json!(true),
             fuzziness: None,
+            boost: None,
         })],
         minimum_should_match: None,
     }));
@@ -603,6 +607,7 @@ fn test_search_request_all_fields() {
             field: "status".to_string(),
             value: serde_json::json!("active"),
             fuzziness: None,
+            boost: None,
         })),
         from: Some(10),
         size: Some(25),
@@ -1075,6 +1080,7 @@ fn test_bool_query_with_should_and_filter() {
             field: "tag".to_string(),
             value: serde_json::json!("featured"),
             fuzziness: None,
+            boost: None,
         })],
         filter: vec![SearchQuery::Range(RangeQuery {
             field: "price".to_string(),

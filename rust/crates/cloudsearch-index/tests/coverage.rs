@@ -112,6 +112,7 @@ async fn validate_search_request_rejects_nested_bool_with_object_field() {
                     field: "meta".to_string(),
                     value: serde_json::json!("value"),
                     fuzziness: None,
+                    boost: None,
                 })],
                 should: vec![],
                 filter: vec![],
@@ -248,6 +249,7 @@ async fn validate_search_request_rejects_fuzzy_with_search_after() {
             field: "name".to_string(),
             value: serde_json::json!("admin"),
             fuzziness: Some(Fuzziness::Auto),
+            boost: None,
         })),
         search_after: Some(vec![serde_json::json!(1.0), serde_json::json!("doc123")]),
         sort: Some(SortSpec {
@@ -467,6 +469,7 @@ async fn fuzzy_match_exact_edit_distance_within_threshold() {
             field: "name".to_string(),
             value: serde_json::json!("admim"),
             fuzziness: Some(Fuzziness::Exact(1)),
+            boost: None,
         })),
         ..Default::default()
     });
@@ -509,6 +512,7 @@ async fn fuzzy_match_no_match_when_exceeding_threshold() {
             field: "name".to_string(),
             value: serde_json::json!("xyz"),
             fuzziness: Some(Fuzziness::Exact(1)),
+            boost: None,
         })),
         ..Default::default()
     });
@@ -550,6 +554,7 @@ async fn fuzzy_match_auto_mode_threshold_2_for_long_terms() {
             field: "name".to_string(),
             value: serde_json::json!("admim"),
             fuzziness: Some(Fuzziness::Auto),
+            boost: None,
         })),
         ..Default::default()
     });
@@ -595,11 +600,13 @@ async fn minimum_should_match_requires_multiple_should_matches() {
                     field: "x".to_string(),
                     value: serde_json::json!("a"),
                     fuzziness: None,
+                    boost: None,
                 }),
                 SearchQuery::Term(TermQuery {
                     field: "x".to_string(),
                     value: serde_json::json!("b"),
                     fuzziness: None,
+                    boost: None,
                 }),
             ],
             minimum_should_match: Some(2),
@@ -646,11 +653,13 @@ async fn minimum_should_match_zero_allows_no_should_matches() {
                     field: "x".to_string(),
                     value: serde_json::json!("a"),
                     fuzziness: None,
+                    boost: None,
                 }),
                 SearchQuery::Term(TermQuery {
                     field: "x".to_string(),
                     value: serde_json::json!("b"),
                     fuzziness: None,
+                    boost: None,
                 }),
             ],
             minimum_should_match: Some(0),

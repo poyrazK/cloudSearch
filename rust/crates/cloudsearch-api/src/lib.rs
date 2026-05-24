@@ -674,6 +674,7 @@ fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
             field: field.to_string(),
             value,
             fuzziness,
+            boost: None,
         });
     }
 
@@ -688,6 +689,7 @@ fn parse_term_query(value: &Value) -> Result<TermQuery, ApiError> {
         field: field.clone(),
         value: raw_value.clone(),
         fuzziness,
+        boost: None,
     })
 }
 
@@ -2082,6 +2084,7 @@ mod tests {
                                 field: "service".to_string(),
                                 value: serde_json::json!("billing"),
                                 fuzziness: None,
+                                boost: None,
                             })),
                             ..Default::default()
                         })
@@ -2128,6 +2131,7 @@ mod tests {
                                 field: "service".to_string(),
                                 value: serde_json::json!("billing"),
                                 fuzziness: None,
+                                boost: None,
                             })),
                             ..Default::default()
                         })
@@ -2162,6 +2166,7 @@ mod tests {
                                     field: "level".to_string(),
                                     value: serde_json::json!("info"),
                                     fuzziness: None,
+                                    boost: None,
                                 })],
                                 ..Default::default()
                             })),
@@ -4186,6 +4191,7 @@ mod tests {
                                 field: "level".to_string(),
                                 value: serde_json::json!("info"),
                                 fuzziness: None,
+                                boost: None,
                             })),
                             aggs: Some(std::collections::BTreeMap::from([
                                 (
