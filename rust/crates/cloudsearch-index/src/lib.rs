@@ -2260,12 +2260,9 @@ fn score_phrase_prefix_for_fields(
             continue;
         }
 
-        if let Some(score) = score_phrase_prefix_in_field(
-            doc_id,
-            query_tokens,
-            positions_readers,
-            bm25_ctx,
-        ) {
+        if let Some(score) =
+            score_phrase_prefix_in_field(doc_id, query_tokens, positions_readers, bm25_ctx)
+        {
             let phrase_score = score * weight;
             best = Some(best.map_or(phrase_score, |b| b.max(phrase_score)));
         }
@@ -2369,8 +2366,12 @@ fn score_phrase_prefix_in_field(
                 if let Some(last_pos) =
                     consecutive_except_last(doc_id, query_tokens, first_pos, reader)
                 {
-                    if prefix_matches_after_position(doc_id, prefix_term, last_pos, positions_readers)
-                    {
+                    if prefix_matches_after_position(
+                        doc_id,
+                        prefix_term,
+                        last_pos,
+                        positions_readers,
+                    ) {
                         let idf_sum: f32 = query_tokens
                             .iter()
                             .map(|t| bm25_ctx.idf_map.get(t).copied().unwrap_or(1.0))
