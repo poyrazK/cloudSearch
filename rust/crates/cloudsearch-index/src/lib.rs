@@ -2236,11 +2236,7 @@ fn score_phrase_in_field(
 
 /// Score phrase matching with prefix on last token.
 /// All tokens except last must match consecutively. Last token matches as prefix.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::too_many_lines
-)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 fn score_phrase_prefix_for_fields(
     document: &IndexDocument,
     query_tokens: &[String],
@@ -2249,150 +2245,143 @@ fn score_phrase_prefix_for_fields(
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
     bm25_ctx: &Bm25Context,
 ) -> Option<f32> {
-    if query_tokens.len() < 2 {
-        return None;
-    }
-
-    if positions_readers.is_empty() {
+    if query_tokens.len() < 2 || positions_readers.is_empty() {
         return None;
     }
 
     let mut best: Option<f32> = None;
 
     for (field, weight) in fields {
-        let field_str = document.source.get(field)?.as_str()?;
+        let Some(field_str) = document.source.get(field)?.as_str() else {
+            continue;
+        };
         let field_tokens = tokenize(field_str);
-        let doc_len = field_tokens.len();
-
-        if doc_len < query_tokens.len() {
+        if field_tokens.len() < query_tokens.len() {
             continue;
         }
 
-        let mut found = false;
-        for reader in positions_readers {
-            let first_term = &query_tokens[0];
-            let Some(posting_list) = reader.get(first_term) else {
-                continue;
-            };
-
-            for posting in &posting_list.docs {
-                if posting.doc_id != doc_id {
-                    continue;
-                }
-                let first_positions = &posting.positions;
-                for &first_pos in first_positions {
-                    let mut previous_pos: u32 = first_pos;
-
-                    // Check all tokens except last with consecutive check
-                    let last_idx = query_tokens.len() - 1;
-                    let mut all_match = true;
-                    for (qi, token) in query_tokens
-                        .iter()
-                        .enumerate()
-                        .skip(1)
-                        .take(last_idx.saturating_sub(1))
-                    {
-                        let Some(next_list) = reader.get(token) else {
-                            all_match = false;
-                            break;
-                        };
-
-                        // Consecutive check: next token must be at prev_pos + len(prev_token) or +1 for space
-                        let prev_token = &query_tokens[qi - 1];
-                        let expected_consecutive_pos = previous_pos as usize + prev_token.len();
-                        // Also allow one extra byte for the space separator
-                        let allowed_pos = if expected_consecutive_pos + 1
-                            < (previous_pos as usize) + prev_token.len() + 2
-                        {
-                            expected_consecutive_pos + 1
-                        } else {
-                            expected_consecutive_pos
-                        };
-
-                        let mut found_pos: Option<u32> = None;
-                        for posting in &next_list.docs {
-                            if posting.doc_id != doc_id {
-                                continue;
-                            }
-                            for p in &posting.positions {
-                                // Accept pos at expected position or +1 (space between tokens)
-                                // Must also be after previous_pos
-                                if (*p == allowed_pos as u32 || *p == (allowed_pos + 1) as u32)
-                                    && *p > previous_pos
-                                {
-                                    found_pos = Some(*p);
-                                    break;
-                                }
-                            }
-                            if found_pos.is_some() {
-                                break;
-                            }
-                        }
-
-                        let Some(found_pos) = found_pos else {
-                            all_match = false;
-                            break;
-                        };
-
-                        previous_pos = found_pos;
-                    }
-
-                    if !all_match {
-                        continue;
-                    }
-
-                    // Last token: prefix match
-                    let prefix_term = &query_tokens[last_idx];
-                    let mut found_prefix = false;
-                    for r in positions_readers {
-                        for term in r.terms() {
-                            if term.starts_with(prefix_term)
-                                && let Some(pl) = r.get(term)
-                                && let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id))
-                            {
-                                for &pos in &pl.docs[idx].positions {
-                                    if pos > previous_pos {
-                                        found_prefix = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if found_prefix {
-                                break;
-                            }
-                        }
-                        if found_prefix {
-                            break;
-                        }
-                    }
-
-                    if found_prefix {
-                        found = true;
-                        break;
-                    }
-                }
-                if found {
-                    break;
-                }
-            }
-            if found {
-                break;
-            }
-        }
-
-        if found {
-            let idf_sum: f32 = query_tokens
-                .iter()
-                .map(|t| bm25_ctx.idf_map.get(t).copied().unwrap_or(1.0))
-                .sum();
-            let phrase_score = idf_sum * weight;
-            if best.is_none() || phrase_score > best.unwrap() {
-                best = Some(phrase_score);
-            }
+        if let Some(score) = score_phrase_prefix_in_field(
+            doc_id,
+            query_tokens,
+            positions_readers,
+            bm25_ctx,
+        ) {
+            let phrase_score = score * weight;
+            best = Some(best.map_or(phrase_score, |b| b.max(phrase_score)));
         }
     }
 
     best
+}
+
+/// Check if all tokens except the last are consecutive at the given start position.
+/// Returns the last matched position on success, or None on failure.
+fn consecutive_except_last(
+    doc_id: u64,
+    query_tokens: &[String],
+    first_pos: u32,
+    positions_reader: &cloudsearch_storage::inverted_index::PositionsReader,
+) -> Option<u32> {
+    let last_idx = query_tokens.len() - 1;
+    let mut previous_pos = first_pos;
+
+    for (qi, token) in query_tokens
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(last_idx.saturating_sub(1))
+    {
+        let prev_token = &query_tokens[qi - 1];
+        let allowed_pos = previous_pos as usize + prev_token.len() + 1;
+        #[allow(clippy::cast_possible_truncation)]
+        let allowed_positions = [allowed_pos as u32, (allowed_pos + 1) as u32];
+
+        let next_list = positions_reader.get(token)?;
+
+        let mut found = None;
+        for posting in next_list.docs.iter().filter(|p| p.doc_id == doc_id) {
+            for &pos in &posting.positions {
+                if allowed_positions.contains(&pos) && pos > previous_pos {
+                    found = Some(pos);
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+
+        let pos = found?;
+        previous_pos = pos;
+    }
+
+    Some(previous_pos)
+}
+
+/// Check if any term starting with prefix appears after the given position.
+fn prefix_matches_after_position(
+    doc_id: u64,
+    prefix: &str,
+    after_pos: u32,
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+) -> bool {
+    for reader in positions_readers {
+        for term in reader.terms() {
+            if !term.starts_with(prefix) {
+                continue;
+            }
+            let Some(pl) = reader.get(term) else {
+                continue;
+            };
+            if let Ok(idx) = pl.docs.binary_search_by(|p| p.doc_id.cmp(&doc_id)) {
+                for &pos in &pl.docs[idx].positions {
+                    if pos > after_pos {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Score phrase prefix matching in a single field.
+/// Returns phrase score if all tokens except last are consecutive and last matches prefix.
+#[allow(clippy::cast_possible_truncation)]
+fn score_phrase_prefix_in_field(
+    doc_id: u64,
+    query_tokens: &[String],
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    let last_idx = query_tokens.len() - 1;
+    let prefix_term = &query_tokens[last_idx];
+
+    for reader in positions_readers {
+        let first_term = &query_tokens[0];
+        let Some(posting_list) = reader.get(first_term) else {
+            continue;
+        };
+
+        #[allow(clippy::collapsible_if)]
+        for posting in posting_list.docs.iter().filter(|p| p.doc_id == doc_id) {
+            for &first_pos in &posting.positions {
+                if let Some(last_pos) =
+                    consecutive_except_last(doc_id, query_tokens, first_pos, reader)
+                {
+                    if prefix_matches_after_position(doc_id, prefix_term, last_pos, positions_readers)
+                    {
+                        let idf_sum: f32 = query_tokens
+                            .iter()
+                            .map(|t| bm25_ctx.idf_map.get(t).copied().unwrap_or(1.0))
+                            .sum();
+                        return Some(idf_sum);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Score a non-fuzzy term query using BM25.
