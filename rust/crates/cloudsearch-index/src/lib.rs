@@ -1011,7 +1011,7 @@ impl IndexHandle {
             // TF * IDF significance score
             let idf = bm25_idf(df, n_docs);
             #[allow(clippy::cast_precision_loss)]
-        let significance = tf as f32 * idf;
+            let significance = tf as f32 * idf;
             scored_terms.push((term, significance));
         }
 
