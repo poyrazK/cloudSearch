@@ -263,6 +263,7 @@ pub enum SearchQuery {
     Match(MatchQuery),
     Phrase(PhraseQuery),
     MultiMatch(MultiMatchQuery),
+    Mlt(MltQuery),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -310,6 +311,33 @@ pub struct MultiMatchQuery {
     pub tie_breaker: f32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MltQuery {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub doc_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub like: Option<serde_json::Value>,
+    #[serde(default)]
+    pub fields: Vec<String>,
+    #[serde(default = "default_mlt_min_term_freq")]
+    pub min_term_freq: usize,
+    #[serde(default = "default_mlt_min_doc_freq")]
+    pub min_doc_freq: usize,
+    #[serde(default = "default_mlt_max_query_terms")]
+    pub max_query_terms: usize,
+    #[serde(default)]
+    pub min_word_length: Option<usize>,
+    #[serde(default)]
+    pub max_word_length: Option<usize>,
+    #[serde(default = "default_mlt_field_boost_factor")]
+    pub field_boost_factor: f32,
+}
+
+fn default_mlt_min_term_freq() -> usize { 2 }
+fn default_mlt_min_doc_freq() -> usize { 1 }
+fn default_mlt_max_query_terms() -> usize { 25 }
+fn default_mlt_field_boost_factor() -> f32 { 1.0 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Fuzziness {
@@ -319,12 +347,25 @@ pub enum Fuzziness {
     Exact(usize),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TermQuery {
     pub field: String,
     pub value: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fuzziness: Option<Fuzziness>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub boost: Option<f32>,
+}
+
+impl Default for TermQuery {
+    fn default() -> Self {
+        Self {
+            field: String::new(),
+            value: serde_json::Value::Null,
+            fuzziness: None,
+            boost: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
