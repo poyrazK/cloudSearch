@@ -2139,117 +2139,99 @@ fn score_phrase_for_fields(
     positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
     bm25_ctx: &Bm25Context,
 ) -> Option<f32> {
-    if query_tokens.len() < 2 {
-        return None;
-    }
-
-    if positions_readers.is_empty() {
+    if query_tokens.len() < 2 || positions_readers.is_empty() {
         return None;
     }
 
     let mut best: Option<f32> = None;
 
     for (field, weight) in fields {
-        let field_str = document.source.get(field)?.as_str()?;
+        let Some(field_str) = document.source.get(field)?.as_str() else {
+            continue;
+        };
         let field_tokens = tokenize(field_str);
-        let doc_len = field_tokens.len();
-
-        if doc_len < query_tokens.len() {
+        if field_tokens.len() < query_tokens.len() {
             continue;
         }
 
-        let mut found = false;
-        for reader in positions_readers {
-            let first_term = &query_tokens[0];
-            let Some(posting_list) = reader.get(first_term) else {
-                continue;
-            };
-
-            for posting in &posting_list.docs {
-                if posting.doc_id != doc_id {
-                    continue;
-                }
-                let first_positions = &posting.positions;
-                for &first_pos in first_positions {
-                    let mut previous_pos: u32 = first_pos;
-
-                    // Check if remaining terms appear consecutively after previous_pos
-                    // Positions are byte offsets. Consecutive means: next token starts
-                    // at prev_pos + len(prev_token) or at prev_pos + len(prev_token) + 1 (space).
-                    let mut all_match = true;
-                    for (qi, token) in query_tokens.iter().enumerate().skip(1) {
-                        let Some(next_list) = reader.get(token) else {
-                            all_match = false;
-                            break;
-                        };
-
-                        // Find a position of this term that is consecutive to previous_pos
-                        // Consecutive = starts at prev_pos + len_of_previous_token (+1 for space)
-                        let prev_token = &query_tokens[qi - 1];
-                        let expected_consecutive_pos = previous_pos as usize + prev_token.len();
-                        // Also allow one extra byte for the space separator
-                        let allowed_pos = if expected_consecutive_pos + 1
-                            < (previous_pos as usize) + prev_token.len() + 2
-                        {
-                            expected_consecutive_pos + 1
-                        } else {
-                            expected_consecutive_pos
-                        };
-
-                        let mut found_pos: Option<u32> = None;
-                        for posting in &next_list.docs {
-                            if posting.doc_id != doc_id {
-                                continue;
-                            }
-                            for p in &posting.positions {
-                                // Must be consecutive (at expected position or expected+1 for space) AND after previous
-                                if (*p == allowed_pos as u32 || *p == (allowed_pos + 1) as u32)
-                                    && *p > previous_pos
-                                {
-                                    found_pos = Some(*p);
-                                    break;
-                                }
-                            }
-                            if found_pos.is_some() {
-                                break;
-                            }
-                        }
-
-                        let Some(found_pos) = found_pos else {
-                            all_match = false;
-                            break;
-                        };
-
-                        previous_pos = found_pos;
-                    }
-
-                    if all_match {
-                        found = true;
-                        break;
-                    }
-                }
-                if found {
-                    break;
-                }
-            }
-            if found {
-                break;
-            }
-        }
-
-        if found {
-            let idf_sum: f32 = query_tokens
-                .iter()
-                .map(|t| bm25_ctx.idf_map.get(t).copied().unwrap_or(1.0))
-                .sum();
-            let phrase_score = idf_sum * weight;
-            if best.is_none() || phrase_score > best.unwrap() {
-                best = Some(phrase_score);
-            }
+        if let Some(score) =
+            score_phrase_in_field(doc_id, query_tokens, positions_readers, bm25_ctx)
+        {
+            let phrase_score = score * weight;
+            best = Some(best.map_or(phrase_score, |b| b.max(phrase_score)));
         }
     }
 
     best
+}
+
+/// Check if all query tokens appear consecutively in a field at the given positions.
+/// Returns the last matched position on success, or None on failure.
+fn tokens_are_consecutive(
+    doc_id: u64,
+    query_tokens: &[String],
+    positions_reader: &cloudsearch_storage::inverted_index::PositionsReader,
+) -> Option<u32> {
+    let first_term = &query_tokens[0];
+    let posting_list = positions_reader.get(first_term)?;
+
+    for posting in posting_list.docs.iter().filter(|p| p.doc_id == doc_id) {
+        for &first_pos in &posting.positions {
+            let mut previous_pos = first_pos;
+
+            let all_consecutive = query_tokens
+                .iter()
+                .skip(1)
+                .take(query_tokens.len() - 1)
+                .enumerate()
+                .all(|(idx, token)| {
+                    let prev_token = &query_tokens[idx];
+                    let allowed_pos = previous_pos as usize + prev_token.len() + 1;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let allowed_positions = [allowed_pos as u32, (allowed_pos + 1) as u32];
+
+                    let Some(next_list) = positions_reader.get(token) else {
+                        return false;
+                    };
+
+                    for posting in next_list.docs.iter().filter(|p| p.doc_id == doc_id) {
+                        for &pos in &posting.positions {
+                            if allowed_positions.contains(&pos) && pos > previous_pos {
+                                previous_pos = pos;
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                });
+
+            if all_consecutive {
+                return Some(previous_pos);
+            }
+        }
+    }
+    None
+}
+
+/// Score phrase matching in a single field.
+/// Returns phrase score if all tokens are consecutive, None otherwise.
+#[allow(clippy::cast_possible_truncation)]
+fn score_phrase_in_field(
+    doc_id: u64,
+    query_tokens: &[String],
+    positions_readers: &[cloudsearch_storage::inverted_index::PositionsReader],
+    bm25_ctx: &Bm25Context,
+) -> Option<f32> {
+    for reader in positions_readers {
+        if tokens_are_consecutive(doc_id, query_tokens, reader).is_some() {
+            let idf_sum: f32 = query_tokens
+                .iter()
+                .map(|t| bm25_ctx.idf_map.get(t).copied().unwrap_or(1.0))
+                .sum();
+            return Some(idf_sum);
+        }
+    }
+    None
 }
 
 /// Score phrase matching with prefix on last token.
