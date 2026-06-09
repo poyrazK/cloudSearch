@@ -252,6 +252,7 @@ impl IndexCatalog {
     ///
     /// # Errors
     /// Returns an error if the index does not exist or if file operations fail.
+    #[allow(clippy::too_many_lines)]
     pub async fn open_index(&self, name: &str) -> Result<IndexHandle> {
         let _guard = self.lifecycle_lock.write().await;
         let metadata = self.get_index(name).await?;
@@ -822,6 +823,10 @@ impl IndexHandle {
     }
 
     /// Returns autocomplete suggestions for a given prefix across multiple fields.
+    ///
+    /// # Panics
+    ///
+    /// Panics if sorting fails (should never happen with total ordering on f32 and String).
     #[must_use]
     pub fn suggest(
         &self,
@@ -1355,11 +1360,12 @@ impl IndexHandle {
     }
 
     /// Builds a suggest index from a list of documents for autocomplete.
+    #[allow(clippy::cast_precision_loss)]
     fn build_suggest_index(
         documents: &[IndexDocument],
         mappings: &BTreeMap<String, FieldMapping>,
     ) -> cloudsearch_storage::suggest_index::SuggestIndex {
-        let n_docs = documents.len().max(1) as f32;
+        let n_docs = documents.len().max(1) as f64;
         let mut field_terms: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
 
         for doc in documents {
@@ -1368,8 +1374,7 @@ impl IndexHandle {
                     // Only index text fields (Keyword type or inferred text)
                     let is_text = mappings
                         .get(field_name)
-                        .map(|m| matches!(m.field_type, FieldType::Keyword))
-                        .unwrap_or(true); // default to indexable if no mapping
+                        .is_none_or(|m| matches!(m.field_type, FieldType::Keyword)); // default to indexable if no mapping
 
                     if !is_text {
                         continue;
@@ -1393,7 +1398,8 @@ impl IndexHandle {
             let mut entries: Vec<cloudsearch_storage::suggest_index::SuggestEntry> = term_counts
                 .into_iter()
                 .map(|(term, doc_freq)| {
-                    let score = doc_freq as f32 / n_docs;
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
+                    let score = (f64::from(doc_freq) / n_docs) as f32;
                     cloudsearch_storage::suggest_index::SuggestEntry {
                         term,
                         doc_freq,
@@ -1521,6 +1527,7 @@ impl IndexHandle {
     ///
     /// # Errors
     /// Returns an error if file or WAL operations fail.
+    #[allow(clippy::too_many_lines)]
     pub async fn flush(&mut self) -> Result<FlushResponse> {
         // Rollover WAL first so the snapshot captures a consistent post-rollover state.
         // This ensures WAL replay on restart starts from the new generation.

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 /// MAGIC bytes for suggest sidecar file: "SUGG" in ASCII.
-const SUGGEST_MAGIC: u32 = 0x53554747;
+const SUGGEST_MAGIC: u32 = 0x5355_4747;
 const SUGGEST_VERSION: u8 = 1;
 
 /// A single suggest entry — a term with its popularity score.
@@ -16,7 +16,7 @@ pub struct SuggestEntry {
     pub term: String,
     /// Number of documents containing this term.
     pub doc_freq: u32,
-    /// Normalized score (doc_freq / n_docs).
+    /// Normalized score (`doc_freq` / `n_docs`).
     pub score: f32,
 }
 
@@ -37,7 +37,7 @@ impl SuggestIndex {
     /// Returns the total number of terms across all fields.
     #[must_use]
     pub fn total_terms(&self) -> usize {
-        self.fields.values().map(|v| v.len()).sum()
+        self.fields.values().map(Vec::len).sum()
     }
 
     /// Returns true if the index has no entries.
@@ -59,6 +59,10 @@ impl SuggestReader {
     ///
     /// # Errors
     /// Returns an error if the data is corrupted or has an invalid header.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the data is malformed (e.g., invalid UTF-8, truncated bytes).
     pub fn from_bytes(data: &[u8]) -> std::io::Result<Self> {
         let mut offset = 0usize;
 
@@ -145,7 +149,7 @@ impl SuggestReader {
 
     /// Returns all field names in this reader.
     pub fn fields(&self) -> impl Iterator<Item = &str> {
-        self.fields.keys().map(|s| s.as_str())
+        self.fields.keys().map(String::as_str)
     }
 
     /// Finds the first entry index where term >= prefix (lexicographically).
@@ -162,7 +166,7 @@ impl SuggestReader {
 
         // Binary search for lower bound
         while lo < hi {
-            let mid = (lo + hi) / 2;
+            let mid = usize::midpoint(lo, hi);
             if entries[mid].term.as_str() < prefix {
                 lo = mid + 1;
             } else {
@@ -184,14 +188,12 @@ impl SuggestReader {
         field: &'a str,
         prefix: &'a str,
     ) -> Vec<&'a SuggestEntry> {
-        let start = match self.find_first_prefix(field, prefix) {
-            Some(idx) => idx,
-            None => return Vec::new(),
+        let Some(start) = self.find_first_prefix(field, prefix) else {
+            return Vec::new()
         };
 
-        let entries = match self.fields.get(field) {
-            Some(e) => e,
-            None => return Vec::new(),
+        let Some(entries) = self.fields.get(field) else {
+            return Vec::new()
         };
 
         entries[start..]
@@ -373,7 +375,7 @@ impl SuggestIndex {
     ///
     /// # File format
     /// - Header: MAGIC (4) + VERSION (1) + PADDING (3) + `FIELD_COUNT` (4)
-    /// - Per field: `FIELD_NAME_LEN` (4) + FIELD_NAME (bytes) + `TERM_COUNT` (4)
+    /// - Per field: `FIELD_NAME_LEN` (4) + `FIELD_NAME` (bytes) + `TERM_COUNT` (4)
     /// - Per term: `STR_LEN` (4) + TERM (bytes) + `DOC_FREQ` (4) + SCORE (4)
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
