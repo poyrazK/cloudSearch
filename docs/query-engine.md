@@ -49,6 +49,7 @@ Suggested core nodes:
 - `PrefixQuery`
 - `WildcardQuery`
 - `MatchAllQuery`
+- `MltQuery`
 
 Supporting wrappers:
 
@@ -120,6 +121,21 @@ Current implementation notes:
 
 - wildcard matching is case-sensitive
 - patterns are converted to regex for matching: `*` → `.*`, `?` → `.`, special chars are escaped
+
+### More Like This (MLT)
+
+- finds documents similar to a reference document or raw JSON input
+- useful for "find related articles", "recommendations", or "similar documents" features
+- operates by extracting significant terms from the reference and building a boosted query
+
+Current implementation notes:
+
+- MLT takes either `doc_id` (reference document ID) or `like` (raw JSON object), not both
+- significant terms are extracted using TF*IDF: `sqrt(tf) * log((n + 1) / (df + 1))`
+- top `max_query_terms` terms become `should` clauses with per-field boosts
+- source document is excluded from results at search level (not via query clause)
+- MLT requires flushed segments to access positions data; unflushed documents return empty results
+- term filtering respects `min_term_freq`, `min_doc_freq`, `min_word_length`, and `max_word_length`
 
 ## Filter-First Bias
 

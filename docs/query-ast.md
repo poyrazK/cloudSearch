@@ -61,6 +61,7 @@ pub enum QueryExpr {
     Bool(BoolQuery),
     Prefix(PrefixQuery),
     Wildcard(WildcardQuery),
+    Mlt(MltQuery),
 }
 ```
 
@@ -162,6 +163,33 @@ Suggested fields:
 - `value` (the wildcard pattern)
 
 Wildcard matching is useful for flexible pattern queries where `*` represents zero or more characters and `?` represents exactly one character. Case-sensitive matching applies.
+
+### `MltQuery`
+
+Purpose:
+
+- find documents similar to a given reference document or raw JSON input
+- extract significant terms from the reference using TF*IDF-style scoring
+- build a boosted BoolQuery from the top terms
+
+Suggested fields:
+
+- `doc_id` — reference document ID to analyze (mutually exclusive with `like`)
+- `like` — raw JSON object to analyze (mutually exclusive with `doc_id`)
+- `fields` — list of fields to extract terms from
+- `min_term_freq` — minimum term frequency in the reference document (default: 2)
+- `min_doc_freq` — minimum document frequency in the index (default: 1)
+- `max_query_terms` — maximum number of terms to include in the query (default: 25)
+- `min_word_length` — minimum word length to consider (optional)
+- `max_word_length` — maximum word length to consider (optional)
+- `field_boost_factor` — boost multiplier per field (default: 1.0)
+
+Current implementation notes:
+
+- `MltQuery` is transformed into a `BoolQuery` with `should` clauses before execution
+- term significance is computed using a simplified TF*IDF formula: `sqrt(tf) * log((n + 1) / (df + 1))`
+- the reference document is excluded from results via search-level filtering
+- MLT requires flushed segments to access positions data; unflushed documents return empty results
 
 ## Scalar Value Model
 

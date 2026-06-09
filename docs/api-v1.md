@@ -117,13 +117,14 @@ Current implementation notes:
 - `bool`
 - `prefix`
 - `wildcard`
+- `mlt` (More Like This)
 - `sort`
 - `from`
 - `size`
 
 Current implementation notes:
 
-- `term`, `terms`, `range`, `bool`, `prefix`, `wildcard`, and `match` are implemented
+- `term`, `terms`, `range`, `bool`, `prefix`, `wildcard`, `match`, and `mlt` are implemented
 - `from`, `size`, and single-field sort are implemented
 - the API now accepts both the internal request shape and a closer Elasticsearch-style shape for `term`, `terms`, `range`, `bool`, `prefix`, `wildcard`, `match`, and single-entry sort arrays
 - search responses now use Elasticsearch-style `_id`, `_source`, and `hits.total.value` / `relation` wrappers
