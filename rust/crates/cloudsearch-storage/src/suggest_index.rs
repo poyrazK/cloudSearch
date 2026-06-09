@@ -367,10 +367,14 @@ mod tests {
 impl SuggestIndex {
     /// Serializes the suggest index to binary format.
     ///
-    /// File format:
-    /// - Header: MAGIC (4) + VERSION (1) + PADDING (3) + FIELD_COUNT (4)
-    /// - Per field: FIELD_NAME_LEN (4) + FIELD_NAME (bytes) + TERM_COUNT (4)
-    /// - Per term: STR_LEN (4) + TERM (bytes) + DOC_FREQ (4) + SCORE (4)
+    /// # Panics
+    ///
+    /// Panics if the number of fields or entries exceeds `u32::MAX`.
+    ///
+    /// # File format
+    /// - Header: MAGIC (4) + VERSION (1) + PADDING (3) + `FIELD_COUNT` (4)
+    /// - Per field: `FIELD_NAME_LEN` (4) + FIELD_NAME (bytes) + `TERM_COUNT` (4)
+    /// - Per term: `STR_LEN` (4) + TERM (bytes) + `DOC_FREQ` (4) + SCORE (4)
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut data = Vec::new();
