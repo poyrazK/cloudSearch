@@ -10,6 +10,8 @@ use tokio::{
 
 pub mod inverted_index;
 pub mod positions_writer;
+pub mod suggest_index;
+pub mod suggest_writer;
 
 const WAL_VERSION: u8 = 1;
 const HEADER_LEN: usize = 26;

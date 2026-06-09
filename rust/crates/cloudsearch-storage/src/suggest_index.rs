@@ -1,0 +1,401 @@
+//! Suggest index for autocomplete / as-you-type suggestions.
+//!
+//! Provides O(log n + m) prefix lookup via sorted term arrays, where n = vocabulary size
+//! and m = number of matching terms.
+
+use std::collections::BTreeMap;
+
+/// MAGIC bytes for suggest sidecar file: "SUGG" in ASCII.
+const SUGGEST_MAGIC: u32 = 0x53554747;
+const SUGGEST_VERSION: u8 = 1;
+
+/// A single suggest entry — a term with its popularity score.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuggestEntry {
+    /// The completion text (tokenized, lowercase).
+    pub term: String,
+    /// Number of documents containing this term.
+    pub doc_freq: u32,
+    /// Normalized score (doc_freq / n_docs).
+    pub score: f32,
+}
+
+/// In-memory suggest index — per-field sorted term arrays.
+#[derive(Debug, Clone, Default)]
+pub struct SuggestIndex {
+    /// Per-field sorted term arrays. Each field's entries are sorted by term ascending.
+    pub fields: BTreeMap<String, Vec<SuggestEntry>>,
+}
+
+impl SuggestIndex {
+    /// Creates a new empty suggest index.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the total number of terms across all fields.
+    #[must_use]
+    pub fn total_terms(&self) -> usize {
+        self.fields.values().map(|v| v.len()).sum()
+    }
+
+    /// Returns true if the index has no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
+/// In-memory reader for suggest index — loaded from disk.
+#[derive(Debug, Clone)]
+pub struct SuggestReader {
+    /// Per-field sorted term arrays.
+    fields: BTreeMap<String, Vec<SuggestEntry>>,
+}
+
+impl SuggestReader {
+    /// Loads a suggest reader from previously-written binary data.
+    ///
+    /// # Errors
+    /// Returns an error if the data is corrupted or has an invalid header.
+    pub fn from_bytes(data: &[u8]) -> std::io::Result<Self> {
+        let mut offset = 0usize;
+
+        // Header: MAGIC (4) + VERSION (1) + PADDING (3) + FIELD_COUNT (4)
+        if data.len() < 12 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "suggest data too short for header",
+            ));
+        }
+
+        let magic = u32::from_le_bytes(data[offset..4].try_into().unwrap());
+        if magic != SUGGEST_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid suggest magic: 0x{magic:08X}"),
+            ));
+        }
+        offset += 4;
+
+        let version = data[offset];
+        if version != SUGGEST_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported suggest version: {version}"),
+            ));
+        }
+        offset += 4; // skip padding bytes
+
+        let field_count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+
+        let mut fields = BTreeMap::new();
+
+        for _ in 0..field_count {
+            // Field name length + name
+            let field_name_len =
+                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+
+            let field_name = String::from_utf8(data[offset..offset + field_name_len].to_vec())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            offset += field_name_len;
+
+            // Term count for this field
+            let term_count =
+                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+
+            let mut entries = Vec::with_capacity(term_count);
+            for _ in 0..term_count {
+                let term_len =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+
+                let term = String::from_utf8(data[offset..offset + term_len].to_vec())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                offset += term_len;
+
+                let doc_freq = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+
+                let score = f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+
+                entries.push(SuggestEntry {
+                    term,
+                    doc_freq,
+                    score,
+                });
+            }
+
+            fields.insert(field_name, entries);
+        }
+
+        Ok(Self { fields })
+    }
+
+    /// Returns the sorted entries for a specific field.
+    #[must_use]
+    pub fn get_field(&self, field: &str) -> Option<&Vec<SuggestEntry>> {
+        self.fields.get(field)
+    }
+
+    /// Returns all field names in this reader.
+    pub fn fields(&self) -> impl Iterator<Item = &str> {
+        self.fields.keys().map(|s| s.as_str())
+    }
+
+    /// Finds the first entry index where term >= prefix (lexicographically).
+    /// Returns None if no term matches the prefix.
+    #[must_use]
+    pub fn find_first_prefix(&self, field: &str, prefix: &str) -> Option<usize> {
+        let entries = self.fields.get(field)?;
+        if entries.is_empty() {
+            return None;
+        }
+
+        let mut lo = 0usize;
+        let mut hi = entries.len();
+
+        // Binary search for lower bound
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if entries[mid].term.as_str() < prefix {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        if lo < entries.len() && entries[lo].term.starts_with(prefix) {
+            Some(lo)
+        } else {
+            None
+        }
+    }
+
+    /// Returns all suggestions for a given field and prefix.
+    #[must_use]
+    pub fn suggest_for_field<'a>(
+        &'a self,
+        field: &'a str,
+        prefix: &'a str,
+    ) -> Vec<&'a SuggestEntry> {
+        let start = match self.find_first_prefix(field, prefix) {
+            Some(idx) => idx,
+            None => return Vec::new(),
+        };
+
+        let entries = match self.fields.get(field) {
+            Some(e) => e,
+            None => return Vec::new(),
+        };
+
+        entries[start..]
+            .iter()
+            .take_while(|e| e.term.starts_with(prefix))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entries() -> Vec<SuggestEntry> {
+        vec![
+            SuggestEntry {
+                term: "elastic".to_string(),
+                doc_freq: 10,
+                score: 0.5,
+            },
+            SuggestEntry {
+                term: "elasticsearch".to_string(),
+                doc_freq: 5,
+                score: 0.25,
+            },
+            SuggestEntry {
+                term: "kubernetes".to_string(),
+                doc_freq: 8,
+                score: 0.4,
+            },
+            SuggestEntry {
+                term: "rust".to_string(),
+                doc_freq: 3,
+                score: 0.15,
+            },
+        ]
+    }
+
+    #[test]
+    fn find_first_prefix_finds_exact_match() {
+        let entries = make_entries();
+        let reader = SuggestReader {
+            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
+        };
+
+        // "elastic" exists
+        assert_eq!(reader.find_first_prefix("title", "elastic"), Some(0));
+        // "elasticsearch" exists
+        assert_eq!(reader.find_first_prefix("title", "elasticsearch"), Some(1));
+        // "kube" should match "kubernetes"
+        assert_eq!(reader.find_first_prefix("title", "kube"), Some(2));
+        // "rust" exists
+        assert_eq!(reader.find_first_prefix("title", "rust"), Some(3));
+    }
+
+    #[test]
+    fn find_first_prefix_returns_none_for_non_matching_prefix() {
+        let entries = make_entries();
+        let reader = SuggestReader {
+            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
+        };
+
+        // No term starts with "z"
+        assert_eq!(reader.find_first_prefix("title", "z"), None);
+        // No term starts with "java"
+        assert_eq!(reader.find_first_prefix("title", "java"), None);
+    }
+
+    #[test]
+    fn find_first_prefix_returns_none_for_empty_entries() {
+        let reader = SuggestReader {
+            fields: std::collections::BTreeMap::new(),
+        };
+
+        assert_eq!(reader.find_first_prefix("title", "elastic"), None);
+    }
+
+    #[test]
+    fn find_first_prefix_returns_none_for_missing_field() {
+        let entries = make_entries();
+        let reader = SuggestReader {
+            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
+        };
+
+        assert_eq!(reader.find_first_prefix("body", "elastic"), None);
+    }
+
+    #[test]
+    fn suggest_for_field_iterates_correctly() {
+        let entries = make_entries();
+        let reader = SuggestReader {
+            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
+        };
+
+        let suggestions = reader.suggest_for_field("title", "elast");
+
+        assert_eq!(suggestions.len(), 2);
+        assert_eq!(suggestions[0].term, "elastic");
+        assert_eq!(suggestions[1].term, "elasticsearch");
+    }
+
+    #[test]
+    fn suggest_for_field_returns_empty_for_no_match() {
+        let entries = make_entries();
+        let reader = SuggestReader {
+            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
+        };
+
+        let suggestions = reader.suggest_for_field("title", "z");
+
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn suggest_for_field_stops_at_prefix_boundary() {
+        let entries = make_entries();
+        let reader = SuggestReader {
+            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
+        };
+
+        // "elast" should only match "elastic" and "elasticsearch", not "kubernetes"
+        let suggestions = reader.suggest_for_field("title", "elast");
+
+        assert_eq!(suggestions.len(), 2);
+        assert!(suggestions.iter().all(|e| e.term.starts_with("elast")));
+    }
+
+    #[test]
+    fn suggest_reader_from_bytes_round_trip() {
+        let index = SuggestIndex {
+            fields: std::collections::BTreeMap::from([
+                (
+                    "title".to_string(),
+                    vec![
+                        SuggestEntry {
+                            term: "elastic".to_string(),
+                            doc_freq: 10,
+                            score: 0.5,
+                        },
+                        SuggestEntry {
+                            term: "elasticsearch".to_string(),
+                            doc_freq: 5,
+                            score: 0.25,
+                        },
+                    ],
+                ),
+                (
+                    "description".to_string(),
+                    vec![SuggestEntry {
+                        term: "rust".to_string(),
+                        doc_freq: 3,
+                        score: 0.15,
+                    }],
+                ),
+            ]),
+        };
+
+        let data = index.to_bytes();
+        let loaded = SuggestReader::from_bytes(&data).expect("should load");
+
+        assert_eq!(loaded.fields.len(), 2);
+        let title_entries = loaded.get_field("title").expect("title field");
+        assert_eq!(title_entries.len(), 2);
+        assert_eq!(title_entries[0].term, "elastic");
+        assert_eq!(title_entries[0].doc_freq, 10);
+
+        let desc_entries = loaded.get_field("description").expect("description field");
+        assert_eq!(desc_entries.len(), 1);
+        assert_eq!(desc_entries[0].term, "rust");
+    }
+}
+
+impl SuggestIndex {
+    /// Serializes the suggest index to binary format.
+    ///
+    /// File format:
+    /// - Header: MAGIC (4) + VERSION (1) + PADDING (3) + FIELD_COUNT (4)
+    /// - Per field: FIELD_NAME_LEN (4) + FIELD_NAME (bytes) + TERM_COUNT (4)
+    /// - Per term: STR_LEN (4) + TERM (bytes) + DOC_FREQ (4) + SCORE (4)
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // Header
+        data.extend_from_slice(&SUGGEST_MAGIC.to_le_bytes());
+        data.push(SUGGEST_VERSION);
+        data.extend_from_slice(&[0u8, 0u8, 0u8]); // padding
+        data.extend_from_slice(&(self.fields.len() as u32).to_le_bytes());
+
+        for (field_name, entries) in &self.fields {
+            // Field header
+            let field_bytes = field_name.as_bytes();
+            data.extend_from_slice(&(field_bytes.len() as u32).to_le_bytes());
+            data.extend_from_slice(field_bytes);
+            data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+
+            for entry in entries {
+                data.extend_from_slice(&(entry.term.len() as u32).to_le_bytes());
+                data.extend_from_slice(entry.term.as_bytes());
+                data.extend_from_slice(&entry.doc_freq.to_le_bytes());
+                data.extend_from_slice(&entry.score.to_le_bytes());
+            }
+        }
+
+        data
+    }
+}
