@@ -1640,7 +1640,7 @@ impl IndexHandle {
                 .join(format!("suggest_{segment_number:020}.bin"));
             let data = tokio::fs::read(&suggest_path)
                 .await
-                .map_err(|e| std::io::Error::other(e))?;
+                .map_err(std::io::Error::other)?;
             match cloudsearch_storage::suggest_index::SuggestReader::from_bytes(&data) {
                 Ok(reader) => {
                     self.suggest_readers.push(Some(reader));

@@ -379,17 +379,17 @@ impl SuggestIndex {
         data.extend_from_slice(&SUGGEST_MAGIC.to_le_bytes());
         data.push(SUGGEST_VERSION);
         data.extend_from_slice(&[0u8, 0u8, 0u8]); // padding
-        data.extend_from_slice(&(self.fields.len() as u32).to_le_bytes());
+        data.extend_from_slice(&u32::try_from(self.fields.len()).unwrap().to_le_bytes());
 
         for (field_name, entries) in &self.fields {
             // Field header
             let field_bytes = field_name.as_bytes();
-            data.extend_from_slice(&(field_bytes.len() as u32).to_le_bytes());
+            data.extend_from_slice(&u32::try_from(field_bytes.len()).unwrap().to_le_bytes());
             data.extend_from_slice(field_bytes);
-            data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+            data.extend_from_slice(&u32::try_from(entries.len()).unwrap().to_le_bytes());
 
             for entry in entries {
-                data.extend_from_slice(&(entry.term.len() as u32).to_le_bytes());
+                data.extend_from_slice(&u32::try_from(entry.term.len()).unwrap().to_le_bytes());
                 data.extend_from_slice(entry.term.as_bytes());
                 data.extend_from_slice(&entry.doc_freq.to_le_bytes());
                 data.extend_from_slice(&entry.score.to_le_bytes());
