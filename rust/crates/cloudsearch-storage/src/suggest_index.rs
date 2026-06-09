@@ -203,6 +203,46 @@ impl SuggestReader {
     }
 }
 
+impl SuggestIndex {
+    /// Serializes the suggest index to binary format.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of fields or entries exceeds `u32::MAX`.
+    ///
+    /// # File format
+    /// - Header: MAGIC (4) + VERSION (1) + PADDING (3) + `FIELD_COUNT` (4)
+    /// - Per field: `FIELD_NAME_LEN` (4) + `FIELD_NAME` (bytes) + `TERM_COUNT` (4)
+    /// - Per term: `STR_LEN` (4) + TERM (bytes) + `DOC_FREQ` (4) + SCORE (4)
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // Header
+        data.extend_from_slice(&SUGGEST_MAGIC.to_le_bytes());
+        data.push(SUGGEST_VERSION);
+        data.extend_from_slice(&[0u8, 0u8, 0u8]); // padding
+        data.extend_from_slice(&u32::try_from(self.fields.len()).unwrap().to_le_bytes());
+
+        for (field_name, entries) in &self.fields {
+            // Field header
+            let field_bytes = field_name.as_bytes();
+            data.extend_from_slice(&u32::try_from(field_bytes.len()).unwrap().to_le_bytes());
+            data.extend_from_slice(field_bytes);
+            data.extend_from_slice(&u32::try_from(entries.len()).unwrap().to_le_bytes());
+
+            for entry in entries {
+                data.extend_from_slice(&u32::try_from(entry.term.len()).unwrap().to_le_bytes());
+                data.extend_from_slice(entry.term.as_bytes());
+                data.extend_from_slice(&entry.doc_freq.to_le_bytes());
+                data.extend_from_slice(&entry.score.to_le_bytes());
+            }
+        }
+
+        data
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,45 +403,5 @@ mod tests {
         let desc_entries = loaded.get_field("description").expect("description field");
         assert_eq!(desc_entries.len(), 1);
         assert_eq!(desc_entries[0].term, "rust");
-    }
-}
-
-impl SuggestIndex {
-    /// Serializes the suggest index to binary format.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of fields or entries exceeds `u32::MAX`.
-    ///
-    /// # File format
-    /// - Header: MAGIC (4) + VERSION (1) + PADDING (3) + `FIELD_COUNT` (4)
-    /// - Per field: `FIELD_NAME_LEN` (4) + `FIELD_NAME` (bytes) + `TERM_COUNT` (4)
-    /// - Per term: `STR_LEN` (4) + TERM (bytes) + `DOC_FREQ` (4) + SCORE (4)
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut data = Vec::new();
-
-        // Header
-        data.extend_from_slice(&SUGGEST_MAGIC.to_le_bytes());
-        data.push(SUGGEST_VERSION);
-        data.extend_from_slice(&[0u8, 0u8, 0u8]); // padding
-        data.extend_from_slice(&u32::try_from(self.fields.len()).unwrap().to_le_bytes());
-
-        for (field_name, entries) in &self.fields {
-            // Field header
-            let field_bytes = field_name.as_bytes();
-            data.extend_from_slice(&u32::try_from(field_bytes.len()).unwrap().to_le_bytes());
-            data.extend_from_slice(field_bytes);
-            data.extend_from_slice(&u32::try_from(entries.len()).unwrap().to_le_bytes());
-
-            for entry in entries {
-                data.extend_from_slice(&u32::try_from(entry.term.len()).unwrap().to_le_bytes());
-                data.extend_from_slice(entry.term.as_bytes());
-                data.extend_from_slice(&entry.doc_freq.to_le_bytes());
-                data.extend_from_slice(&entry.score.to_le_bytes());
-            }
-        }
-
-        data
     }
 }
