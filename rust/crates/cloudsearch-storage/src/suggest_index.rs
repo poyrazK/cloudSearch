@@ -189,11 +189,11 @@ impl SuggestReader {
         prefix: &'a str,
     ) -> Vec<&'a SuggestEntry> {
         let Some(start) = self.find_first_prefix(field, prefix) else {
-            return Vec::new()
+            return Vec::new();
         };
 
         let Some(entries) = self.fields.get(field) else {
-            return Vec::new()
+            return Vec::new();
         };
 
         entries[start..]
