@@ -158,6 +158,7 @@ impl<'a> Parser<'a> {
                 field: "tag".to_string(),
                 value: serde_json::Value::String(word.to_string()),
                 fuzziness: None,
+                boost: None,
             }))
         }
     }
@@ -271,6 +272,7 @@ impl<'a> Parser<'a> {
                 field: field.to_string(),
                 value: json_value,
                 fuzziness,
+                boost: None,
             }));
         }
 
@@ -288,6 +290,7 @@ impl<'a> Parser<'a> {
             field: field.to_string(),
             value: json_value,
             fuzziness: None,
+            boost: None,
         }))
     }
 
@@ -636,6 +639,7 @@ mod tests {
                 field: "status".to_string(),
                 value: serde_json::json!("active"),
                 fuzziness: None,
+                boost: None,
             })
         );
     }
@@ -649,6 +653,7 @@ mod tests {
                 field: "count".to_string(),
                 value: serde_json::json!(42),
                 fuzziness: None,
+                boost: None,
             })
         );
     }
@@ -713,6 +718,7 @@ mod tests {
                 field: "message".to_string(),
                 value: serde_json::json!("hello world"),
                 fuzziness: None,
+                boost: None,
             })
         );
     }

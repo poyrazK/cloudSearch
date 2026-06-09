@@ -4,7 +4,7 @@ use cloudsearch_common::{
     BulkRequest, BulkResponse, CloudSearchError, CreateIndexRequest,
     DateHistogramAggregationResult, DateHistogramBucket, DateHistogramInterval, FieldMapping,
     FieldType, FlushResponse, Fuzziness, HitsMetadata, IndexDocument, IndexMetadata, MappingMode,
-    MatchQuery, MergeResponse, MultiMatchQuery, MultiMatchType, PhraseQuery, PrefixQuery,
+    MatchQuery, MergeResponse, MltQuery, MultiMatchQuery, MultiMatchType, PhraseQuery, PrefixQuery,
     RangeQuery, Result, SearchHit, SearchQuery, SearchRequest, SearchResponse, SortOrder, SortSpec,
     StatsAggregationResult, TermQuery, TermsAggregationResult, TermsBucket, TermsQuery,
     WildcardQuery,
@@ -782,7 +782,34 @@ impl IndexHandle {
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn search(&self, request: &SearchRequest) -> SearchResponse {
-        let query = request.query.as_ref().unwrap_or(&SearchQuery::MatchAll);
+        // Transform MLT query to BoolQuery before scoring
+        // Also capture doc_id to exclude from results (exclusion at search level, not via must_not)
+        let (query, mlt_doc_id_to_exclude) = if let SearchQuery::Mlt(mlt) =
+            request.query.as_ref().unwrap_or(&SearchQuery::MatchAll)
+        {
+            let doc_id_to_exclude = mlt.doc_id.clone();
+            match self.build_mlt_bool_query(mlt) {
+                Ok(bool_query) => (SearchQuery::Bool(bool_query), doc_id_to_exclude),
+                Err(_e) => {
+                    return SearchResponse {
+                        hits: HitsMetadata {
+                            total: 0,
+                            hits: vec![],
+                        },
+                        aggregations: std::collections::BTreeMap::new(),
+                    };
+                }
+            }
+        } else {
+            (
+                request
+                    .query
+                    .as_ref()
+                    .unwrap_or(&SearchQuery::MatchAll)
+                    .clone(),
+                None,
+            )
+        };
         let now = Utc::now();
 
         // BM25 parameters
@@ -796,7 +823,7 @@ impl IndexHandle {
         let mut idf_map: std::collections::BTreeMap<String, f32> =
             std::collections::BTreeMap::new();
         let query_terms: std::collections::BTreeSet<String> =
-            extract_query_terms(query).into_iter().collect();
+            extract_query_terms(&query).into_iter().collect();
         for term in &query_terms {
             let mut total_df = 0usize;
             for reader in &self.positions_readers {
@@ -809,7 +836,7 @@ impl IndexHandle {
         }
         // For prefix queries, also compute IDF for the full stored field value
         // since prefix matching checks if stored.starts_with(prefix) first.
-        if let SearchQuery::Prefix(pq) = query {
+        if let SearchQuery::Prefix(ref pq) = query {
             let full_value = pq.value.to_lowercase();
             let mut total_df = 0usize;
             for reader in &self.positions_readers {
@@ -844,8 +871,14 @@ impl IndexHandle {
             .iter()
             .filter(|(_, doc)| !self.is_expired(&doc.id, now))
             .filter_map(|(_, doc)| {
+                // Exclude source doc from MLT results (must_not at search level, not via query)
+                if let Some(ref exclude_id) = mlt_doc_id_to_exclude
+                    && doc.id == *exclude_id
+                {
+                    return None;
+                }
                 let doc_id_hash = hash_doc_id(&doc.id);
-                score_query(doc, query, doc_id_hash, &self.positions_readers, &bm25_ctx)
+                score_query(doc, &query, doc_id_hash, &self.positions_readers, &bm25_ctx)
                     .map(|s| (s, doc))
             })
             .collect();
@@ -908,7 +941,7 @@ impl IndexHandle {
             .map(|(score, doc)| {
                 let doc_id_hash = hash_doc_id(&doc.id);
                 let highlight = match &self.positions_readers {
-                    r if !r.is_empty() => extract_highlight(doc, doc_id_hash, r, query),
+                    r if !r.is_empty() => extract_highlight(doc, doc_id_hash, r, &query),
                     _ => None,
                 };
                 let sort_values = compute_sort_values(doc, request.sort.as_ref(), score);
@@ -926,6 +959,124 @@ impl IndexHandle {
             hits: HitsMetadata { total, hits },
             aggregations,
         }
+    }
+
+    /// Build a `BoolQuery` from an MLT query by extracting significant terms from the reference document.
+    #[allow(clippy::too_many_lines)]
+    fn build_mlt_bool_query(&self, mlt: &MltQuery) -> Result<BoolQuery> {
+        // Step 1: Get the reference document source
+        let ref_source = if let Some(doc_id) = &mlt.doc_id {
+            self.searchable_documents
+                .get(doc_id)
+                .map(|doc| doc.source.clone())
+                .ok_or_else(|| CloudSearchError::DocumentNotFound(doc_id.clone()))?
+        } else if let Some(like) = &mlt.like {
+            like.clone()
+        } else {
+            return Err(CloudSearchError::InvalidSearchRequest(
+                "mlt query requires either doc_id or like".to_string(),
+            ));
+        };
+
+        // Step 2: Collect text fields to analyze
+        let fields_to_analyze: Vec<String> = if mlt.fields.is_empty() {
+            ref_source
+                .as_object()
+                .map(|obj| obj.keys().cloned().collect())
+                .unwrap_or_default()
+        } else {
+            mlt.fields.clone()
+        };
+
+        // Step 3: Extract terms and their frequencies per field
+        let mut field_term_freqs: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, usize>,
+        > = std::collections::HashMap::new();
+        for field in &fields_to_analyze {
+            if let Some(text) = ref_source.get(field).and_then(|v| v.as_str()) {
+                let tokens = tokenize(text);
+                let field_freqs = field_term_freqs.entry(field.clone()).or_default();
+                for token in tokens {
+                    if let Some(min_len) = mlt.min_word_length
+                        && token.len() < min_len
+                    {
+                        continue;
+                    }
+                    if let Some(max_len) = mlt.max_word_length
+                        && token.len() > max_len
+                    {
+                        continue;
+                    }
+                    *field_freqs.entry(token).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Step 4: Compute significance scores per (field, term, tf)
+        let positions_readers = &self.positions_readers;
+        let n_docs = self.searchable_documents.len().max(1);
+        let mut scored_terms: Vec<(String, String, f32)> = Vec::new();
+
+        for (field, term_freqs) in &field_term_freqs {
+            for (term, &tf) in term_freqs {
+                if tf < mlt.min_term_freq {
+                    continue;
+                }
+
+                // Compute DF across all segment readers
+                let mut df = 0usize;
+                for reader in positions_readers {
+                    if let Some(pl) = reader.get(term) {
+                        df += pl.docs.len();
+                    }
+                }
+
+                if df < mlt.min_doc_freq {
+                    continue;
+                }
+
+                // TF * IDF significance score
+                let idf = bm25_idf(df, n_docs);
+                #[allow(clippy::cast_precision_loss)]
+                let significance = tf as f32 * idf;
+                scored_terms.push((field.clone(), term.clone(), significance));
+            }
+        }
+
+        // Step 5: Sort by significance, take top max_query_terms
+        scored_terms.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        scored_terms.truncate(mlt.max_query_terms);
+
+        if scored_terms.is_empty() {
+            return Err(CloudSearchError::InvalidSearchRequest(
+                "mlt query found no significant terms".to_string(),
+            ));
+        }
+
+        // Step 6: Normalize boosts to [1.0, 1.0 + field_boost_factor]
+        let max_sig = scored_terms.first().map_or(1.0, |(_, _, s)| *s).max(1.0);
+
+        let should_clauses: Vec<SearchQuery> = scored_terms
+            .into_iter()
+            .map(|(field, term, sig)| {
+                let boost = 1.0 + (sig / max_sig) * mlt.field_boost_factor;
+                SearchQuery::Term(TermQuery {
+                    field,
+                    value: serde_json::Value::String(term),
+                    fuzziness: None,
+                    boost: Some(boost),
+                })
+            })
+            .collect();
+
+        Ok(BoolQuery {
+            must: vec![],
+            should: should_clauses,
+            filter: vec![],
+            must_not: vec![],
+            minimum_should_match: Some(1),
+        })
     }
 
     /// Evicts all expired documents by soft-deleting them via WAL.
@@ -1661,6 +1812,22 @@ impl IndexHandle {
                     .keys()
                     .try_for_each(|f| self.ensure_text_field(f, f))
             }
+            SearchQuery::Mlt(mlt) => {
+                if mlt.doc_id.is_none() && mlt.like.is_none() {
+                    return Err(CloudSearchError::InvalidSearchRequest(
+                        "mlt query requires either doc_id or like".to_string(),
+                    ));
+                }
+                if mlt.doc_id.is_some() && mlt.like.is_some() {
+                    return Err(CloudSearchError::InvalidSearchRequest(
+                        "mlt query requires only one of doc_id or like, not both".to_string(),
+                    ));
+                }
+                for field in &mlt.fields {
+                    self.ensure_text_field(field, "mlt.fields")?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1951,6 +2118,8 @@ fn score_query(
         SearchQuery::MultiMatch(mm) => {
             score_multi_match_query(document, mm, doc_id, positions_readers, bm25_ctx)
         }
+        // MLT is transformed to BoolQuery in search() before scoring; this is a defensive fallback
+        SearchQuery::Mlt(_) => None,
     }
 }
 
@@ -2437,7 +2606,7 @@ fn score_term_query(
     let field_tokens = tokenize(stored_str);
     let doc_len = field_tokens.len();
 
-    Some(bm25_ctx.bm25_term_score(tf, doc_len, idf, &term.field))
+    Some(bm25_ctx.bm25_term_score(tf, doc_len, idf, &term.field) * term.boost.unwrap_or(1.0))
 }
 
 /// Score a terms query (OR over multiple values) using BM25.
@@ -2800,7 +2969,7 @@ fn extract_highlight(
 /// Recursively extract all terms from a `SearchQuery` for highlighting.
 fn get_query_terms(query: &SearchQuery) -> Vec<String> {
     match query {
-        SearchQuery::MatchAll | SearchQuery::Range(_) => Vec::new(),
+        SearchQuery::MatchAll | SearchQuery::Range(_) | SearchQuery::Mlt(_) => Vec::new(),
         SearchQuery::Term(term) => term
             .value
             .as_str()
@@ -4428,6 +4597,7 @@ mod tests {
                 field: "service".to_string(),
                 value: serde_json::json!("billing"),
                 fuzziness: None,
+                boost: None,
             })),
             ..Default::default()
         });
@@ -4440,6 +4610,7 @@ mod tests {
                     field: "level".to_string(),
                     value: serde_json::json!("info"),
                     fuzziness: None,
+                    boost: None,
                 })],
                 ..Default::default()
             })),
@@ -4531,6 +4702,7 @@ mod tests {
                 field: "missing".to_string(),
                 value: serde_json::json!("nope"),
                 fuzziness: None,
+                boost: None,
             })),
             ..Default::default()
         });
@@ -4543,11 +4715,13 @@ mod tests {
                         field: "service".to_string(),
                         value: serde_json::json!("billing"),
                         fuzziness: None,
+                        boost: None,
                     }),
                     SearchQuery::Term(TermQuery {
                         field: "active".to_string(),
                         value: serde_json::json!(true),
                         fuzziness: None,
+                        boost: None,
                     }),
                 ],
                 ..Default::default()
@@ -4672,6 +4846,7 @@ mod tests {
                 field: "active".to_string(),
                 value: serde_json::json!(true),
                 fuzziness: None,
+                boost: None,
             })),
             ..Default::default()
         });
@@ -4682,6 +4857,7 @@ mod tests {
                 field: "latency".to_string(),
                 value: serde_json::json!(42),
                 fuzziness: None,
+                boost: None,
             })),
             ..Default::default()
         });
@@ -4692,6 +4868,7 @@ mod tests {
                 field: "latency".to_string(),
                 value: serde_json::json!("42"),
                 fuzziness: None,
+                boost: None,
             })),
             ..Default::default()
         });
@@ -4911,6 +5088,7 @@ mod tests {
                     field: "service".to_string(),
                     value: serde_json::json!("billing"),
                     fuzziness: None,
+                    boost: None,
                 })],
                 ..Default::default()
             })),
@@ -4925,11 +5103,13 @@ mod tests {
                         field: "service".to_string(),
                         value: serde_json::json!("billing"),
                         fuzziness: None,
+                        boost: None,
                     }),
                     SearchQuery::Term(TermQuery {
                         field: "service".to_string(),
                         value: serde_json::json!("search"),
                         fuzziness: None,
+                        boost: None,
                     }),
                 ],
                 ..Default::default()
@@ -4944,11 +5124,13 @@ mod tests {
                     field: "service".to_string(),
                     value: serde_json::json!("billing"),
                     fuzziness: None,
+                    boost: None,
                 })],
                 must_not: vec![SearchQuery::Term(TermQuery {
                     field: "level".to_string(),
                     value: serde_json::json!("error"),
                     fuzziness: None,
+                    boost: None,
                 })],
                 ..Default::default()
             })),
@@ -5321,6 +5503,7 @@ mod tests {
                 field: "level".to_string(),
                 value: serde_json::json!("info"),
                 fuzziness: None,
+                boost: None,
             })),
             from: Some(0),
             size: Some(1),
@@ -6479,7 +6662,7 @@ mod tests {
         let term = TermQuery {
             field: "name".to_string(),
             value: serde_json::json!("admin"),
-            fuzziness: None,
+            ..Default::default()
         };
         let result = fuzzy_term_match(&doc, &term);
         assert_eq!(
@@ -6492,7 +6675,7 @@ mod tests {
         let term_miss = TermQuery {
             field: "name".to_string(),
             value: serde_json::json!("xyz"),
-            fuzziness: None,
+            ..Default::default()
         };
         let result_miss = fuzzy_term_match(&doc, &term_miss);
         assert_eq!(
@@ -6505,6 +6688,7 @@ mod tests {
             field: "nonexistent".to_string(),
             value: serde_json::json!("admin"),
             fuzziness: None,
+            boost: None,
         };
         let result_missing = fuzzy_term_match(&doc, &term_missing);
         assert_eq!(
@@ -6525,6 +6709,7 @@ mod tests {
             field: "name".to_string(),
             value: serde_json::json!("admin"),
             fuzziness: Some(Fuzziness::Exact(0)),
+            boost: None,
         };
         let result = fuzzy_term_match(&doc, &term);
         assert_eq!(
@@ -6538,6 +6723,7 @@ mod tests {
             field: "name".to_string(),
             value: serde_json::json!("xyz"),
             fuzziness: Some(Fuzziness::Exact(0)),
+            boost: None,
         };
         let result_miss = fuzzy_term_match(&doc, &term_miss);
         assert_eq!(
@@ -6558,6 +6744,7 @@ mod tests {
             field: "name".to_string(),
             value: serde_json::json!("admin"),
             fuzziness: Some(Fuzziness::Auto),
+            boost: None,
         };
         assert_eq!(fuzzy_term_match(&doc, &term), Some(true));
 
@@ -6566,6 +6753,7 @@ mod tests {
             field: "name".to_string(),
             value: serde_json::json!("admim"),
             fuzziness: Some(Fuzziness::Auto),
+            boost: None,
         };
         assert_eq!(fuzzy_term_match(&doc, &term_fuzzy), Some(true));
 
@@ -6574,6 +6762,7 @@ mod tests {
             field: "name".to_string(),
             value: serde_json::json!("xyz"),
             fuzziness: Some(Fuzziness::Auto),
+            boost: None,
         };
         let result_no_match = fuzzy_term_match(&doc, &term_no_match);
         assert_eq!(
@@ -6595,6 +6784,7 @@ mod tests {
             field: "count".to_string(),
             value: serde_json::json!(42),
             fuzziness: Some(Fuzziness::Auto),
+            boost: None,
         };
         assert_eq!(fuzzy_term_match(&doc, &term), None); // fuzzy requires string
     }
