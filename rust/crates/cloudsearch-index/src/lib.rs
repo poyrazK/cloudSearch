@@ -872,9 +872,11 @@ impl IndexHandle {
             .filter(|(_, doc)| !self.is_expired(&doc.id, now))
             .filter_map(|(_, doc)| {
                 // Exclude source doc from MLT results (must_not at search level, not via query)
-                if let Some(ref exclude_id) = mlt_doc_id_to_exclude && doc.id == *exclude_id {
-                        return None;
-                    }
+                if let Some(ref exclude_id) = mlt_doc_id_to_exclude
+                    && doc.id == *exclude_id
+                {
+                    return None;
+                }
                 let doc_id_hash = hash_doc_id(&doc.id);
                 score_query(doc, &query, doc_id_hash, &self.positions_readers, &bm25_ctx)
                     .map(|s| (s, doc))
@@ -994,9 +996,7 @@ impl IndexHandle {
         for field in &fields_to_analyze {
             if let Some(text) = ref_source.get(field).and_then(|v| v.as_str()) {
                 let tokens = tokenize(text);
-                let field_freqs = field_term_freqs
-                    .entry(field.clone())
-                    .or_default();
+                let field_freqs = field_term_freqs.entry(field.clone()).or_default();
                 for token in tokens {
                     if let Some(min_len) = mlt.min_word_length
                         && token.len() < min_len
