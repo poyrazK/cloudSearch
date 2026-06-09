@@ -252,6 +252,7 @@ pub fn router_with_registry(registry: Arc<IndexRegistry>) -> Router {
             "/{index}/_search",
             get(search_index_get).post(search_index).put(search_index),
         )
+        .route("/{index}/_suggest", post(suggest_index))
         .route("/{index}/_settings", put(update_index_settings))
         .route("/{index}/_snapshot", get(list_snapshots))
         .route(
@@ -517,6 +518,28 @@ async fn multi_search(
         tracing::warn!(duration_ms = elapsed.as_millis(), "slow multi_search");
     }
     Ok((StatusCode::OK, Json(MultiSearchResponse { responses })))
+}
+
+async fn suggest_index(
+    State(state): State<ApiState>,
+    Path(index): Path<String>,
+    Json(request): Json<cloudsearch_common::SuggestRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let started_at = Instant::now();
+
+    let handle = state.registry.index_handle(&index).await?;
+    let handle = handle.lock().await;
+
+    let result = handle.suggest(&request);
+
+    state.metrics().record_request(
+        "suggest",
+        "POST",
+        StatusCode::OK,
+        started_at.elapsed().as_secs_f64(),
+    );
+
+    Ok((StatusCode::OK, Json(result)))
 }
 
 async fn search_index_get(

@@ -356,6 +356,35 @@ pub enum Fuzziness {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SuggestRequest {
+    pub prefix: String,
+    #[serde(default)]
+    pub fields: BTreeMap<String, f32>,
+    #[serde(default = "default_suggest_size")]
+    pub size: usize,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fuzzy: Option<Fuzziness>,
+}
+
+fn default_suggest_size() -> usize {
+    10
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SuggestResponse {
+    pub suggestions: Vec<Suggestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Suggestion {
+    pub text: String,
+    pub score: f32,
+    pub doc_freq: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TermQuery {
     pub field: String,
     pub value: serde_json::Value,

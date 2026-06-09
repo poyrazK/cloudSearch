@@ -188,6 +188,36 @@ impl IndexCatalog {
     }
 
     /// Load all positions sidecars from a manifest's segments.
+    async fn load_all_suggest_readers(
+        segments_dir: &Path,
+        manifest: &IndexManifest,
+    ) -> Vec<Option<cloudsearch_storage::suggest_index::SuggestReader>> {
+        let mut readers = Vec::new();
+        for seg in &manifest.segments {
+            let reader = Self::load_single_suggest_reader(segments_dir, seg).await;
+            readers.push(reader);
+        }
+        readers
+    }
+
+    /// Load suggest sidecar for a single segment, if it exists.
+    async fn load_single_suggest_reader(
+        segments_dir: &Path,
+        seg: &SegmentMeta,
+    ) -> Option<cloudsearch_storage::suggest_index::SuggestReader> {
+        let path = segments_dir.join(format!("suggest_{:020}.bin", seg.segment_number));
+        let reader = cloudsearch_storage::suggest_index::SuggestReader::from_bytes(
+            &tokio::fs::read(&path).await.ok()?,
+        )
+        .ok()?;
+        if reader.fields().count() > 0 {
+            tracing::info!(fields = reader.fields().count(), "loaded suggest sidecar");
+            Some(reader)
+        } else {
+            None
+        }
+    }
+
     async fn load_all_positions_readers(
         segments_dir: &Path,
         manifest: &IndexManifest,
@@ -320,6 +350,15 @@ impl IndexCatalog {
             );
         }
 
+        // Load suggest sidecar from all segments for autocomplete
+        let suggest_readers = Self::load_all_suggest_readers(&segments_dir, &manifest).await;
+        if !suggest_readers.is_empty() {
+            tracing::info!(
+                count = suggest_readers.len(),
+                "loaded suggest sidecars for all segments"
+            );
+        }
+
         Ok(IndexHandle {
             metadata,
             metadata_path,
@@ -333,6 +372,7 @@ impl IndexCatalog {
             doc_values_reader,
             per_doc_inverted_index: BTreeMap::new(),
             positions_readers,
+            suggest_readers,
         })
     }
 
@@ -503,6 +543,8 @@ pub struct IndexHandle {
     per_doc_inverted_index: BTreeMap<String, BTreeMap<String, Vec<u32>>>,
     /// Positions readers loaded from all segments, for multi-segment highlight extraction.
     positions_readers: Vec<cloudsearch_storage::inverted_index::PositionsReader>,
+    /// Suggest readers loaded from all segments, for autocomplete suggestions.
+    suggest_readers: Vec<Option<cloudsearch_storage::suggest_index::SuggestReader>>,
 }
 
 #[derive(Debug, Clone)]
@@ -776,6 +818,45 @@ impl IndexHandle {
             Some(PendingOperation::Upsert(document)) => Some(document),
             Some(PendingOperation::Delete) => None,
             None => self.searchable_documents.get(document_id),
+        }
+    }
+
+    /// Returns autocomplete suggestions for a given prefix across multiple fields.
+    #[must_use]
+    pub fn suggest(
+        &self,
+        request: &cloudsearch_common::SuggestRequest,
+    ) -> cloudsearch_common::SuggestResponse {
+        let prefix = request.prefix.to_ascii_lowercase();
+        let size = request.size;
+        let mut candidates: Vec<cloudsearch_common::Suggestion> = Vec::new();
+
+        for (field, field_weight) in &request.fields {
+            // Collect suggestions from all segments for this field
+            for reader_opt in &self.suggest_readers {
+                let Some(reader) = reader_opt else { continue };
+                for entry in reader.suggest_for_field(field, &prefix) {
+                    candidates.push(cloudsearch_common::Suggestion {
+                        text: entry.term.clone(),
+                        score: entry.score * field_weight,
+                        doc_freq: entry.doc_freq,
+                        field: Some(field.clone()),
+                    });
+                }
+            }
+        }
+
+        // Sort by score descending, then by text ascending for tie-breaking
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap()
+                .then_with(|| a.text.cmp(&b.text))
+        });
+        candidates.truncate(size);
+
+        cloudsearch_common::SuggestResponse {
+            suggestions: candidates,
         }
     }
 
@@ -1273,6 +1354,61 @@ impl IndexHandle {
         doc_index
     }
 
+    /// Builds a suggest index from a list of documents for autocomplete.
+    fn build_suggest_index(
+        documents: &[IndexDocument],
+        mappings: &BTreeMap<String, FieldMapping>,
+    ) -> cloudsearch_storage::suggest_index::SuggestIndex {
+        let n_docs = documents.len().max(1) as f32;
+        let mut field_terms: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
+
+        for doc in documents {
+            if let Some(obj) = doc.source.as_object() {
+                for (field_name, field_value) in obj {
+                    // Only index text fields (Keyword type or inferred text)
+                    let is_text = mappings
+                        .get(field_name)
+                        .map(|m| matches!(m.field_type, FieldType::Keyword))
+                        .unwrap_or(true); // default to indexable if no mapping
+
+                    if !is_text {
+                        continue;
+                    }
+
+                    let Some(text) = field_value.as_str() else {
+                        continue;
+                    };
+                    let tokens = tokenize(text);
+
+                    let field_freqs = field_terms.entry(field_name.clone()).or_default();
+                    for token in tokens {
+                        *field_freqs.entry(token).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        let mut index = cloudsearch_storage::suggest_index::SuggestIndex::new();
+        for (field, term_counts) in field_terms {
+            let mut entries: Vec<cloudsearch_storage::suggest_index::SuggestEntry> = term_counts
+                .into_iter()
+                .map(|(term, doc_freq)| {
+                    let score = doc_freq as f32 / n_docs;
+                    cloudsearch_storage::suggest_index::SuggestEntry {
+                        term,
+                        doc_freq,
+                        score,
+                    }
+                })
+                .collect();
+            // Sort by term ascending for binary search
+            entries.sort_by(|a, b| a.term.cmp(&b.term));
+            index.fields.insert(field, entries);
+        }
+
+        index
+    }
+
     /// Soft-deletes a document by writing a delete record to the WAL.
     ///
     /// # Errors
@@ -1479,6 +1615,43 @@ impl IndexHandle {
                     tracing::warn!(path = %positions_path.as_path().display(), error = %e, "failed to read positions file after flush");
                 }
                 _ => {}
+            }
+        }
+
+        // Build and write suggest sidecar for autocomplete
+        let suggest_index = Self::build_suggest_index(&snapshot.documents, &self.metadata.mappings);
+        if !suggest_index.is_empty() {
+            let suggest_data = suggest_index.to_bytes();
+            cloudsearch_storage::suggest_writer::write_suggest(
+                &self.segments_dir,
+                segment_number,
+                &suggest_data,
+            )
+            .await?;
+            tracing::info!(
+                index = %self.metadata.name,
+                fields = suggest_index.fields.len(),
+                terms = suggest_index.total_terms(),
+                "wrote suggest sidecar"
+            );
+            // Update suggest_readers to include the newly written segment's suggest index
+            let suggest_path = self
+                .segments_dir
+                .join(format!("suggest_{segment_number:020}.bin"));
+            let data = tokio::fs::read(&suggest_path)
+                .await
+                .map_err(|e| std::io::Error::other(e))?;
+            match cloudsearch_storage::suggest_index::SuggestReader::from_bytes(&data) {
+                Ok(reader) => {
+                    self.suggest_readers.push(Some(reader));
+                    tracing::info!(
+                        count = self.suggest_readers.len(),
+                        "added new suggest reader after flush"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(path = %suggest_path.as_path().display(), error = %e, "failed to read suggest file after flush");
+                }
             }
         }
 
