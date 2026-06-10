@@ -837,7 +837,9 @@ impl IndexHandle {
         let mut candidates: Vec<cloudsearch_common::Suggestion> = Vec::new();
 
         for (field, field_weight) in &request.fields {
-            if *field_weight == 0.0 { continue; }
+            if *field_weight == 0.0 {
+                continue;
+            }
             // Collect suggestions from all segments for this field
             for reader_opt in &self.suggest_readers {
                 let Some(reader) = reader_opt else { continue };

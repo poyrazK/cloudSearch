@@ -1875,11 +1875,17 @@ async fn suggest_returns_completions_for_prefix() {
     node.flush("test").await;
 
     let resp = node
-        .suggest("test", serde_json::json!({"prefix": "elast", "fields": {"title": 1.0}, "size": 10}))
+        .suggest(
+            "test",
+            serde_json::json!({"prefix": "elast", "fields": {"title": 1.0}, "size": 10}),
+        )
         .await;
 
     let suggestions = resp["suggestions"].as_array().expect("suggestions array");
-    assert!(!suggestions.is_empty(), "expected suggestions for 'elast' prefix");
+    assert!(
+        !suggestions.is_empty(),
+        "expected suggestions for 'elast' prefix"
+    );
     assert_eq!(
         suggestions[0]["text"].as_str().unwrap(),
         "elastic",
