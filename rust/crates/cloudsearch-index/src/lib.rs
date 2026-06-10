@@ -834,7 +834,9 @@ impl IndexHandle {
     ) -> cloudsearch_common::SuggestResponse {
         let prefix = request.prefix.to_ascii_lowercase();
         let size = request.size;
-        let mut candidates: Vec<cloudsearch_common::Suggestion> = Vec::new();
+
+        // Deduplicate by (text, field) while collecting, keeping highest score
+        let mut seen: BTreeMap<(String, String), cloudsearch_common::Suggestion> = BTreeMap::new();
 
         for (field, field_weight) in &request.fields {
             if *field_weight == 0.0 {
@@ -844,17 +846,24 @@ impl IndexHandle {
             for reader_opt in &self.suggest_readers {
                 let Some(reader) = reader_opt else { continue };
                 for entry in reader.suggest_for_field(field, &prefix) {
-                    candidates.push(cloudsearch_common::Suggestion {
+                    let key = (entry.term.clone(), field.clone());
+                    let suggestion = cloudsearch_common::Suggestion {
                         text: entry.term.clone(),
                         score: entry.score * field_weight,
                         doc_freq: entry.doc_freq,
                         field: Some(field.clone()),
-                    });
+                    };
+                    seen.entry(key).and_modify(|e| {
+                        if suggestion.score > e.score {
+                            *e = suggestion.clone();
+                        }
+                    }).or_insert(suggestion);
                 }
             }
         }
 
         // Sort by score descending, then by text ascending for tie-breaking
+        let mut candidates: Vec<_> = seen.into_values().collect();
         candidates.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -1644,25 +1653,22 @@ impl IndexHandle {
                 terms = suggest_index.total_terms(),
                 "wrote suggest sidecar"
             );
-            // Update suggest_readers to include the newly written segment's suggest index
-            let suggest_path = self
-                .segments_dir
-                .join(format!("suggest_{segment_number:020}.bin"));
-            let data = tokio::fs::read(&suggest_path)
-                .await
-                .map_err(std::io::Error::other)?;
-            match cloudsearch_storage::suggest_index::SuggestReader::from_bytes(&data) {
-                Ok(reader) => {
-                    self.suggest_readers.push(Some(reader));
-                    tracing::info!(
-                        count = self.suggest_readers.len(),
-                        "added new suggest reader after flush"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(path = %suggest_path.as_path().display(), error = %e, "failed to read suggest file after flush");
+            // Reload all suggest readers from the updated manifest to avoid accumulation
+            let mut new_readers = Vec::new();
+            for seg in &self.manifest.segments {
+                let path = self.segments_dir.join(format!("suggest_{:020}.bin", seg.segment_number));
+                if let Ok(data) = tokio::fs::read(&path).await
+                    && let Ok(reader) = cloudsearch_storage::suggest_index::SuggestReader::from_bytes(&data)
+                    && reader.fields().count() > 0
+                {
+                    new_readers.push(Some(reader));
                 }
             }
+            self.suggest_readers = new_readers;
+            tracing::info!(
+                count = self.suggest_readers.len(),
+                "reloaded suggest readers after flush"
+            );
         }
 
         // Clear per-doc indices now that they're persisted
