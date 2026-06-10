@@ -142,6 +142,21 @@ impl TestNode {
         resp.json().await.expect("parse search response")
     }
 
+    /// Suggests autocomplete completions for a prefix.
+    ///
+    /// # Panics
+    /// Panics if the request fails to send or response cannot be parsed.
+    pub async fn suggest(&self, index: &str, request: serde_json::Value) -> serde_json::Value {
+        let resp = self
+            .client
+            .post(format!("{}/{}/_suggest", self.base_url, index))
+            .json(&request)
+            .send()
+            .await
+            .expect("suggest request");
+        resp.json().await.expect("parse suggest response")
+    }
+
     /// Returns the total hits count from a search response.
     ///
     /// # Panics

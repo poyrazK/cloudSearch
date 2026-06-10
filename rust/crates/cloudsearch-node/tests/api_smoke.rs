@@ -1849,3 +1849,48 @@ async fn snapshot_returns_404_for_missing_index() {
 
     node.stop();
 }
+
+#[tokio::test]
+async fn suggest_returns_completions_for_prefix() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let port = reserve_port();
+    let mut node = TestNode::spawn(temp_dir, port).await;
+
+    node.create_index("test").await;
+    node.index_doc(
+        "test",
+        "1",
+        serde_json::json!({"title": "elasticsearch is awesome", "body": "rust is great"}),
+    )
+    .await;
+    node.index_doc(
+        "test",
+        "2",
+        serde_json::json!({"title": "elastic cloud", "body": "kubernetes deployment"}),
+    )
+    .await;
+
+    // Flush to build suggest sidecar
+    node.refresh("test").await;
+    node.flush("test").await;
+
+    let resp = node
+        .suggest(
+            "test",
+            serde_json::json!({"prefix": "elast", "fields": {"title": 1.0}, "size": 10}),
+        )
+        .await;
+
+    let suggestions = resp["suggestions"].as_array().expect("suggestions array");
+    assert!(
+        !suggestions.is_empty(),
+        "expected suggestions for 'elast' prefix"
+    );
+    assert_eq!(
+        suggestions[0]["text"].as_str().unwrap(),
+        "elastic",
+        "top suggestion should be 'elastic'"
+    );
+
+    node.stop();
+}

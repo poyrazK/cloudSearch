@@ -188,6 +188,36 @@ impl IndexCatalog {
     }
 
     /// Load all positions sidecars from a manifest's segments.
+    async fn load_all_suggest_readers(
+        segments_dir: &Path,
+        manifest: &IndexManifest,
+    ) -> Vec<Option<cloudsearch_storage::suggest_index::SuggestReader>> {
+        let mut readers = Vec::new();
+        for seg in &manifest.segments {
+            let reader = Self::load_single_suggest_reader(segments_dir, seg).await;
+            readers.push(reader);
+        }
+        readers
+    }
+
+    /// Load suggest sidecar for a single segment, if it exists.
+    async fn load_single_suggest_reader(
+        segments_dir: &Path,
+        seg: &SegmentMeta,
+    ) -> Option<cloudsearch_storage::suggest_index::SuggestReader> {
+        let path = segments_dir.join(format!("suggest_{:020}.bin", seg.segment_number));
+        let reader = cloudsearch_storage::suggest_index::SuggestReader::from_bytes(
+            &tokio::fs::read(&path).await.ok()?,
+        )
+        .ok()?;
+        if reader.fields().count() > 0 {
+            tracing::info!(fields = reader.fields().count(), "loaded suggest sidecar");
+            Some(reader)
+        } else {
+            None
+        }
+    }
+
     async fn load_all_positions_readers(
         segments_dir: &Path,
         manifest: &IndexManifest,
@@ -222,6 +252,7 @@ impl IndexCatalog {
     ///
     /// # Errors
     /// Returns an error if the index does not exist or if file operations fail.
+    #[allow(clippy::too_many_lines)]
     pub async fn open_index(&self, name: &str) -> Result<IndexHandle> {
         let _guard = self.lifecycle_lock.write().await;
         let metadata = self.get_index(name).await?;
@@ -320,6 +351,15 @@ impl IndexCatalog {
             );
         }
 
+        // Load suggest sidecar from all segments for autocomplete
+        let suggest_readers = Self::load_all_suggest_readers(&segments_dir, &manifest).await;
+        if !suggest_readers.is_empty() {
+            tracing::info!(
+                count = suggest_readers.len(),
+                "loaded suggest sidecars for all segments"
+            );
+        }
+
         Ok(IndexHandle {
             metadata,
             metadata_path,
@@ -333,6 +373,7 @@ impl IndexCatalog {
             doc_values_reader,
             per_doc_inverted_index: BTreeMap::new(),
             positions_readers,
+            suggest_readers,
         })
     }
 
@@ -503,6 +544,8 @@ pub struct IndexHandle {
     per_doc_inverted_index: BTreeMap<String, BTreeMap<String, Vec<u32>>>,
     /// Positions readers loaded from all segments, for multi-segment highlight extraction.
     positions_readers: Vec<cloudsearch_storage::inverted_index::PositionsReader>,
+    /// Suggest readers loaded from all segments, for autocomplete suggestions.
+    suggest_readers: Vec<Option<cloudsearch_storage::suggest_index::SuggestReader>>,
 }
 
 #[derive(Debug, Clone)]
@@ -736,6 +779,11 @@ impl IndexHandle {
         self.manifest = new_manifest;
         self.searchable_documents = merged;
 
+        // Reload suggest readers for all segments — the old ones are stale
+        // after the merge (their sidecar files no longer exist).
+        self.suggest_readers =
+            IndexCatalog::load_all_suggest_readers(&self.segments_dir, &self.manifest).await;
+
         // Reload positions reader for the new merged segment only, since
         // the old segment sidecars were invalidated by the merge.
         self.positions_readers.clear();
@@ -776,6 +824,63 @@ impl IndexHandle {
             Some(PendingOperation::Upsert(document)) => Some(document),
             Some(PendingOperation::Delete) => None,
             None => self.searchable_documents.get(document_id),
+        }
+    }
+
+    /// Returns autocomplete suggestions for a given prefix across multiple fields.
+    ///
+    /// # Panics
+    ///
+    /// Panics if sorting fails (should never happen with total ordering on f32 and String).
+    #[must_use]
+    pub fn suggest(
+        &self,
+        request: &cloudsearch_common::SuggestRequest,
+    ) -> cloudsearch_common::SuggestResponse {
+        let prefix = request.prefix.to_ascii_lowercase();
+        let size = request.size;
+
+        // Deduplicate by (text, field) while collecting, keeping highest score
+        let mut seen: BTreeMap<(String, String), cloudsearch_common::Suggestion> = BTreeMap::new();
+
+        for (field, field_weight) in &request.fields {
+            if *field_weight == 0.0 {
+                continue;
+            }
+            // Collect suggestions from all segments for this field
+            for reader_opt in &self.suggest_readers {
+                let Some(reader) = reader_opt else { continue };
+                for entry in reader.suggest_for_field(field, &prefix) {
+                    let key = (entry.term.clone(), field.clone());
+                    let suggestion = cloudsearch_common::Suggestion {
+                        text: entry.term.clone(),
+                        score: entry.score * field_weight,
+                        doc_freq: entry.doc_freq,
+                        field: Some(field.clone()),
+                    };
+                    seen.entry(key)
+                        .and_modify(|e| {
+                            if suggestion.score > e.score {
+                                *e = suggestion.clone();
+                            }
+                        })
+                        .or_insert(suggestion);
+                }
+            }
+        }
+
+        // Sort by score descending, then by text ascending for tie-breaking
+        let mut candidates: Vec<_> = seen.into_values().collect();
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.text.cmp(&b.text))
+        });
+        candidates.truncate(size);
+
+        cloudsearch_common::SuggestResponse {
+            suggestions: candidates,
         }
     }
 
@@ -1273,6 +1378,70 @@ impl IndexHandle {
         doc_index
     }
 
+    /// Builds a suggest index from a list of documents for autocomplete.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn build_suggest_index(
+        documents: &[IndexDocument],
+        mappings: &BTreeMap<String, FieldMapping>,
+    ) -> cloudsearch_storage::suggest_index::SuggestIndex {
+        let n_docs = documents.len().max(1) as f64;
+        // BTreeMap<field_name, BTreeMap<term, BTreeSet<doc_id>>>
+        // BTreeSet deduplicates doc_ids per term per field → doc_freq = unique doc count
+        let mut field_terms: BTreeMap<
+            String,
+            BTreeMap<String, std::collections::BTreeSet<String>>,
+        > = BTreeMap::new();
+
+        for doc in documents {
+            if let Some(obj) = doc.source.as_object() {
+                for (field_name, field_value) in obj {
+                    // Only index text fields (Keyword type or inferred text)
+                    let is_text = mappings
+                        .get(field_name)
+                        .is_none_or(|m| matches!(m.field_type, FieldType::Keyword)); // default to indexable if no mapping
+
+                    if !is_text {
+                        continue;
+                    }
+
+                    let Some(text) = field_value.as_str() else {
+                        continue;
+                    };
+                    // Deduplicate tokens within this document using BTreeSet
+                    let tokens: std::collections::BTreeSet<_> =
+                        tokenize(text).into_iter().collect();
+
+                    let doc_set = field_terms.entry(field_name.clone()).or_default();
+                    for token in tokens {
+                        doc_set.entry(token).or_default().insert(doc.id.clone());
+                    }
+                }
+            }
+        }
+
+        let mut index = cloudsearch_storage::suggest_index::SuggestIndex::new();
+        for (field, term_doc_ids) in field_terms {
+            let mut entries: Vec<cloudsearch_storage::suggest_index::SuggestEntry> = term_doc_ids
+                .into_iter()
+                .map(|(term, doc_ids)| {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
+                    let doc_freq = doc_ids.len() as u32;
+                    let score = (f64::from(doc_freq) / n_docs) as f32;
+                    cloudsearch_storage::suggest_index::SuggestEntry {
+                        term,
+                        doc_freq,
+                        score,
+                    }
+                })
+                .collect();
+            // Sort by term ascending for binary search
+            entries.sort_by(|a, b| a.term.cmp(&b.term));
+            index.fields.insert(field, entries);
+        }
+
+        index
+    }
+
     /// Soft-deletes a document by writing a delete record to the WAL.
     ///
     /// # Errors
@@ -1385,6 +1554,7 @@ impl IndexHandle {
     ///
     /// # Errors
     /// Returns an error if file or WAL operations fail.
+    #[allow(clippy::too_many_lines)]
     pub async fn flush(&mut self) -> Result<FlushResponse> {
         // Rollover WAL first so the snapshot captures a consistent post-rollover state.
         // This ensures WAL replay on restart starts from the new generation.
@@ -1480,6 +1650,43 @@ impl IndexHandle {
                 }
                 _ => {}
             }
+        }
+
+        // Build and write suggest sidecar for autocomplete
+        let suggest_index = Self::build_suggest_index(&snapshot.documents, &self.metadata.mappings);
+        if !suggest_index.is_empty() {
+            let suggest_data = suggest_index.to_bytes();
+            cloudsearch_storage::suggest_writer::write_suggest(
+                &self.segments_dir,
+                segment_number,
+                &suggest_data,
+            )
+            .await?;
+            tracing::info!(
+                index = %self.metadata.name,
+                fields = suggest_index.fields.len(),
+                terms = suggest_index.total_terms(),
+                "wrote suggest sidecar"
+            );
+            // Reload all suggest readers from the updated manifest to avoid accumulation
+            let mut new_readers = Vec::new();
+            for seg in &self.manifest.segments {
+                let path = self
+                    .segments_dir
+                    .join(format!("suggest_{:020}.bin", seg.segment_number));
+                if let Ok(data) = tokio::fs::read(&path).await
+                    && let Ok(reader) =
+                        cloudsearch_storage::suggest_index::SuggestReader::from_bytes(&data)
+                    && reader.fields().count() > 0
+                {
+                    new_readers.push(Some(reader));
+                }
+            }
+            self.suggest_readers = new_readers;
+            tracing::info!(
+                count = self.suggest_readers.len(),
+                "reloaded suggest readers after flush"
+            );
         }
 
         // Clear per-doc indices now that they're persisted
@@ -6787,5 +6994,52 @@ mod tests {
             boost: None,
         };
         assert_eq!(fuzzy_term_match(&doc, &term), None); // fuzzy requires string
+    }
+
+    #[test]
+    fn build_suggest_index_counts_unique_docs_not_token_occurrences() {
+        // Regression: doc_freq must count unique documents per term,
+        // not the number of token occurrences.
+        // "foo foo foo" and "foo bar" in the same field → doc_freq("foo") = 2, not 4.
+        let documents = vec![
+            IndexDocument {
+                id: "1".to_string(),
+                source: serde_json::json!({"title": "foo foo foo"}),
+            },
+            IndexDocument {
+                id: "2".to_string(),
+                source: serde_json::json!({"title": "foo bar"}),
+            },
+        ];
+        let mappings = BTreeMap::from([(
+            "title".to_string(),
+            FieldMapping {
+                field_type: FieldType::Keyword,
+            },
+        )]);
+
+        let index = IndexHandle::build_suggest_index(&documents, &mappings);
+        let title_entries = index.fields.get("title").expect("title field");
+
+        let foo_entry = title_entries
+            .iter()
+            .find(|e| e.term == "foo")
+            .expect("foo term must exist");
+        // Two documents contain "foo" (doc "1" once, doc "2" once) → doc_freq = 2
+        assert_eq!(
+            foo_entry.doc_freq, 2,
+            "doc_freq must be 2 (unique docs), got {} (token occurrences?)",
+            foo_entry.doc_freq
+        );
+
+        let bar_entry = title_entries
+            .iter()
+            .find(|e| e.term == "bar")
+            .expect("bar term must exist");
+        assert_eq!(
+            bar_entry.doc_freq, 1,
+            "doc_freq for 'bar' must be 1 (only doc 2), got {}",
+            bar_entry.doc_freq
+        );
     }
 }
