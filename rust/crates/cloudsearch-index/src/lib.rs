@@ -853,11 +853,13 @@ impl IndexHandle {
                         doc_freq: entry.doc_freq,
                         field: Some(field.clone()),
                     };
-                    seen.entry(key).and_modify(|e| {
-                        if suggestion.score > e.score {
-                            *e = suggestion.clone();
-                        }
-                    }).or_insert(suggestion);
+                    seen.entry(key)
+                        .and_modify(|e| {
+                            if suggestion.score > e.score {
+                                *e = suggestion.clone();
+                            }
+                        })
+                        .or_insert(suggestion);
                 }
             }
         }
@@ -1656,9 +1658,12 @@ impl IndexHandle {
             // Reload all suggest readers from the updated manifest to avoid accumulation
             let mut new_readers = Vec::new();
             for seg in &self.manifest.segments {
-                let path = self.segments_dir.join(format!("suggest_{:020}.bin", seg.segment_number));
+                let path = self
+                    .segments_dir
+                    .join(format!("suggest_{:020}.bin", seg.segment_number));
                 if let Ok(data) = tokio::fs::read(&path).await
-                    && let Ok(reader) = cloudsearch_storage::suggest_index::SuggestReader::from_bytes(&data)
+                    && let Ok(reader) =
+                        cloudsearch_storage::suggest_index::SuggestReader::from_bytes(&data)
                     && reader.fields().count() > 0
                 {
                     new_readers.push(Some(reader));
