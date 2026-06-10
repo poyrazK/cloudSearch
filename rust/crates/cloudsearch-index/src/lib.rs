@@ -779,6 +779,11 @@ impl IndexHandle {
         self.manifest = new_manifest;
         self.searchable_documents = merged;
 
+        // Reload suggest readers for all segments — the old ones are stale
+        // after the merge (their sidecar files no longer exist).
+        self.suggest_readers =
+            IndexCatalog::load_all_suggest_readers(&self.segments_dir, &self.manifest).await;
+
         // Reload positions reader for the new merged segment only, since
         // the old segment sidecars were invalidated by the merge.
         self.positions_readers.clear();
@@ -869,7 +874,7 @@ impl IndexHandle {
         candidates.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
-                .unwrap()
+                .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.text.cmp(&b.text))
         });
         candidates.truncate(size);
@@ -1374,13 +1379,18 @@ impl IndexHandle {
     }
 
     /// Builds a suggest index from a list of documents for autocomplete.
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     fn build_suggest_index(
         documents: &[IndexDocument],
         mappings: &BTreeMap<String, FieldMapping>,
     ) -> cloudsearch_storage::suggest_index::SuggestIndex {
         let n_docs = documents.len().max(1) as f64;
-        let mut field_terms: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
+        // BTreeMap<field_name, BTreeMap<term, BTreeSet<doc_id>>>
+        // BTreeSet deduplicates doc_ids per term per field → doc_freq = unique doc count
+        let mut field_terms: BTreeMap<
+            String,
+            BTreeMap<String, std::collections::BTreeSet<String>>,
+        > = BTreeMap::new();
 
         for doc in documents {
             if let Some(obj) = doc.source.as_object() {
@@ -1397,22 +1407,25 @@ impl IndexHandle {
                     let Some(text) = field_value.as_str() else {
                         continue;
                     };
-                    let tokens = tokenize(text);
+                    // Deduplicate tokens within this document using BTreeSet
+                    let tokens: std::collections::BTreeSet<_> =
+                        tokenize(text).into_iter().collect();
 
-                    let field_freqs = field_terms.entry(field_name.clone()).or_default();
+                    let doc_set = field_terms.entry(field_name.clone()).or_default();
                     for token in tokens {
-                        *field_freqs.entry(token).or_insert(0) += 1;
+                        doc_set.entry(token).or_default().insert(doc.id.clone());
                     }
                 }
             }
         }
 
         let mut index = cloudsearch_storage::suggest_index::SuggestIndex::new();
-        for (field, term_counts) in field_terms {
-            let mut entries: Vec<cloudsearch_storage::suggest_index::SuggestEntry> = term_counts
+        for (field, term_doc_ids) in field_terms {
+            let mut entries: Vec<cloudsearch_storage::suggest_index::SuggestEntry> = term_doc_ids
                 .into_iter()
-                .map(|(term, doc_freq)| {
+                .map(|(term, doc_ids)| {
                     #[allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
+                    let doc_freq = doc_ids.len() as u32;
                     let score = (f64::from(doc_freq) / n_docs) as f32;
                     cloudsearch_storage::suggest_index::SuggestEntry {
                         term,
@@ -6981,5 +6994,52 @@ mod tests {
             boost: None,
         };
         assert_eq!(fuzzy_term_match(&doc, &term), None); // fuzzy requires string
+    }
+
+    #[test]
+    fn build_suggest_index_counts_unique_docs_not_token_occurrences() {
+        // Regression: doc_freq must count unique documents per term,
+        // not the number of token occurrences.
+        // "foo foo foo" and "foo bar" in the same field → doc_freq("foo") = 2, not 4.
+        let documents = vec![
+            IndexDocument {
+                id: "1".to_string(),
+                source: serde_json::json!({"title": "foo foo foo"}),
+            },
+            IndexDocument {
+                id: "2".to_string(),
+                source: serde_json::json!({"title": "foo bar"}),
+            },
+        ];
+        let mappings = BTreeMap::from([(
+            "title".to_string(),
+            FieldMapping {
+                field_type: FieldType::Keyword,
+            },
+        )]);
+
+        let index = IndexHandle::build_suggest_index(&documents, &mappings);
+        let title_entries = index.fields.get("title").expect("title field");
+
+        let foo_entry = title_entries
+            .iter()
+            .find(|e| e.term == "foo")
+            .expect("foo term must exist");
+        // Two documents contain "foo" (doc "1" once, doc "2" once) → doc_freq = 2
+        assert_eq!(
+            foo_entry.doc_freq, 2,
+            "doc_freq must be 2 (unique docs), got {} (token occurrences?)",
+            foo_entry.doc_freq
+        );
+
+        let bar_entry = title_entries
+            .iter()
+            .find(|e| e.term == "bar")
+            .expect("bar term must exist");
+        assert_eq!(
+            bar_entry.doc_freq, 1,
+            "doc_freq for 'bar' must be 1 (only doc 2), got {}",
+            bar_entry.doc_freq
+        );
     }
 }

@@ -188,6 +188,9 @@ impl SuggestReader {
         field: &'a str,
         prefix: &'a str,
     ) -> Vec<&'a SuggestEntry> {
+        if prefix.is_empty() {
+            return Vec::new();
+        }
         let Some(start) = self.find_first_prefix(field, prefix) else {
             return Vec::new();
         };
@@ -403,5 +406,20 @@ mod tests {
         let desc_entries = loaded.get_field("description").expect("description field");
         assert_eq!(desc_entries.len(), 1);
         assert_eq!(desc_entries[0].term, "rust");
+    }
+
+    #[test]
+    fn suggest_for_field_returns_empty_for_empty_prefix() {
+        let entries = make_entries();
+        let reader = SuggestReader {
+            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
+        };
+
+        // Empty prefix should return no results, not the entire vocabulary
+        let suggestions = reader.suggest_for_field("title", "");
+        assert!(
+            suggestions.is_empty(),
+            "empty prefix must not return all terms"
+        );
     }
 }

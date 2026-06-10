@@ -50,6 +50,56 @@ Current implementation notes:
 
 - `POST /{index}/_search` — search with JSON body
 - `GET /{index}/_search?q=...` — search with query string
+- `POST /{index}/_suggest` — autocomplete suggestions for a prefix
+
+### Suggest Request Shape
+
+```json
+{
+  "prefix": "elast",
+  "fields": { "title": 1.0, "body": 0.5 },
+  "size": 10,
+  "fuzzy": { "fuzziness": "AUTO" }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `prefix` | `string` | required | The prefix to suggest completions for |
+| `fields` | `map<string, float>` | `{}` | Fields to search with their weights (0 = excluded) |
+| `size` | `integer` | `10` | Maximum number of suggestions to return |
+| `fuzzy` | `object` | none | Optional fuzzy matching; omit for exact prefix only |
+
+### Suggest Response Shape
+
+```json
+{
+  "suggestions": [
+    {
+      "text": "elastic",
+      "score": 0.6667,
+      "doc_freq": 2,
+      "field": "title"
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `text` | `string` | The completion suggestion (tokenized, lowercase) |
+| `score` | `float` | Normalized popularity score (`doc_freq / n_docs`) |
+| `doc_freq` | `integer` | Number of documents containing this term |
+| `field` | `string?` | Which field contributed this suggestion |
+
+### Implementation Notes
+
+- Suggestions are built during flush from indexed text fields (type `keyword`)
+- Each field's vocabulary is sorted and stored in a binary sidecar file for O(log n + m) prefix lookup
+- `doc_freq` counts **unique documents** per term, not token occurrences
+- Empty prefix (`""`) returns no results
+- Scores are computed as `doc_freq / n_docs` where `n_docs` is the total documents at flush time
+- Fuzzy matching uses edit distance when `fuzzy` is provided
 
 ## Observability API
 
