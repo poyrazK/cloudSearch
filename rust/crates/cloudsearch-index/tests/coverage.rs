@@ -976,7 +976,7 @@ async fn mlt_with_like_and_empty_fields_auto_infers_from_like_json() {
     let result = handle.search(&SearchRequest {
         query: Some(SearchQuery::Mlt(MltQuery {
             doc_id: None,
-            like: Some(serde_json::json!({"title": "rustacean", "body": "systems"})),
+            like: Some(serde_json::json!({"title": "rust programming", "body": "systems"})),
             fields: vec![],
             min_term_freq: 1,
             min_doc_freq: 1,
@@ -988,11 +988,19 @@ async fn mlt_with_like_and_empty_fields_auto_infers_from_like_json() {
         ..Default::default()
     });
 
-    // Should find doc1 (matches "rust" in title and "systems" in body)
-    assert!(
-        result.hits.total >= 1,
-        "MLT with auto-inferred fields from like JSON should find matching docs, got total: {}",
-        result.hits.total
+    // Both docs match "rust". doc1 has more shared terms (rust + systems) → higher score.
+    // doc2 only shares "rust". Neither is excluded since 'like' (not doc_id) is the source.
+    assert_eq!(
+        result.hits.total, 2,
+        "both docs share 'rust', so both should match"
+    );
+    assert_eq!(
+        result.hits.hits[0].id, "doc1",
+        "doc1 has more shared terms (rust + systems) → highest score"
+    );
+    assert_eq!(
+        result.hits.hits[1].id, "doc2",
+        "doc2 only has 'rust' in common → lower score"
     );
 }
 
@@ -1097,10 +1105,13 @@ async fn mlt_with_max_word_length_filters_long_terms() {
         ..Default::default()
     });
 
-    assert!(
-        result.hits.total >= 1,
-        "MLT with max_word_length=4 should still find doc2 via 'rust', got: {}",
-        result.hits.total
+    assert_eq!(
+        result.hits.total, 1,
+        "only doc2 should match (doc1 is the source and excluded)"
+    );
+    assert_eq!(
+        result.hits.hits[0].id, "doc2",
+        "doc2 has 'rust' which passes max_word_length=4"
     );
 }
 
