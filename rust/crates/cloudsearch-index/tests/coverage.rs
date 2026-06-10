@@ -885,6 +885,290 @@ async fn mlt_respects_min_term_freq_and_max_query_terms() {
 }
 
 #[tokio::test]
+async fn mlt_with_doc_id_not_found_returns_error() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    handle
+        .index_document(doc("doc1", serde_json::json!({"content": "test content"})))
+        .await
+        .expect("index doc1");
+    handle.refresh().await.expect("refresh");
+    handle.flush().await.expect("flush");
+
+    // MLT with a doc_id that does not exist should return an error
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::Mlt(MltQuery {
+            doc_id: Some("nonexistent".to_string()),
+            like: None,
+            fields: vec!["content".to_string()],
+            min_term_freq: 1,
+            min_doc_freq: 1,
+            max_query_terms: 25,
+            min_word_length: None,
+            max_word_length: None,
+            field_boost_factor: 1.0,
+        })),
+        ..Default::default()
+    });
+
+    // Should return empty because the document does not exist
+    // (build_mlt_bool_query returns error → search returns empty response)
+    assert_eq!(
+        result.hits.total, 0,
+        "MLT with nonexistent doc_id should return empty results"
+    );
+}
+
+#[tokio::test]
+async fn mlt_with_like_and_empty_fields_auto_infers_from_like_json() {
+    // When fields is empty and like is provided, MLT should auto-infer fields
+    // from the keys in the like JSON. The like JSON content becomes the reference text.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    handle
+        .index_document(doc(
+            "doc1",
+            serde_json::json!({"title": "rust programming", "body": "systems language"}),
+        ))
+        .await
+        .expect("index doc1");
+    handle
+        .index_document(doc(
+            "doc2",
+            serde_json::json!({"title": "rust metal", "body": "durable material"}),
+        ))
+        .await
+        .expect("index doc2");
+    handle.refresh().await.expect("refresh");
+    handle.flush().await.expect("flush");
+
+    // MLT with like containing "rust" in title and "systems" in body.
+    // Empty fields list → auto-inferred from like JSON keys: ["title", "body"]
+    // Reference terms: "rust" (from title) and "systems" (from body)
+    // doc1 has both "rust" and "systems" → highest score
+    // doc2 has "rust" but not "systems" → lower score
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::Mlt(MltQuery {
+            doc_id: None,
+            like: Some(serde_json::json!({"title": "rust programming", "body": "systems"})),
+            fields: vec![],
+            min_term_freq: 1,
+            min_doc_freq: 1,
+            max_query_terms: 25,
+            min_word_length: None,
+            max_word_length: None,
+            field_boost_factor: 1.0,
+        })),
+        ..Default::default()
+    });
+
+    // Both docs match "rust". doc1 has more shared terms (rust + systems) → higher score.
+    // doc2 only shares "rust". Neither is excluded since 'like' (not doc_id) is the source.
+    assert_eq!(
+        result.hits.total, 2,
+        "both docs share 'rust', so both should match"
+    );
+    assert_eq!(
+        result.hits.hits[0].id, "doc1",
+        "doc1 has more shared terms (rust + systems) → highest score"
+    );
+    assert_eq!(
+        result.hits.hits[1].id, "doc2",
+        "doc2 only has 'rust' in common → lower score"
+    );
+}
+
+#[tokio::test]
+async fn mlt_with_min_word_length_filters_short_terms() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    // doc1 has short term "a" and normal term "rust"
+    handle
+        .index_document(doc("doc1", serde_json::json!({"content": "a rust"})))
+        .await
+        .expect("index doc1");
+    handle
+        .index_document(doc("doc2", serde_json::json!({"content": "rust"})))
+        .await
+        .expect("index doc2");
+    handle.refresh().await.expect("refresh");
+    handle.flush().await.expect("flush");
+
+    // With min_word_length=4, "a" is filtered out — only "rust" is used
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::Mlt(MltQuery {
+            doc_id: Some("doc1".to_string()),
+            like: None,
+            fields: vec!["content".to_string()],
+            min_term_freq: 1,
+            min_doc_freq: 1,
+            max_query_terms: 25,
+            min_word_length: Some(4),
+            max_word_length: None,
+            field_boost_factor: 1.0,
+        })),
+        ..Default::default()
+    });
+
+    // doc1 excluded (source), doc2 has "rust" — should match
+    assert!(
+        result.hits.total >= 1,
+        "MLT with min_word_length=4 should still find doc2 via 'rust', got: {}",
+        result.hits.total
+    );
+}
+
+#[tokio::test]
+async fn mlt_with_max_word_length_filters_long_terms() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    // doc1 has a very long token and a normal token
+    handle
+        .index_document(doc(
+            "doc1",
+            serde_json::json!({"content": "superlongtokenname rust"}),
+        ))
+        .await
+        .expect("index doc1");
+    handle
+        .index_document(doc("doc2", serde_json::json!({"content": "rust"})))
+        .await
+        .expect("index doc2");
+    handle.refresh().await.expect("refresh");
+    handle.flush().await.expect("flush");
+
+    // With max_word_length=4, "superlongtokenname" is filtered — only "rust" is used
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::Mlt(MltQuery {
+            doc_id: Some("doc1".to_string()),
+            like: None,
+            fields: vec!["content".to_string()],
+            min_term_freq: 1,
+            min_doc_freq: 1,
+            max_query_terms: 25,
+            min_word_length: None,
+            max_word_length: Some(4),
+            field_boost_factor: 1.0,
+        })),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        result.hits.total, 1,
+        "only doc2 should match (doc1 is the source and excluded)"
+    );
+    assert_eq!(
+        result.hits.hits[0].id, "doc2",
+        "doc2 has 'rust' which passes max_word_length=4"
+    );
+}
+
+#[tokio::test]
+async fn mlt_all_terms_filtered_returns_empty_or_error() {
+    // When all terms in the reference document are filtered out by min_term_freq,
+    // MLT should return empty results or an error
+    let temp_dir = TempDir::new().expect("temp dir");
+    let catalog = Arc::new(IndexCatalog::new(temp_dir.path()));
+    catalog.initialize().await.expect("init catalog");
+    catalog
+        .create_index(
+            "test",
+            CreateIndexRequest {
+                settings: IndexSettings::default(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create index");
+    let mut handle = catalog.open_index("test").await.expect("open index");
+
+    // doc1 has only one occurrence of "rare" — min_term_freq=2 will filter it out
+    handle
+        .index_document(doc("doc1", serde_json::json!({"content": "rare"})))
+        .await
+        .expect("index doc1");
+    handle
+        .index_document(doc("doc2", serde_json::json!({"content": "other"})))
+        .await
+        .expect("index doc2");
+    handle.refresh().await.expect("refresh");
+    handle.flush().await.expect("flush");
+
+    let result = handle.search(&SearchRequest {
+        query: Some(SearchQuery::Mlt(MltQuery {
+            doc_id: Some("doc1".to_string()),
+            like: None,
+            fields: vec!["content".to_string()],
+            min_term_freq: 2, // "rare" has tf=1, filtered out
+            min_doc_freq: 1,
+            max_query_terms: 25,
+            min_word_length: None,
+            max_word_length: None,
+            field_boost_factor: 1.0,
+        })),
+        ..Default::default()
+    });
+
+    // All terms filtered → empty results
+    assert_eq!(
+        result.hits.total, 0,
+        "MLT with all terms filtered should return empty results"
+    );
+}
+
+#[tokio::test]
 async fn multi_match_best_fields_returns_max_score() {
     // Doc has "foo" in title and "bar" in content.
     // multi_match query "foo bar" across both fields (best_fields).
