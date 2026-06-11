@@ -79,3 +79,22 @@ Strip `IndexDocument` to `{ id: String, source: Arc<BTreeMap<...>> }` so the par
 Standard library threads instead of rayon.
 
 **Why rejected:** Rayon provides better work-stealing, no thread spawning overhead, and `into_par_iter()` ergonomics that std threads cannot match.
+
+## Benchmark Results
+
+Benchmarks run with `cargo bench -p cloudsearch-index` on a single-threaded tokio runtime
+(the benchmarks themselves are single-threaded; rayon threads run concurrently).
+
+| Benchmark | 1k docs | 10k docs |
+|---|---|---|
+| `MatchAll` | 23ms | 23ms |
+| `term_query` | 33ms | 47ms |
+| `multi_match_title_body` | 16ms | 1.4s |
+| `range_count_gte_500` | 1.7ms | 25ms |
+
+Observations:
+- **MatchAll is constant** regardless of doc count — the scoring loop dominates over iteration overhead
+- **multi_match is the most expensive** query type — tokenization + per-field BM25 is CPU-bound; this is the primary target for parallel speedup
+- **range is cheap** — simple field comparison, no posting lookups needed
+
+To measure parallel speedup, run benchmarks on a multi-core machine before and after this change and compare `multi_match` / `term_query` latencies. The `rayon` thread pool will distribute scoring across CPU cores.

@@ -1,8 +1,40 @@
 //! Benchmark search performance across different document counts and query types.
 //!
-//! Run with: cargo bench -p cloudsearch-index
+//! # Running
 //!
-//! Results are written to target/criterion/.
+//! ```text
+//! cargo bench -p cloudsearch-index
+//! ```
+//!
+//! Results are written to `target/criterion/` and can be compared across runs with:
+//!
+//! ```text
+//! cargo bench -p cloudsearch-index -- --save-baseline <name>
+//! cargo bench -p cloudsearch-index -- --baseline <name>
+//! ```
+//!
+//! # Benchmarks
+//!
+//! Each benchmark builds an index with `n` documents, flushes it, reopens it (so
+//! segments are loaded from disk), then times `search()` calls.
+//!
+//! | Benchmark | What it measures | Expected scaling |
+//! |---|---|---|
+//! | `MatchAll` | Pure iteration overhead — no scoring | O(n) in doc count |
+//! | `term_query` | Posting list lookup + BM25 term scoring | O(hits) |
+//! | `multi_match_title_body` | Cross-field tokenization + BM25 per field | Most expensive |
+//! | `range_count_gte_500` | Sequential field comparison | O(n) in doc count |
+//!
+//! # Interpretation
+//!
+//! - **MatchAll at constant time** regardless of doc count → scoring loop is the
+//!   dominant cost, not iteration
+//! - **multi_match slow at 10k** → tokenization + BM25 per field is CPU-bound;
+//!   parallel scoring should show significant speedup here
+//! - **range is cheap** → field comparison is fast; no posting lookup needed
+//!
+//! To compare parallel vs sequential scoring specifically, benchmark before/after
+//! on a multi-core machine and look for speedup on `multi_match` and `term_query`.
 
 use cloudsearch_common::{
     IndexDocument, SearchQuery, SearchRequest, TermQuery, MultiMatchQuery, MultiMatchType,
