@@ -1,5 +1,4 @@
 use chrono::{DateTime, Timelike, Utc};
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use cloudsearch_common::{
     AggregationRequest, AggregationResult, BoolQuery, BulkItem, BulkItemResult, BulkOperation,
     BulkRequest, BulkResponse, CloudSearchError, CreateIndexRequest,
@@ -18,6 +17,7 @@ use cloudsearch_storage::{
     write_doc_values as storage_write_doc_values, write_index_manifest, write_named_snapshot,
     write_positions as storage_write_positions, write_segment_snapshot,
 };
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 mod doc_values;
 mod doc_values_reader;
 use crate::doc_values::DocValuesWriter;
@@ -983,19 +983,18 @@ impl IndexHandle {
         let scored: Vec<(f32, String)> = doc_ids
             .into_par_iter()
             .filter_map(|doc_id| {
-                if !self.is_expired(&doc_id, now) {
-                    if let Some(ref exclude_id) = mlt_doc_id_to_exclude
-                        && doc_id == *exclude_id
-                    {
-                        return None;
-                    }
-                    let doc = self.searchable_documents.get(&doc_id)?;
-                    let doc_id_hash = hash_doc_id(&doc_id);
-                    score_query(doc, &query, doc_id_hash, positions_readers, &bm25_ctx)
-                        .map(|s| (s, doc_id))
-                } else {
-                    None
+                if self.is_expired(&doc_id, now) {
+                    return None;
                 }
+                if let Some(ref exclude_id) = mlt_doc_id_to_exclude
+                    && doc_id == *exclude_id
+                {
+                    return None;
+                }
+                let doc = self.searchable_documents.get(&doc_id)?;
+                let doc_id_hash = hash_doc_id(&doc_id);
+                score_query(doc, &query, doc_id_hash, positions_readers, &bm25_ctx)
+                    .map(|s| (s, doc_id))
             })
             .collect();
 
@@ -1007,9 +1006,8 @@ impl IndexHandle {
             Vec::with_capacity(scored_raw.len());
         let mut matching_documents: Vec<IndexDocument> = Vec::with_capacity(scored_raw.len());
         for (score, doc_id) in scored_raw {
-            let doc = match self.searchable_documents.get(&doc_id) {
-                Some(d) => d,
-                None => continue,
+            let Some(doc) = self.searchable_documents.get(&doc_id) else {
+                continue;
             };
             let source = doc.source.clone();
             matching_documents.push(IndexDocument {
@@ -1059,7 +1057,8 @@ impl IndexHandle {
                         id: doc_id.clone(),
                         source: doc_src.clone(),
                     };
-                    let doc_sort_values = compute_sort_values(&tmp_doc, request.sort.as_ref(), *score);
+                    let doc_sort_values =
+                        compute_sort_values(&tmp_doc, request.sort.as_ref(), *score);
                     compare_sort_values_list(&doc_sort_values, cursor, request.sort.as_ref())
                         == std::cmp::Ordering::Greater
                 })

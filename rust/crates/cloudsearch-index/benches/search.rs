@@ -27,20 +27,20 @@
 //!
 //! # Interpretation
 //!
-//! - **MatchAll at constant time** regardless of doc count → scoring loop is the
+//! - **`MatchAll` at constant time** regardless of doc count → scoring loop is the
 //!   dominant cost, not iteration
-//! - **multi_match slow at 10k** → tokenization + BM25 per field is CPU-bound;
+//! - **`multi_match` slow at 10k** → tokenization + BM25 per field is CPU-bound;
 //!   parallel scoring should show significant speedup here
-//! - **range is cheap** → field comparison is fast; no posting lookup needed
+//! - **`range` is cheap** → field comparison is fast; no posting lookup needed
 //!
 //! To compare parallel vs sequential scoring specifically, benchmark before/after
 //! on a multi-core machine and look for speedup on `multi_match` and `term_query`.
 
 use cloudsearch_common::{
-    IndexDocument, SearchQuery, SearchRequest, TermQuery, MultiMatchQuery, MultiMatchType,
-    RangeQuery, CreateIndexRequest, IndexSettings,
+    CreateIndexRequest, IndexDocument, IndexSettings, MultiMatchQuery, MultiMatchType, RangeQuery,
+    SearchQuery, SearchRequest, TermQuery,
 };
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -71,13 +71,12 @@ fn build_index(n_docs: usize) -> cloudsearch_index::IndexHandle {
         // Index documents with varied content to avoid all docs being identical
         for i in 0..n_docs {
             let doc = IndexDocument {
-                id: format!("doc_{}", i),
+                id: format!("doc_{i}"),
                 source: serde_json::json!({
-                    "title": format!("Document {} title text", i),
-                    "body": format!("This is the body content of document number {} with some searchable text", i),
+                    "title": format!("Document {i} title text"),
+                    "body": format!("This is the body content of document number {i} with some searchable text"),
                     "category": format!("cat_{}", i % 10),
                     "count": i,
-                    "price": i as f64 * 1.5,
                 }),
             };
             let _: cloudsearch_common::Result<u64> = handle.index_document(doc).await;
@@ -98,7 +97,7 @@ fn bench_search(c: &mut Criterion) {
     for &n_docs in &[1_000, 10_000] {
         let handle = build_index(n_docs);
 
-        let mut group = c.benchmark_group(format!("search/{}_docs", n_docs));
+        let mut group = c.benchmark_group(format!("search/{n_docs}_docs"));
 
         // MatchAll — measures pure document iteration overhead
         group.bench_function("MatchAll", |b| {
