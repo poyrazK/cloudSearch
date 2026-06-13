@@ -218,7 +218,10 @@ impl IndexCatalog {
                 && let Ok(reader) = SuggestReader::from_mmap(mmap)
                 && reader.fields().count() > 0
             {
-                tracing::info!(fields = reader.fields().count(), "loaded suggest sidecar via mmap");
+                tracing::info!(
+                    fields = reader.fields().count(),
+                    "loaded suggest sidecar via mmap"
+                );
                 return Some(reader);
             }
         }
@@ -227,7 +230,10 @@ impl IndexCatalog {
         let data = tokio::fs::read(&path).await.ok()?;
         let reader = SuggestReader::from_bytes(&data).ok()?;
         if reader.fields().count() > 0 {
-            tracing::info!(fields = reader.fields().count(), "loaded suggest sidecar via read");
+            tracing::info!(
+                fields = reader.fields().count(),
+                "loaded suggest sidecar via read"
+            );
             Some(reader)
         } else {
             None
@@ -257,7 +263,10 @@ impl IndexCatalog {
             .await
             .ok()?;
         if reader.term_count() > 0 {
-            tracing::info!(terms = reader.term_count(), "loaded positions sidecar via mmap");
+            tracing::info!(
+                terms = reader.term_count(),
+                "loaded positions sidecar via mmap"
+            );
             Some(reader)
         } else {
             None
@@ -1597,7 +1606,6 @@ impl IndexHandle {
         Ok(refreshed_documents)
     }
 
-
     /// Load suggest sidecar for a single segment, if it exists (used by flush).
     async fn load_single_suggest_reader(
         segments_dir: &Path,
@@ -1615,7 +1623,10 @@ impl IndexHandle {
                 && let Ok(reader) = SuggestReader::from_mmap(mmap)
                 && reader.fields().count() > 0
             {
-                tracing::info!(fields = reader.fields().count(), "loaded suggest sidecar via mmap");
+                tracing::info!(
+                    fields = reader.fields().count(),
+                    "loaded suggest sidecar via mmap"
+                );
                 return Some(reader);
             }
         }
@@ -1624,7 +1635,10 @@ impl IndexHandle {
         let data = tokio::fs::read(&path).await.ok()?;
         let reader = SuggestReader::from_bytes(&data).ok()?;
         if reader.fields().count() > 0 {
-            tracing::info!(fields = reader.fields().count(), "loaded suggest sidecar via read");
+            tracing::info!(
+                fields = reader.fields().count(),
+                "loaded suggest sidecar via read"
+            );
             Some(reader)
         } else {
             None
@@ -1717,7 +1731,8 @@ impl IndexHandle {
             let positions_path = self
                 .segments_dir
                 .join(format!("positions_{segment_number:020}.bin"));
-            match cloudsearch_storage::inverted_index::PositionsReader::read_mmap(&positions_path).await
+            match cloudsearch_storage::inverted_index::PositionsReader::read_mmap(&positions_path)
+                .await
             {
                 Ok(reader) if reader.term_count() > 0 => {
                     self.positions_readers.push(reader);
