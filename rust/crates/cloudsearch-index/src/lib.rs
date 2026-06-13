@@ -1025,21 +1025,20 @@ impl IndexHandle {
 
         if let Some(sort) = &request.sort {
             scored.sort_by(|(_, l_id, l_src), (_, r_id, r_src)| {
-                let lh = SearchHit {
-                    id: l_id.clone(),
-                    source: l_src.clone(),
-                    score: None,
-                    highlight: None,
-                    sort_values: None,
+                // Avoid cloning full source — extract sort field values directly
+                let left_value = l_src.get(&sort.field).and_then(comparable_value);
+                let right_value = r_src.get(&sort.field).and_then(comparable_value);
+                let ordering = match (left_value, right_value) {
+                    (Some(left), Some(right)) => compare_sort_values(&left, &right, sort),
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, None) => l_id.cmp(r_id),
                 };
-                let rh = SearchHit {
-                    id: r_id.clone(),
-                    source: r_src.clone(),
-                    score: None,
-                    highlight: None,
-                    sort_values: None,
-                };
-                compare_hits(&lh, &rh, sort)
+                if ordering == std::cmp::Ordering::Equal {
+                    l_id.cmp(r_id)
+                } else {
+                    ordering
+                }
             });
         } else {
             scored.sort_by(|(s1, id1, _), (s2, id2, _)| {

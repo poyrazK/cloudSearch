@@ -10,7 +10,7 @@ Accepted
 
 The `search()` method in `IndexHandle` iterates documents sequentially to compute BM25 scores. With many documents in an index, this sequential loop becomes the dominant latency source for read-heavy workloads.
 
-The naive fix — using `into_par_iter()` on a `Vec<IndexDocument>` — is blocked by `serde_json::Value`. The `IndexDocument::source` field is `serde_json::Value`, which uses `RefCell` internally and is therefore neither `Send` nor `Sync`. Rayon requires all data processed in parallel to be `Send + Sync`.
+The naive fix — using `into_par_iter()` on `Vec<IndexDocument>` — is blocked by the fact that `into_par_iter()` requires `T: Send` for the parallel iterator's output type, and more importantly, the result of the parallel iterator (which would contain `IndexDocument` instances) would need to be moved across thread boundaries. While `serde_json::Value` does implement `Send + Sync` in modern versions, the design choice to keep `IndexDocument::source` access local to each task (via `&self`) avoids unnecessary cloning overhead and keeps the parallel result type small — only `(score, doc_id)` tuples cross thread boundaries, not full documents.
 
 ## Decision
 

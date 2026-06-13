@@ -55,8 +55,11 @@ fn build_index(n_docs: usize) -> cloudsearch_index::IndexHandle {
         .expect("tokio runtime");
 
     rt.block_on(async {
-        let _: cloudsearch_common::Result<()> = catalog.initialize().await;
-        let _: cloudsearch_common::Result<cloudsearch_common::IndexMetadata> = catalog
+        catalog
+            .initialize()
+            .await
+            .expect("catalog initialize failed");
+        catalog
             .create_index(
                 "test",
                 CreateIndexRequest {
@@ -64,9 +67,10 @@ fn build_index(n_docs: usize) -> cloudsearch_index::IndexHandle {
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            .expect("create index failed");
 
-        let mut handle: cloudsearch_index::IndexHandle = catalog.open_index("test").await.expect("open index");
+        let mut handle: cloudsearch_index::IndexHandle = catalog.open_index("test").await.expect("open index failed");
 
         // Index documents with varied content to avoid all docs being identical
         for i in 0..n_docs {
@@ -79,16 +83,18 @@ fn build_index(n_docs: usize) -> cloudsearch_index::IndexHandle {
                     "count": i,
                 }),
             };
-            let _: cloudsearch_common::Result<u64> = handle.index_document(doc).await;
+            handle
+                .index_document(doc)
+                .await
+                .expect("index document failed");
         }
 
-        let _: cloudsearch_common::Result<usize> = handle.refresh().await;
-        let _: cloudsearch_common::Result<cloudsearch_common::FlushResponse> = handle.flush().await;
+        handle.refresh().await.expect("refresh failed");
+        handle.flush().await.expect("flush failed");
 
         // Reopen to ensure segments are loaded fresh
         drop(handle);
-        let handle: cloudsearch_index::IndexHandle = catalog.open_index("test").await.expect("open index");
-        handle
+        catalog.open_index("test").await.expect("reopen index failed")
     })
 }
 
