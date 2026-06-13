@@ -258,6 +258,7 @@ dependencies = [
  "cloudsearch-storage",
  "crc32c",
  "criterion",
+ "memmap2",
  "rayon",
  "regex",
  "serde",
@@ -290,6 +291,7 @@ dependencies = [
  "chrono",
  "cloudsearch-common",
  "crc32c",
+ "memmap2",
  "serde",
  "serde_json",
  "tempfile",
@@ -924,6 +926,15 @@ name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+
+[[package]]
+name = "memmap2"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de5d3112c080d58ce560081baeaab7e1e864ca21795ddbf533d5b1842bb1ecf8"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "mime"

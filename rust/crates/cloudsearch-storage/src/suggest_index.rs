@@ -4,6 +4,7 @@
 //! and m = number of matching terms.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// MAGIC bytes for suggest sidecar file: "SUGG" in ASCII.
 const SUGGEST_MAGIC: u32 = 0x5355_4747;
@@ -52,6 +53,8 @@ impl SuggestIndex {
 pub struct SuggestReader {
     /// Per-field sorted term arrays.
     fields: BTreeMap<String, Vec<SuggestEntry>>,
+    /// Backing memory map — kept to own the mapping. When None, data was heap-allocated.
+    _mmap: Option<Arc<memmap2::Mmap>>,
 }
 
 impl SuggestReader {
@@ -138,7 +141,22 @@ impl SuggestReader {
             fields.insert(field_name, entries);
         }
 
-        Ok(Self { fields })
+        Ok(Self {
+            fields,
+            _mmap: None,
+        })
+    }
+
+    /// Creates a suggest reader from a memory-mapped file.
+    ///
+    /// The backing `Mmap` is kept alive by storing it in the returned struct.
+    /// Since sidecar files are immutable after atomic rename, a read-only mmap is safe.
+    pub fn from_mmap(mmap: memmap2::Mmap) -> std::io::Result<Self> {
+        let result = Self::from_bytes(&mmap)?;
+        Ok(Self {
+            fields: result.fields,
+            _mmap: Some(Arc::new(mmap)),
+        })
     }
 
     /// Returns the sorted entries for a specific field.
@@ -275,12 +293,17 @@ mod tests {
         ]
     }
 
+    fn make_reader(fields: std::collections::BTreeMap<String, Vec<SuggestEntry>>) -> SuggestReader {
+        SuggestReader {
+            fields,
+            _mmap: None,
+        }
+    }
+
     #[test]
     fn find_first_prefix_finds_exact_match() {
         let entries = make_entries();
-        let reader = SuggestReader {
-            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
-        };
+        let reader = make_reader(std::collections::BTreeMap::from([("title".to_string(), entries)]));
 
         // "elastic" exists
         assert_eq!(reader.find_first_prefix("title", "elastic"), Some(0));
@@ -295,9 +318,7 @@ mod tests {
     #[test]
     fn find_first_prefix_returns_none_for_non_matching_prefix() {
         let entries = make_entries();
-        let reader = SuggestReader {
-            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
-        };
+        let reader = make_reader(std::collections::BTreeMap::from([("title".to_string(), entries)]));
 
         // No term starts with "z"
         assert_eq!(reader.find_first_prefix("title", "z"), None);
@@ -307,9 +328,7 @@ mod tests {
 
     #[test]
     fn find_first_prefix_returns_none_for_empty_entries() {
-        let reader = SuggestReader {
-            fields: std::collections::BTreeMap::new(),
-        };
+        let reader = make_reader(std::collections::BTreeMap::new());
 
         assert_eq!(reader.find_first_prefix("title", "elastic"), None);
     }
@@ -317,9 +336,7 @@ mod tests {
     #[test]
     fn find_first_prefix_returns_none_for_missing_field() {
         let entries = make_entries();
-        let reader = SuggestReader {
-            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
-        };
+        let reader = make_reader(std::collections::BTreeMap::from([("title".to_string(), entries)]));
 
         assert_eq!(reader.find_first_prefix("body", "elastic"), None);
     }
@@ -327,9 +344,7 @@ mod tests {
     #[test]
     fn suggest_for_field_iterates_correctly() {
         let entries = make_entries();
-        let reader = SuggestReader {
-            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
-        };
+        let reader = make_reader(std::collections::BTreeMap::from([("title".to_string(), entries)]));
 
         let suggestions = reader.suggest_for_field("title", "elast");
 
@@ -341,9 +356,7 @@ mod tests {
     #[test]
     fn suggest_for_field_returns_empty_for_no_match() {
         let entries = make_entries();
-        let reader = SuggestReader {
-            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
-        };
+        let reader = make_reader(std::collections::BTreeMap::from([("title".to_string(), entries)]));
 
         let suggestions = reader.suggest_for_field("title", "z");
 
@@ -353,9 +366,7 @@ mod tests {
     #[test]
     fn suggest_for_field_stops_at_prefix_boundary() {
         let entries = make_entries();
-        let reader = SuggestReader {
-            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
-        };
+        let reader = make_reader(std::collections::BTreeMap::from([("title".to_string(), entries)]));
 
         // "elast" should only match "elastic" and "elasticsearch", not "kubernetes"
         let suggestions = reader.suggest_for_field("title", "elast");
@@ -411,9 +422,7 @@ mod tests {
     #[test]
     fn suggest_for_field_returns_empty_for_empty_prefix() {
         let entries = make_entries();
-        let reader = SuggestReader {
-            fields: std::collections::BTreeMap::from([("title".to_string(), entries)]),
-        };
+        let reader = make_reader(std::collections::BTreeMap::from([("title".to_string(), entries)]));
 
         // Empty prefix should return no results, not the entire vocabulary
         let suggestions = reader.suggest_for_field("title", "");
