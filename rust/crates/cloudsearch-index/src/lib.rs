@@ -3772,24 +3772,6 @@ fn compare_json_values(
     }
 }
 
-fn compare_hits(left: &SearchHit, right: &SearchHit, sort: &SortSpec) -> std::cmp::Ordering {
-    let left_value = left.source.get(&sort.field).and_then(comparable_value);
-    let right_value = right.source.get(&sort.field).and_then(comparable_value);
-
-    let ordering = match (left_value, right_value) {
-        (Some(left), Some(right)) => compare_sort_values(&left, &right, sort),
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, None) => left.id.cmp(&right.id),
-    };
-
-    if ordering == std::cmp::Ordering::Equal {
-        left.id.cmp(&right.id)
-    } else {
-        ordering
-    }
-}
-
 fn compare_sort_values(
     left: &ComparableValue,
     right: &ComparableValue,
