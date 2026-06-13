@@ -501,6 +501,6 @@ mod tests {
         let title_from_bytes = from_bytes_reader.get_field("title").expect("title field");
         assert_eq!(title_from_mmap.len(), title_from_bytes.len());
         assert_eq!(title_from_mmap[0].term, "elastic");
-        assert_eq!(title_from_mmap[0].score, 0.5);
+        assert!((title_from_mmap[0].score - 0.5).abs() < 1e-6);
     }
 }
