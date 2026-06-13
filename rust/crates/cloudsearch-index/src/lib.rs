@@ -17,6 +17,7 @@ use cloudsearch_storage::{
     write_doc_values as storage_write_doc_values, write_index_manifest, write_named_snapshot,
     write_positions as storage_write_positions, write_segment_snapshot,
 };
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 mod doc_values;
 mod doc_values_reader;
 use crate::doc_values::DocValuesWriter;
@@ -971,27 +972,51 @@ impl IndexHandle {
         }
         let bm25_ctx = Bm25Context::new(idf_map, avg_field_lens, k1, b);
 
-        let mut scored: Vec<(f32, &IndexDocument)> = self
-            .searchable_documents
-            .iter()
-            .filter(|(_, doc)| !self.is_expired(&doc.id, now))
-            .filter_map(|(_, doc)| {
-                // Exclude source doc from MLT results (must_not at search level, not via query)
+        let mlt_doc_id_to_exclude = mlt_doc_id_to_exclude.clone();
+        let positions_readers = &self.positions_readers;
+        // Collect doc IDs for parallel scoring — String is Send+Sync, so we can
+        // collect (score, doc_id) tuples from a parallel iterator without issues.
+        // Source lookups happen sequentially after scoring.
+        let doc_ids: Vec<String> = self.searchable_documents.keys().cloned().collect();
+
+        // Parallel scoring: (score, doc_id) — only Send+Sync types cross thread boundaries
+        let scored: Vec<(f32, String)> = doc_ids
+            .into_par_iter()
+            .filter_map(|doc_id| {
+                if self.is_expired(&doc_id, now) {
+                    return None;
+                }
                 if let Some(ref exclude_id) = mlt_doc_id_to_exclude
-                    && doc.id == *exclude_id
+                    && doc_id == *exclude_id
                 {
                     return None;
                 }
-                let doc_id_hash = hash_doc_id(&doc.id);
-                score_query(doc, &query, doc_id_hash, &self.positions_readers, &bm25_ctx)
-                    .map(|s| (s, doc))
+                let doc = self.searchable_documents.get(&doc_id)?;
+                let doc_id_hash = hash_doc_id(&doc_id);
+                score_query(doc, &query, doc_id_hash, positions_readers, &bm25_ctx)
+                    .map(|s| (s, doc_id))
             })
             .collect();
 
         let total = scored.len();
 
-        let matching_documents: Vec<IndexDocument> =
-            scored.iter().map(|(_, d)| (*d).clone()).collect();
+        // Single-pass: build (score, doc_id, source) tuples and matching_documents together
+        let scored_raw = scored;
+        let mut scored_with_source: Vec<(f32, String, serde_json::Value)> =
+            Vec::with_capacity(scored_raw.len());
+        let mut matching_documents: Vec<IndexDocument> = Vec::with_capacity(scored_raw.len());
+        for (score, doc_id) in scored_raw {
+            let Some(doc) = self.searchable_documents.get(&doc_id) else {
+                continue;
+            };
+            let source = doc.source.clone();
+            matching_documents.push(IndexDocument {
+                id: doc_id.clone(),
+                source: source.clone(),
+            });
+            scored_with_source.push((score, doc_id, source));
+        }
+        let mut scored = scored_with_source;
         let aggregations = compute_aggregations(
             &matching_documents,
             request.aggs.as_ref(),
@@ -999,37 +1024,40 @@ impl IndexHandle {
         );
 
         if let Some(sort) = &request.sort {
-            scored.sort_by(|(_, l), (_, r)| {
-                let lh = SearchHit {
-                    id: l.id.clone(),
-                    source: l.source.clone(),
-                    score: None,
-                    highlight: None,
-                    sort_values: None,
+            scored.sort_by(|(_, l_id, l_src), (_, r_id, r_src)| {
+                // Avoid cloning full source — extract sort field values directly
+                let left_value = l_src.get(&sort.field).and_then(comparable_value);
+                let right_value = r_src.get(&sort.field).and_then(comparable_value);
+                let ordering = match (left_value, right_value) {
+                    (Some(left), Some(right)) => compare_sort_values(&left, &right, sort),
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, None) => l_id.cmp(r_id),
                 };
-                let rh = SearchHit {
-                    id: r.id.clone(),
-                    source: r.source.clone(),
-                    score: None,
-                    highlight: None,
-                    sort_values: None,
-                };
-                compare_hits(&lh, &rh, sort)
+                if ordering == std::cmp::Ordering::Equal {
+                    l_id.cmp(r_id)
+                } else {
+                    ordering
+                }
             });
         } else {
-            scored.sort_by(|(s1, d1), (s2, d2)| {
+            scored.sort_by(|(s1, id1, _), (s2, id2, _)| {
                 s2.partial_cmp(s1)
                     .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| d1.id.cmp(&d2.id))
+                    .then_with(|| id1.cmp(id2))
             });
         }
 
         let from = if let Some(cursor) = &request.search_after {
-            // For search_after, find position where doc > cursor
             scored
                 .iter()
-                .position(|(score, doc)| {
-                    let doc_sort_values = compute_sort_values(doc, request.sort.as_ref(), *score);
+                .position(|(score, doc_id, doc_src)| {
+                    let tmp_doc = IndexDocument {
+                        id: doc_id.clone(),
+                        source: doc_src.clone(),
+                    };
+                    let doc_sort_values =
+                        compute_sort_values(&tmp_doc, request.sort.as_ref(), *score);
                     compare_sort_values_list(&doc_sort_values, cursor, request.sort.as_ref())
                         == std::cmp::Ordering::Greater
                 })
@@ -1043,16 +1071,20 @@ impl IndexHandle {
             .into_iter()
             .skip(from)
             .take(size)
-            .map(|(score, doc)| {
-                let doc_id_hash = hash_doc_id(&doc.id);
+            .map(|(score, doc_id, doc_src)| {
+                let tmp_doc = IndexDocument {
+                    id: doc_id.clone(),
+                    source: doc_src.clone(),
+                };
+                let doc_id_hash = hash_doc_id(&doc_id);
                 let highlight = match &self.positions_readers {
-                    r if !r.is_empty() => extract_highlight(doc, doc_id_hash, r, &query),
+                    r if !r.is_empty() => extract_highlight(&tmp_doc, doc_id_hash, r, &query),
                     _ => None,
                 };
-                let sort_values = compute_sort_values(doc, request.sort.as_ref(), score);
+                let sort_values = compute_sort_values(&tmp_doc, request.sort.as_ref(), score);
                 SearchHit {
-                    id: doc.id.clone(),
-                    source: doc.source.clone(),
+                    id: doc_id.clone(),
+                    source: doc_src.clone(),
                     score: Some(score),
                     highlight,
                     sort_values: Some(sort_values),
@@ -3735,24 +3767,6 @@ fn compare_json_values(
             SortOrder::Asc => ordering,
             SortOrder::Desc => ordering.reverse(),
         }
-    } else {
-        ordering
-    }
-}
-
-fn compare_hits(left: &SearchHit, right: &SearchHit, sort: &SortSpec) -> std::cmp::Ordering {
-    let left_value = left.source.get(&sort.field).and_then(comparable_value);
-    let right_value = right.source.get(&sort.field).and_then(comparable_value);
-
-    let ordering = match (left_value, right_value) {
-        (Some(left), Some(right)) => compare_sort_values(&left, &right, sort),
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, None) => left.id.cmp(&right.id),
-    };
-
-    if ordering == std::cmp::Ordering::Equal {
-        left.id.cmp(&right.id)
     } else {
         ordering
     }

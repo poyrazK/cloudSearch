@@ -24,6 +24,14 @@ Exit criteria:
 - search documents
 - recover from restart without data loss beyond chosen durability guarantees
 
+## Phase 1b - Vertical Scaling
+
+Squeeze single-node read throughput before distributed scaling.
+
+- parallel segment search ✓ (rayon-based parallel document scoring)
+- mmap-backed sidecar readers (positions.bin, suggest.bin)
+- parallel suggest reader lookups
+
 ## Phase 2 - Production-Grade Single-Node Engine
 
 - bulk ingestion
