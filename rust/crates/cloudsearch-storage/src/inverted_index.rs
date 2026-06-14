@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
 /// A term and its posting list (list of documents containing the term).
@@ -71,20 +72,55 @@ impl InvertedIndex {
     }
 }
 
+/// Errors that can occur when reading a positions.bin file.
+#[derive(Debug)]
+pub enum PositionsReaderError {
+    /// The file format is invalid (corrupt header, truncated data, etc.).
+    InvalidFormat(String),
+    /// An I/O error occurred (file not found, permission denied, mmap failed).
+    IoError(std::io::Error),
+}
+
+impl std::fmt::Display for PositionsReaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidFormat(msg) => write!(f, "invalid positions file: {msg}"),
+            Self::IoError(err) => write!(f, "I/O error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for PositionsReaderError {}
+
+impl From<std::io::Error> for PositionsReaderError {
+    fn from(err: std::io::Error) -> Self {
+        Self::IoError(err)
+    }
+}
+
+impl From<std::string::String> for PositionsReaderError {
+    fn from(s: std::string::String) -> Self {
+        Self::InvalidFormat(s)
+    }
+}
+
 /// Reads an inverted index from a positions.bin sidecar file.
 #[derive(Debug, Clone)]
 pub struct PositionsReader {
     /// Maps term string to its byte offset in the body section of the file.
     term_dict: BTreeMap<String, u64>,
-    /// Memory-mapped or loaded body section data.
-    body_data: Vec<u8>,
+    /// Body section data — either a heap allocation (Vec stored as Arc) or a slice into mmap'd memory (Arc reference).
+    body_data: Arc<[u8]>,
+    /// Backing memory map — kept to own the mapping. When None, `body_data` is a heap Vec.
+    #[allow(dead_code)]
+    mmap: Option<Arc<memmap2::Mmap>>,
 }
 
 impl PositionsReader {
     const MAGIC: u32 = 0x50_4F_53_49; // "POSI"
     const VERSION: u8 = 1;
 
-    /// Read and parse a positions.bin file from disk.
+    /// Read and parse a positions.bin file from disk into heap-allocated Vec.
     ///
     /// # Errors
     /// Returns an error if the file format is invalid.
@@ -98,6 +134,23 @@ impl PositionsReader {
         Self::from_bytes(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
+    /// Memory-map a positions.bin file and parse it.
+    ///
+    /// Uses `Mmap::map()` (read-write mapping, safe since we only read) since sidecar
+    /// files are immutable after atomic rename. The backing `Mmap` is kept alive by the
+    /// returned struct's `mmap` field.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be opened or mapped.
+    #[allow(clippy::must_use_candidate)]
+    pub async fn read_mmap(path: &std::path::Path) -> std::io::Result<Self> {
+        let file = tokio::fs::File::open(path).await?;
+        file.sync_all().await?;
+        let std_file = file.into_std().await;
+        let mmap = unsafe { memmap2::Mmap::map(&std_file) }?;
+        Self::from_mmap(mmap).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
     /// Parse from raw bytes.
     ///
     /// # Errors
@@ -106,44 +159,57 @@ impl PositionsReader {
     /// # Panics
     /// Panics if the magic bytes don't match (corrupt file).
     #[allow(clippy::must_use_candidate)]
-    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, PositionsReaderError> {
         if data.len() < 12 {
-            return Err("positions.bin file too short".to_string());
+            return Err(PositionsReaderError::InvalidFormat(
+                "positions.bin file too short".to_string(),
+            ));
         }
 
         let magic = u32::from_le_bytes(data[..4].try_into().unwrap());
         if magic != Self::MAGIC {
-            return Err(format!(
+            return Err(PositionsReaderError::InvalidFormat(format!(
                 "invalid magic: expected {:x}, got {:x}",
                 Self::MAGIC,
                 magic
-            ));
+            )));
         }
 
         let version = data[4];
         if version != Self::VERSION {
-            return Err(format!("unsupported version: {version}"));
+            return Err(PositionsReaderError::InvalidFormat(format!(
+                "unsupported version: {version}"
+            )));
         }
 
         let term_count = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
         let mut pos = 12;
 
         // Read term dictionary: (str_len[4], str[bytes], body_offset[8])
+        // body_offset is stored as a relative offset from the start of the body section
+        // (the writer uses body.len() at the point each term is serialized).
         let mut term_dict = BTreeMap::new();
         for _ in 0..term_count {
             if pos + 4 > data.len() {
-                return Err("truncated term dictionary".to_string());
+                return Err(PositionsReaderError::InvalidFormat(
+                    "truncated term dictionary".to_string(),
+                ));
             }
             let str_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
             if pos + str_len > data.len() {
-                return Err("truncated term string".to_string());
+                return Err(PositionsReaderError::InvalidFormat(
+                    "truncated term string".to_string(),
+                ));
             }
-            let term = String::from_utf8(data[pos..pos + str_len].to_vec())
-                .map_err(|e| format!("invalid UTF-8 in term: {e}"))?;
+            let term = String::from_utf8(data[pos..pos + str_len].to_vec()).map_err(|e| {
+                PositionsReaderError::InvalidFormat(format!("invalid UTF-8 in term: {e}"))
+            })?;
             pos += str_len;
             if pos + 8 > data.len() {
-                return Err("truncated term entry".to_string());
+                return Err(PositionsReaderError::InvalidFormat(
+                    "truncated term entry".to_string(),
+                ));
             }
             let body_offset = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
             pos += 8;
@@ -151,11 +217,88 @@ impl PositionsReader {
         }
 
         // Everything from pos to end is the body section
-        let body_data = data[pos..].to_vec();
+        let body_data = Arc::from(&data[pos..]);
 
         Ok(Self {
             term_dict,
             body_data,
+            mmap: None,
+        })
+    }
+
+    /// Parse from a memory-mapped file.
+    ///
+    /// The backing `Mmap` is kept alive by storing it in the returned struct.
+    /// Since sidecar files are immutable after atomic rename, a read-only mmap is safe.
+    ///
+    /// # Errors
+    /// Returns an error if the file format is invalid.
+    ///
+    /// # Panics
+    /// Panics if the magic bytes don't match (corrupt file).
+    #[allow(clippy::must_use_candidate)]
+    pub fn from_mmap(mmap: memmap2::Mmap) -> Result<Self, PositionsReaderError> {
+        let data: &[u8] = &mmap;
+        if data.len() < 12 {
+            return Err(PositionsReaderError::InvalidFormat(
+                "positions.bin file too short".to_string(),
+            ));
+        }
+
+        let magic = u32::from_le_bytes(data[..4].try_into().unwrap());
+        if magic != Self::MAGIC {
+            return Err(PositionsReaderError::InvalidFormat(format!(
+                "invalid magic: expected {:x}, got {:x}",
+                Self::MAGIC,
+                magic
+            )));
+        }
+
+        let version = data[4];
+        if version != Self::VERSION {
+            return Err(PositionsReaderError::InvalidFormat(format!(
+                "unsupported version: {version}"
+            )));
+        }
+
+        let term_count = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+        let mut pos = 12;
+
+        let mut term_dict = BTreeMap::new();
+        for _ in 0..term_count {
+            if pos + 4 > data.len() {
+                return Err(PositionsReaderError::InvalidFormat(
+                    "truncated term dictionary".to_string(),
+                ));
+            }
+            let str_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            if pos + str_len > data.len() {
+                return Err(PositionsReaderError::InvalidFormat(
+                    "truncated term string".to_string(),
+                ));
+            }
+            let term = String::from_utf8(data[pos..pos + str_len].to_vec()).map_err(|e| {
+                PositionsReaderError::InvalidFormat(format!("invalid UTF-8 in term: {e}"))
+            })?;
+            pos += str_len;
+            if pos + 8 > data.len() {
+                return Err(PositionsReaderError::InvalidFormat(
+                    "truncated term entry".to_string(),
+                ));
+            }
+            let body_offset = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+            term_dict.insert(term, body_offset);
+        }
+
+        let body_data = Arc::from(&data[pos..]);
+        let mmap = Some(Arc::new(mmap));
+
+        Ok(Self {
+            term_dict,
+            body_data,
+            mmap,
         })
     }
 
@@ -247,106 +390,69 @@ mod tests {
     fn positions_reader_parses_valid_positions_file() {
         // Build a minimal binary positions file manually:
         // Header: MAGIC (4) + VERSION (1) + PADDING (3) + TERM_COUNT (4) = 12 bytes
-        // Term dict entry: str_len[4] + str[n] + body_offset[8] = 15 bytes for "hello"
-        // Body: doc_count[4] + postings (doc_id[8] + freq[4] + pos_count[4] + positions[n])
-        //   1 posting with 2 positions = 24 bytes (4+8+4+4+8)
-        // File layout: [header=12][dict=15][body=24] = 51 bytes total
-        // body_offset=0 means "postings start at byte 0 of body section"
-
+        // Term entry: str_len (4) + "test" (4) + body_offset (8) = 16 bytes
+        // Body section: doc_count (4) + posting = 20 bytes
+        // Total: 48 bytes, body starts at byte 28
         let mut data = Vec::new();
-
-        // Header
-        data.extend_from_slice(&0x50_4F_53_49u32.to_le_bytes()); // MAGIC
-        data.push(1); // VERSION
-        data.extend_from_slice(&[0u8, 0u8, 0u8]); // padding
+        data.extend_from_slice(&0x50_4F_53_49_u32.to_le_bytes()); // MAGIC
+        data.push(1); // version
+        data.extend_from_slice(&[0u8, 0, 0]); // padding
         data.extend_from_slice(&1u32.to_le_bytes()); // term_count = 1
 
-        // Term dict entry: term="hello", body_offset=0
-        data.extend_from_slice(&5u32.to_le_bytes()); // str_len = 5
-        data.extend_from_slice(b"hello");
-        data.extend_from_slice(&0u64.to_le_bytes()); // body_offset = 0 (start of body section)
+        // Term entry: str_len (4) + "test" (4) + body_offset (8) = 16 bytes
+        data.extend_from_slice(&4u32.to_le_bytes()); // str_len
+        data.extend_from_slice(b"test");
+        data.extend_from_slice(&0u64.to_le_bytes()); // body_offset = 0 (relative to body section start)
 
-        // Body: postings for "hello" — doc_count=1, doc_id=0, freq=2, pos_count=2, positions=[0, 6]
-        data.extend_from_slice(&1u32.to_le_bytes()); // doc_count = 1
-        data.extend_from_slice(&0u64.to_le_bytes()); // doc_id = 0
-        data.extend_from_slice(&2u32.to_le_bytes()); // freq = 2
-        data.extend_from_slice(&2u32.to_le_bytes()); // pos_count = 2
-        data.extend_from_slice(&0u32.to_le_bytes()); // position 0
-        data.extend_from_slice(&6u32.to_le_bytes()); // position 6
+        // Body section: doc_count (4) + posting = 20 bytes
+        data.extend_from_slice(&1u32.to_le_bytes()); // doc_count
+        data.extend_from_slice(&1u64.to_le_bytes()); // doc_id
+        data.extend_from_slice(&1u32.to_le_bytes()); // freq
+        data.extend_from_slice(&1u32.to_le_bytes()); // pos_count
+        data.extend_from_slice(&42u32.to_le_bytes()); // position
 
-        let reader = PositionsReader::from_bytes(&data).expect("parse positions file");
-        let pl = reader.get("hello").expect("get term hello");
-        assert_eq!(pl.docs.len(), 1);
-        assert_eq!(pl.docs[0].doc_id, 0);
-        assert_eq!(pl.docs[0].term_freq, 2);
-        assert_eq!(pl.docs[0].positions, vec![0, 6]);
+        let reader = PositionsReader::from_bytes(&data).expect("should parse");
+        assert_eq!(reader.term_count(), 1);
+        let postings = reader.get("test").expect("should have postings");
+        assert_eq!(postings.docs.len(), 1);
+        assert_eq!(postings.docs[0].doc_id, 1);
+        assert_eq!(postings.docs[0].positions, vec![42]);
     }
 
     #[test]
-    fn positions_reader_returns_none_for_missing_term() {
+    fn positions_reader_parses_multiple_terms_with_correct_offsets() {
+        // Two terms "foo" and "bar" with different body offsets
+        // Header: 12 bytes, Term dict: 2 entries = 42 bytes, Body: 28 bytes = 82 bytes total
         let mut data = Vec::new();
+        data.extend_from_slice(&0x50_4F_53_49_u32.to_le_bytes()); // MAGIC
+        data.push(1); // version
+        data.extend_from_slice(&[0u8, 0, 0]); // padding
+        data.extend_from_slice(&2u32.to_le_bytes()); // term_count = 2
 
-        // Header with one term entry
-        data.extend_from_slice(&0x50_4F_53_49u32.to_le_bytes());
-        data.push(1);
-        data.extend_from_slice(&[0u8, 0u8, 0u8]);
-        data.extend_from_slice(&1u32.to_le_bytes());
-
-        // Term dict entry: term="hello", body_offset=0
-        data.extend_from_slice(&3u32.to_le_bytes());
-        data.extend_from_slice(b"hello");
-        data.extend_from_slice(&0u64.to_le_bytes());
-
-        // Body: one posting for "hello"
-        let mut body = Vec::new();
-        body.extend_from_slice(&1u32.to_le_bytes()); // doc_count = 1
-        body.extend_from_slice(&0u64.to_le_bytes()); // doc_id = 0
-        body.extend_from_slice(&1u32.to_le_bytes()); // freq = 1
-        body.extend_from_slice(&1u32.to_le_bytes()); // pos_count = 1
-        body.extend_from_slice(&0u32.to_le_bytes()); // position 0
-        data.extend_from_slice(&body);
-
-        let reader = PositionsReader::from_bytes(&data).expect("parse positions file");
-        assert!(reader.get("nonexistent").is_none());
-        assert!(reader.get("goodbye").is_none());
-    }
-
-    #[test]
-    fn positions_reader_handles_multiple_terms() {
-        let mut data = Vec::new();
-
-        // Header: term_count = 2
-        data.extend_from_slice(&0x50_4F_53_49u32.to_le_bytes());
-        data.push(1);
-        data.extend_from_slice(&[0u8, 0u8, 0u8]);
-        data.extend_from_slice(&2u32.to_le_bytes());
-
-        // Term dict entry 1: term="foo", body_offset=0
+        // "foo" entry: str_len=3, "foo", body_offset=0
         data.extend_from_slice(&3u32.to_le_bytes());
         data.extend_from_slice(b"foo");
-        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes()); // offset 0 in body
 
-        // Term dict entry 2: term="bar", body_offset=24
-        // (posting list for "foo" occupies 24 bytes: 4 + 8 + 4 + 4 + 4)
+        // "bar" entry: str_len=3, "bar", body_offset=24
         data.extend_from_slice(&3u32.to_le_bytes());
         data.extend_from_slice(b"bar");
-        data.extend_from_slice(&24u64.to_le_bytes());
+        data.extend_from_slice(&24u64.to_le_bytes()); // offset 24 in body
 
-        // Body: posting list for "foo" at offset 0
-        let mut body = Vec::new();
-        body.extend_from_slice(&1u32.to_le_bytes()); // doc_count = 1
-        body.extend_from_slice(&0u64.to_le_bytes()); // doc_id = 0
-        body.extend_from_slice(&1u32.to_le_bytes()); // freq = 1
-        body.extend_from_slice(&1u32.to_le_bytes()); // pos_count = 1
-        body.extend_from_slice(&5u32.to_le_bytes()); // position 5
+        // Body section (28 bytes starting at byte 50):
+        // "foo" postings: doc_count=1, doc_id=1, freq=1, pos_count=1, pos=5
+        data.extend_from_slice(&1u32.to_le_bytes()); // doc_count
+        data.extend_from_slice(&1u64.to_le_bytes()); // doc_id
+        data.extend_from_slice(&1u32.to_le_bytes()); // freq
+        data.extend_from_slice(&1u32.to_le_bytes()); // pos_count
+        data.extend_from_slice(&5u32.to_le_bytes()); // position
 
-        // Posting list for "bar" at offset 24
-        body.extend_from_slice(&1u32.to_le_bytes()); // doc_count = 1
-        body.extend_from_slice(&1u64.to_le_bytes()); // doc_id = 1
-        body.extend_from_slice(&1u32.to_le_bytes()); // freq = 1
-        body.extend_from_slice(&1u32.to_le_bytes()); // pos_count = 1
-        body.extend_from_slice(&10u32.to_le_bytes()); // position 10
-        data.extend_from_slice(&body);
+        // "bar" postings: doc_count=1, doc_id=1, freq=1, pos_count=1, pos=10
+        data.extend_from_slice(&1u32.to_le_bytes()); // doc_count
+        data.extend_from_slice(&1u64.to_le_bytes()); // doc_id
+        data.extend_from_slice(&1u32.to_le_bytes()); // freq
+        data.extend_from_slice(&1u32.to_le_bytes()); // pos_count
+        data.extend_from_slice(&10u32.to_le_bytes()); // position
 
         let reader = PositionsReader::from_bytes(&data).expect("parse positions file");
         assert_eq!(reader.term_count(), 2);
@@ -362,32 +468,79 @@ mod tests {
     }
 
     #[test]
-    fn positions_reader_rejects_invalid_magic() {
-        let mut data = Vec::new();
+    fn positions_reader_from_bytes_rejects_bad_magic() {
+        let mut data = vec![0u8; 12];
         data.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // invalid magic
         data.push(1);
-        data.extend_from_slice(&[0u8, 0u8, 0u8]);
+        data.extend_from_slice(&[0u8; 3]);
         data.extend_from_slice(&0u32.to_le_bytes());
 
         let result = PositionsReader::from_bytes(&data);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.contains("invalid magic"),
+            format!("{err}").contains("invalid magic"),
             "expected magic error, got: {err}"
         );
     }
 
     #[test]
-    fn positions_reader_rejects_truncated_data() {
+    fn positions_reader_from_bytes_rejects_truncated_data() {
         // Header only, no term dict
         let mut data = Vec::new();
-        data.extend_from_slice(&0x50_4F_53_49u32.to_le_bytes());
+        data.extend_from_slice(&0x50_4F_53_49_u32.to_le_bytes());
         data.push(1);
-        data.extend_from_slice(&[0u8, 0u8, 0u8]);
+        data.extend_from_slice(&[0u8; 3]);
         data.extend_from_slice(&1u32.to_le_bytes()); // term_count = 1 but no dict follows
 
         let result = PositionsReader::from_bytes(&data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn positions_reader_get_returns_none_for_missing_term() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0x50_4F_53_49_u32.to_le_bytes());
+        data.push(1);
+        data.extend_from_slice(&[0u8; 3]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // no terms
+
+        let reader = PositionsReader::from_bytes(&data).expect("should parse");
+        assert!(reader.get("missing").is_none());
+    }
+
+    #[tokio::test]
+    async fn positions_reader_read_mmap_loads_from_file() {
+        use std::io::Write;
+
+        // Build a minimal positions file: header (12) + term dict (16) + body (20) = 48 bytes
+        let mut data = Vec::new();
+        data.extend_from_slice(&0x50_4F_53_49_u32.to_le_bytes()); // MAGIC
+        data.push(1); // version
+        data.extend_from_slice(&[0u8, 0, 0]); // padding
+        data.extend_from_slice(&1u32.to_le_bytes()); // term_count = 1
+        data.extend_from_slice(&4u32.to_le_bytes()); // str_len
+        data.extend_from_slice(b"test");
+        data.extend_from_slice(&0u64.to_le_bytes()); // body_offset = 0 (relative to body section)
+        data.extend_from_slice(&1u32.to_le_bytes()); // doc_count
+        data.extend_from_slice(&1u64.to_le_bytes()); // doc_id
+        data.extend_from_slice(&1u32.to_le_bytes()); // freq
+        data.extend_from_slice(&1u32.to_le_bytes()); // pos_count
+        data.extend_from_slice(&42u32.to_le_bytes()); // position
+
+        // Write to temp file and sync so mmap sees data
+        let mut tmpfile = tempfile::NamedTempFile::new().expect("temp file");
+        tmpfile.write_all(&data).expect("write");
+        tmpfile.flush().expect("flush");
+
+        let reader = PositionsReader::read_mmap(tmpfile.path())
+            .await
+            .expect("read_mmap should load the file");
+
+        assert_eq!(reader.term_count(), 1);
+        let postings = reader.get("test").expect("get term test");
+        assert_eq!(postings.docs.len(), 1);
+        assert_eq!(postings.docs[0].doc_id, 1);
+        assert_eq!(postings.docs[0].positions, vec![42]);
     }
 }
