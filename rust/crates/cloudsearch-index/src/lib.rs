@@ -213,7 +213,7 @@ impl IndexCatalog {
         // Try mmap first (zero-copy, OS manages page cache)
         if let Ok(file) = tokio::fs::File::open(&path).await {
             let std_file = file.into_std().await;
-            std_file.sync_all().ok()?;
+            let _ = std_file.sync_all(); // best-effort sync; errors don't prevent fallback
             if let Ok(mmap) = unsafe { memmap2::Mmap::map(&std_file) }
                 && let Ok(reader) = SuggestReader::from_mmap(mmap)
                 && reader.fields().count() > 0
@@ -1618,7 +1618,7 @@ impl IndexHandle {
         // Try mmap first (zero-copy, OS manages page cache)
         if let Ok(file) = tokio::fs::File::open(&path).await {
             let std_file = file.into_std().await;
-            std_file.sync_all().ok()?;
+            let _ = std_file.sync_all(); // best-effort sync; errors don't prevent fallback
             if let Ok(mmap) = unsafe { memmap2::Mmap::map(&std_file) }
                 && let Ok(reader) = SuggestReader::from_mmap(mmap)
                 && reader.fields().count() > 0

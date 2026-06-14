@@ -109,9 +109,10 @@ impl From<std::string::String> for PositionsReaderError {
 pub struct PositionsReader {
     /// Maps term string to its byte offset in the body section of the file.
     term_dict: BTreeMap<String, u64>,
-    /// Body section data — either a heap allocation (vec) or a slice into mmap'd memory.
-    body_data: Vec<u8>,
+    /// Body section data — either a heap allocation (Vec stored as Arc) or a slice into mmap'd memory (Arc reference).
+    body_data: Arc<[u8]>,
     /// Backing memory map — kept to own the mapping. When None, `body_data` is a heap Vec.
+    #[allow(dead_code)]
     mmap: Option<Arc<memmap2::Mmap>>,
 }
 
@@ -216,7 +217,8 @@ impl PositionsReader {
         }
 
         // Everything from pos to end is the body section
-        let body_data = data[pos..].to_vec();
+        let body_data = Arc::from(&data[pos..]);
+
 
         Ok(Self {
             term_dict,
@@ -235,9 +237,67 @@ impl PositionsReader {
     #[allow(clippy::must_use_candidate)]
     pub fn from_mmap(mmap: memmap2::Mmap) -> Result<Self, PositionsReaderError> {
         let data: &[u8] = &mmap;
-        let mut reader = Self::from_bytes(data)?;
-        reader.mmap = Some(Arc::new(mmap));
-        Ok(reader)
+        if data.len() < 12 {
+            return Err(PositionsReaderError::InvalidFormat(
+                "positions.bin file too short".to_string(),
+            ));
+        }
+
+        let magic = u32::from_le_bytes(data[..4].try_into().unwrap());
+        if magic != Self::MAGIC {
+            return Err(PositionsReaderError::InvalidFormat(format!(
+                "invalid magic: expected {:x}, got {:x}",
+                Self::MAGIC,
+                magic
+            )));
+        }
+
+        let version = data[4];
+        if version != Self::VERSION {
+            return Err(PositionsReaderError::InvalidFormat(format!(
+                "unsupported version: {version}"
+            )));
+        }
+
+        let term_count = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+        let mut pos = 12;
+
+        let mut term_dict = BTreeMap::new();
+        for _ in 0..term_count {
+            if pos + 4 > data.len() {
+                return Err(PositionsReaderError::InvalidFormat(
+                    "truncated term dictionary".to_string(),
+                ));
+            }
+            let str_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            if pos + str_len > data.len() {
+                return Err(PositionsReaderError::InvalidFormat(
+                    "truncated term string".to_string(),
+                ));
+            }
+            let term = String::from_utf8(data[pos..pos + str_len].to_vec()).map_err(|e| {
+                PositionsReaderError::InvalidFormat(format!("invalid UTF-8 in term: {e}"))
+            })?;
+            pos += str_len;
+            if pos + 8 > data.len() {
+                return Err(PositionsReaderError::InvalidFormat(
+                    "truncated term entry".to_string(),
+                ));
+            }
+            let body_offset = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+            term_dict.insert(term, body_offset);
+        }
+
+        let body_data = Arc::from(&data[pos..]);
+        let mmap = Some(Arc::new(mmap));
+
+        Ok(Self {
+            term_dict,
+            body_data,
+            mmap,
+        })
     }
 
     /// Get postings for a term.
@@ -448,9 +508,11 @@ mod tests {
         assert!(reader.get("missing").is_none());
     }
 
-    #[test]
-    fn positions_reader_from_mmap_matches_from_bytes() {
-        // Build a positions file, write to temp, mmap it, compare with from_bytes
+    #[tokio::test]
+    async fn positions_reader_read_mmap_loads_from_file() {
+        use std::io::Write;
+
+        // Build a minimal positions file: header (12) + term dict (16) + body (20) = 48 bytes
         let mut data = Vec::new();
         data.extend_from_slice(&0x50_4F_53_49_u32.to_le_bytes()); // MAGIC
         data.push(1); // version
@@ -458,25 +520,26 @@ mod tests {
         data.extend_from_slice(&1u32.to_le_bytes()); // term_count = 1
         data.extend_from_slice(&4u32.to_le_bytes()); // str_len
         data.extend_from_slice(b"test");
-        data.extend_from_slice(&0u64.to_le_bytes()); // body_offset = 0
+        data.extend_from_slice(&0u64.to_le_bytes()); // body_offset = 0 (relative to body section)
         data.extend_from_slice(&1u32.to_le_bytes()); // doc_count
         data.extend_from_slice(&1u64.to_le_bytes()); // doc_id
         data.extend_from_slice(&1u32.to_le_bytes()); // freq
         data.extend_from_slice(&1u32.to_le_bytes()); // pos_count
         data.extend_from_slice(&42u32.to_le_bytes()); // position
 
-        // Write to temp file
+        // Write to temp file and sync so mmap sees data
         let mut tmpfile = tempfile::NamedTempFile::new().expect("temp file");
         tmpfile.write_all(&data).expect("write");
+        tmpfile.flush().expect("flush");
 
-        // Load via mmap
-        let mmap_reader = std::fs::read(tmpfile.path()).expect("read file");
-        let from_bytes_reader = PositionsReader::from_bytes(&mmap_reader).expect("from_bytes");
+        let reader = PositionsReader::read_mmap(tmpfile.path())
+            .await
+            .expect("read_mmap should load the file");
 
-        // Compare results
-        assert_eq!(from_bytes_reader.term_count(), 1);
-        let postings = from_bytes_reader.get("test").expect("get term");
+        assert_eq!(reader.term_count(), 1);
+        let postings = reader.get("test").expect("get term test");
         assert_eq!(postings.docs.len(), 1);
+        assert_eq!(postings.docs[0].doc_id, 1);
         assert_eq!(postings.docs[0].positions, vec![42]);
     }
 }

@@ -62,10 +62,6 @@ impl SuggestReader {
     ///
     /// # Errors
     /// Returns an error if the data is corrupted or has an invalid header.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the data is malformed (e.g., invalid UTF-8, truncated bytes).
     pub fn from_bytes(data: &[u8]) -> std::io::Result<Self> {
         let mut offset = 0usize;
 
