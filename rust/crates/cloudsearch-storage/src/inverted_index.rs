@@ -385,7 +385,6 @@ impl PositionsReader {
 #[cfg(test)]
 mod tests {
     use super::PositionsReader;
-    use std::io::Write;
 
     #[test]
     fn positions_reader_parses_valid_positions_file() {
