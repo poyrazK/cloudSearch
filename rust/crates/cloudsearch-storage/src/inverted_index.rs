@@ -219,7 +219,6 @@ impl PositionsReader {
         // Everything from pos to end is the body section
         let body_data = Arc::from(&data[pos..]);
 
-
         Ok(Self {
             term_dict,
             body_data,
@@ -234,6 +233,9 @@ impl PositionsReader {
     ///
     /// # Errors
     /// Returns an error if the file format is invalid.
+    ///
+    /// # Panics
+    /// Panics if the magic bytes don't match (corrupt file).
     #[allow(clippy::must_use_candidate)]
     pub fn from_mmap(mmap: memmap2::Mmap) -> Result<Self, PositionsReaderError> {
         let data: &[u8] = &mmap;
